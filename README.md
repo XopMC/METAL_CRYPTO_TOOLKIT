@@ -510,7 +510,7 @@ Rules that matter:
 
 ## Address conversion tools
 
-The `tools/` directory contains 14 small programs that turn printable cryptocurrency addresses or encoded values into the exact binary bytes written as lowercase hex. These programs do not search for keys and do not create Bloom or XOR filters. Their job is only to validate and decode the source list before it is passed to a filter builder.
+The `tools/` directory contains 14 small programs that validate printable cryptocurrency addresses or encoded values and derive the binary comparison value required by the selected target branch. They write that value as lowercase hex. They do not search for keys and do not create Bloom or XOR filters. Their only job is to prepare a clean, homogeneous source list for a filter builder.
 
 All converters use the same interface:
 
@@ -524,35 +524,46 @@ TOOL -h
 - `-t N` selects from 1 to 256 worker threads; the default is the Mac's logical processor count;
 - leading/trailing whitespace and CRLF line endings are accepted, while empty lines are ignored;
 - valid values are written in their original order, one lowercase hex value per line;
-- rejected source lines are written unchanged to `name-invalid.txt`; that file is created only when at least one line is rejected;
+- rejected source lines are written to `name-invalid.txt` after leading and trailing whitespace is removed; that file is created only when at least one line is rejected;
 - individual invalid lines do not make the whole command fail, but CLI, file, and internal errors return exit code `1`.
 
 The first valid result fixes the byte width of the output file. Any later valid address that decodes to another width is moved to `-invalid.txt`. This prevents a 20-byte target and a 32-byte target from being mixed accidentally.
 
 When built from source, a binary is placed at `tools/<project>/bin/<tool>`. In the release archive, all 14 ready-to-run binaries are directly inside the unpacked `tools/` directory.
 
-| Tool | Accepted input | Hex result | Related `-c` target |
+| Tool | Accepted input | Hex result | Compatible Toolkit branch |
 | --- | --- | --- | --- |
-| `cardano_address_to_hex` | Cardano Shelley Bech32 or Byron Base58 with CBOR/CRC validation | SHA-256 of the decoded address, 32 bytes / 64 hex characters | `a` |
-| `algorand_address_to_hex` | 58-character Algorand Base32 address with SHA-512/256 checksum | 32-byte public key / 64 hex characters | no direct target in v14 |
-| `multicoin_base58_bech32_address_to_hex` | Multicurrency Bitcoin-like Base58Check, SegWit Bech32/Bech32m, CashAddr, or raw 20/32-byte hex | 20-byte matcher for supported addresses; raw hex keeps its original 20/32-byte width | `c`, `u`, `s`, `p`, or `r` |
-| `base64_data_to_hex` | Strict Base64 or Base64URL, padded or unpadded | decoded bytes; one width per file | no fixed target family |
-| `cosmos_bnb_address_to_hex` | Cosmos-family Bech32 or raw 20-byte hex | 20-byte payload / 40 hex characters | no direct target in v14 |
-| `polkadot_kusama_address_to_hex` | SS58 with a one- or two-byte network prefix and Blake2b checksum | 32-byte account ID / 64 hex characters | `d` |
-| `filecoin_address_to_hex` | Filecoin `f1`, `t1`, `f410`, or `t410` address with Blake2b checksum | 20-byte payload / 40 hex characters | `f` |
-| `solana_address_to_hex` | Base58 public key, exactly 32 decoded bytes | 32-byte public key / 64 hex characters | `S` |
-| `stellar_address_to_hex` | Stellar `G...` account or muxed `M...` StrKey with CRC16 | underlying 32-byte ed25519 public key / 64 hex characters | no direct target in v14 |
-| `stacks_address_to_hex` | Stacks mainnet/testnet C32Check address | 20-byte hash160 / 40 hex characters | no direct target in v14 |
-| `ton_address_to_hex` | TON friendly Base64/Base64URL, `workchain:hex`, or raw 32-byte hex | 32-byte account ID / 64 hex characters | `T` |
-| `tron_address_to_hex` | Tron Base58Check address beginning with `T`, or raw 20-byte hex | 20-byte Ethereum-style account ID / 40 hex characters | `e` |
-| `xrp_address_to_hex` | XRP Classic Base58Check or raw 20-byte hex | 20-byte account ID / 40 hex characters | `X` |
-| `tezos_address_to_hex` | Tezos `tz1` or `tz2` Base58Check address | 20-byte key hash / 40 hex characters | `Z` |
+| `cardano_address_to_hex` | Cardano Shelley Bech32 or Byron Base58 with CBOR/CRC validation | SHA-256 of the decoded address, 32 bytes / 64 hex characters | `-c a` with the matching `-ada-type` |
+| `algorand_address_to_hex` | 58-character Algorand Base32 address with SHA-512/256 checksum | raw ed25519 public key, 32 bytes / 64 hex characters | `-c S` |
+| `multicoin_base58_bech32_address_to_hex` | Bitcoin-like Base58Check, SegWit Bech32/Bech32m, CashAddr, or raw 20/32-byte hex | 20-byte matcher for decoded addresses; raw hex keeps its 20/32-byte width | `-c c`, `u`, `s`, `p`, or `r`, depending on the address construction |
+| `base64_data_to_hex` | Strict Base64 or Base64URL, padded or unpadded | decoded bytes; one width per file | determined by what the decoded bytes represent |
+| `cosmos_bnb_address_to_hex` | Bech32 with a 20-byte payload or raw 20-byte hex | 20-byte payload / 40 hex characters | `-c c` for ordinary secp256k1 account addresses |
+| `polkadot_kusama_address_to_hex` | SS58 containing a 32-byte account ID and a one- or two-byte network prefix | 32-byte account ID / 64 hex characters | `-c d`, with `-dot-type 1` or `2` |
+| `filecoin_address_to_hex` | Filecoin `f1`, `t1`, `f410`, or `t410` with Blake2b checksum | 20-byte payload / 40 hex characters | `-c f -fil-type 1/2`; delegated `f410/t410` also match `-c e` |
+| `solana_address_to_hex` | Base58 public key, exactly 32 decoded bytes | raw ed25519 public key, 32 bytes / 64 hex characters | `-c S` |
+| `stellar_address_to_hex` | Stellar `G...` account or muxed `M...` StrKey with CRC16 | underlying raw ed25519 public key, 32 bytes / 64 hex characters | `-c S` |
+| `stacks_address_to_hex` | Stacks `SP`, `ST`, `SM`, or `SN` C32Check address | 20-byte HASH160 / 40 hex characters | `SP/ST`: `-c c` or `u`; `SM/SN`: no generic single-key branch |
+| `ton_address_to_hex` | TON friendly Base64/Base64URL, `workchain:hex`, or raw 32-byte hex | 32-byte account ID / 64 hex characters | `-c T` with the matching `-ton-type` |
+| `tron_address_to_hex` | Tron Base58Check address beginning with `T`, or raw 20-byte hex | Ethereum-compatible account ID, 20 bytes / 40 hex characters | `-c e` |
+| `xrp_address_to_hex` | XRP Classic Base58Check or raw 20-byte hex | 20-byte account ID / 40 hex characters | `-c X` with `-xrp-type 1` or `2` |
+| `tezos_address_to_hex` | Tezos `tz1` or `tz2` Base58Check address | 20-byte key hash / 40 hex characters | `-c Z`; `tz1` uses `-xtz-type 2`, `tz2` uses `1` |
+
+### Binary compatibility and result formatting
+
+The table describes compatible comparison bytes, not a promise that the Toolkit will print the original network's address format. Several networks intentionally share the same cryptographic payload:
+
+- `-c S` compares a raw 32-byte ed25519 public key. Solana, Algorand, and Stellar target files can therefore use this branch, but `-save` labels and encodes the result as Solana;
+- `-c c` compares HASH160 of a compressed secp256k1 public key. The same 20-byte value is used by ordinary secp256k1 Cosmos/BNB accounts and Stacks P2PKH accounts, but `-save` produces Bitcoin address forms;
+- `-c e` compares the 20-byte Keccak-derived EVM account value. Tron and Filecoin delegated `f410/t410` addresses contain that same value, but `-save` produces the Ethereum representation;
+- selecting a compatible `-c` branch does not select a wallet derivation algorithm. The input mode, seed interpretation, derivation path, curve, and subtype must still reproduce the key that created the source address.
 
 ### Each converter in detail
 
 #### `cardano_address_to_hex` - Cardano
 
-Accepts Shelley `addr...`/`stake...` Bech32 addresses and Byron Base58 addresses. It validates the Bech32 network and address layout, pointer encoding where present, or Byron CBOR and CRC. The result is the 32-byte SHA-256 value used by target `-c a`.
+Accepts Shelley `addr...`/`stake...` Bech32 addresses and Byron Base58 addresses. It validates the Bech32 network and address layout, pointer encoding where present, or Byron CBOR and CRC. The result is SHA-256 of the decoded address bytes, which is the value compared by `-c a`.
+
+Choose the matching `-ada-type`: Byron and the key-controlled Shelley Base, Enterprise, Reward, and Pointer forms are separate Toolkit subtypes. The converter also validates Shelley addresses whose payment or stake credential is a script hash. Such an address can be decoded, but a normal private-key search cannot generate its script credential, so decoding it does not make it a key-derived target.
 
 ```bash
 tools/cardano_address_to_hex cardano-addresses.txt cardano-targets.txt -t 8
@@ -560,15 +571,22 @@ tools/cardano_address_to_hex cardano-addresses.txt cardano-targets.txt -t 8
 
 #### `algorand_address_to_hex` - Algorand
 
-Accepts a canonical 58-character uppercase Algorand address, verifies its Base32 alphabet and SHA-512/256 checksum, and returns the underlying 32-byte public key. v14 has no direct Algorand `-c` target; this tool is useful when preparing data for other software.
+Accepts a canonical 58-character uppercase Algorand address, verifies its Base32 alphabet and SHA-512/256 checksum, and returns the underlying 32-byte ed25519 public key described by the [Algorand address format](https://developer.algorand.org/docs/get-details/encoding/). That binary value is compatible with `-c S`, because the `S` branch compares the raw ed25519 public key. The source mode must still generate the same Algorand key; `-save` formats a match as Solana rather than recreating the Algorand address.
 
 ```bash
 tools/algorand_address_to_hex algorand-addresses.txt algorand-public-keys.txt
+XorFilter -i algorand-public-keys.txt -check
+./METAL_CRYPTO_TOOLKIT -priv -hex -i private-seeds.txt \
+  -c S -xu algorand-public-keys_0.xor_u
 ```
 
 #### `multicoin_base58_bech32_address_to_hex` - multicurrency Bitcoin-like networks
 
-This is the general converter for Bitcoin-like currencies, not a Bitcoin-only program. It accepts standard Base58Check addresses with a one- to four-byte network prefix and a 20-byte payload, witness v0 Bech32, Taproot v1 Bech32m, CashAddr with a 20-byte payload, and ready 20- or 32-byte hex. A 32-byte P2WSH or Taproot witness program decoded from an address is immediately reduced to its 20-byte RIPEMD-160 matcher. A raw 32-byte hex line remains unchanged because it is already an explicitly prepared binary value rather than an address. The rules are format-based rather than tied to a short hardcoded coin list, so compatible Bitcoin-derived networks such as Litecoin, Dogecoin, Dash, and others use the same binary. XRP and Cosmos/BNB use different address rules, while Tron has a dedicated `0x41` prefix check; all three remain in their own strict converters. Keep each currency, address branch, and byte width in a separate input file.
+This is the general converter for Bitcoin-like currencies, not a Bitcoin-only program. It accepts checksum-valid Base58Check addresses with a one- to four-byte prefix and a 20-byte payload, witness v0 Bech32, Taproot v1 Bech32m, CashAddr with a 20-byte payload, and ready 20- or 32-byte hex. It validates the encoding, but it does not maintain a whitelist of coin network prefixes or Bech32 HRPs and therefore cannot identify the original currency from the payload alone.
+
+P2PKH made from a compressed key and P2WPKH both use `-c c`; P2PKH made from an uncompressed key uses `-c u`. A Base58Check or CashAddr P2SH payload does not reveal the redeem script: use `-c s` only when the source is known to be the exact P2SH-wrapped SegWit construction generated by the Toolkit. Generic multisig or other P2SH scripts are not automatically compatible. A P2WSH or Taproot 32-byte witness program decoded from an address is immediately reduced to the 20-byte RIPEMD-160 matcher expected by `-c p` or `-c r`. Raw 32-byte hex remains unchanged because it has no address version from which a branch can be inferred.
+
+The rules are format-based, so compatible Bitcoin-derived networks such as Litecoin, Dogecoin, Dash, and others can be decoded. Keep every currency, address construction, and target branch in a separate source file and filter.
 
 ```bash
 tools/multicoin_base58_bech32_address_to_hex bitcoin-addresses.txt bitcoin-targets.txt
@@ -576,7 +594,7 @@ tools/multicoin_base58_bech32_address_to_hex bitcoin-addresses.txt bitcoin-targe
 
 #### `base64_data_to_hex` - Base64 and Base64URL data
 
-Decodes strict padded or unpadded Base64/Base64URL. Unknown characters, mixed alphabets, misplaced padding, and non-zero unused bits are rejected. Base64 itself has no checksum, so the tool can validate only the encoding; all decoded values in one file must still have the same byte length.
+Decodes strict padded or unpadded Base64/Base64URL. Unknown characters, mixed alphabets, misplaced padding, and non-zero unused bits are rejected. Base64 has no checksum and says nothing about the meaning of the bytes. Choose `-c` only after identifying whether the decoded value is an account ID, public key, HASH160, or another supported matcher. All values in one file must have the same byte length and meaning.
 
 ```bash
 tools/base64_data_to_hex encoded-values.txt decoded-values.txt
@@ -584,15 +602,20 @@ tools/base64_data_to_hex encoded-values.txt decoded-values.txt
 
 #### `cosmos_bnb_address_to_hex` - Cosmos-family and BNB
 
-Accepts a valid Cosmos-family Bech32 address, including Cosmos Hub and BNB-style prefixes, or a ready 20-byte hex value. It checks Bech32 and writes the 20-byte payload. v14 has no separate Cosmos/BNB target letter.
+Accepts Bech32 with a 20-byte payload, including ordinary Cosmos Hub and BNB account addresses, or ready 20-byte hex. It verifies Bech32 but does not whitelist HRPs; a valid checksum and 20-byte payload do not prove that the address belongs to a particular chain.
+
+For a normal secp256k1 account, the payload is RIPEMD-160(SHA-256(compressed public key)), exactly the value compared by `-c c`; the construction is documented in the [Cosmos SDK address reference](https://docs.cosmos.network/sdk/latest/guides/reference/bech32). Do not apply this mapping to legacy multisig, validator consensus addresses, secp256r1, or another key scheme. `-save` formats a match as Bitcoin, so compare the found 20-byte payload with the converter output when working with Cosmos/BNB.
 
 ```bash
 tools/cosmos_bnb_address_to_hex cosmos-addresses.txt cosmos-payloads.txt
+XorFilter -i cosmos-payloads.txt -check
+./METAL_CRYPTO_TOOLKIT -priv -hex -i private-keys.txt \
+  -c c -xu cosmos-payloads_0.xor_u
 ```
 
 #### `polkadot_kusama_address_to_hex` - Polkadot, Kusama, and Substrate
 
-Accepts SS58 addresses with a canonical one- or two-byte network prefix, verifies the Blake2b `SS58PRE` checksum, and returns the 32-byte account ID. Use the result with target `-c d`; the printable network prefix is not part of the account ID.
+Accepts the full SS58 form containing a 32-byte account ID and a canonical one- or two-byte network prefix. It verifies the Blake2b `SS58PRE` checksum and returns only the account ID. Use `-c d -dot-type 1` for ed25519 or `-c d -dot-type 2` for sr25519. The SS58 prefix does not identify the curve and is not part of the matcher; other SS58 payload lengths and key schemes are rejected.
 
 ```bash
 tools/polkadot_kusama_address_to_hex substrate-addresses.txt substrate-account-ids.txt
@@ -600,10 +623,16 @@ tools/polkadot_kusama_address_to_hex substrate-addresses.txt substrate-account-i
 
 #### `filecoin_address_to_hex` - Filecoin
 
-Accepts mainnet/testnet `f1`/`t1` and delegated `f410`/`t410` addresses. It checks the lowercase Base32 representation, protocol/namespace fields, exact payload length, and Blake2b checksum. The 20-byte payload is suitable for target `-c f`.
+Accepts mainnet/testnet `f1`/`t1` and delegated `f410`/`t410` addresses. It checks the lowercase Base32 representation, protocol or namespace, exact payload length, and Blake2b checksum. Keep the two forms in separate files:
+
+- `f1/t1` is the Filecoin secp256k1 Blake2b-160 payload used by `-c f -fil-type 1`;
+- `f410/t410` namespace 10 contains the 20-byte Ethereum address, as defined by the [Filecoin Ethereum Address Manager](https://docs.filecoin.io/smart-contracts/filecoin-evm-runtime/address-types), and can use either `-c f -fil-type 2` for Filecoin-formatted `-save` output or `-c e` for Ethereum-formatted output.
 
 ```bash
 tools/filecoin_address_to_hex filecoin-addresses.txt filecoin-targets.txt
+XorFilter -i filecoin-f1-targets.txt -check
+./METAL_CRYPTO_TOOLKIT -priv -hex -i private-keys.txt \
+  -c f -fil-type 1 -xu filecoin-f1-targets_0.xor_u
 ```
 
 #### `solana_address_to_hex` - Solana
@@ -616,23 +645,34 @@ tools/solana_address_to_hex solana-addresses.txt solana-public-keys.txt
 
 #### `stellar_address_to_hex` - Stellar
 
-Accepts Stellar account StrKeys beginning with `G` and muxed accounts beginning with `M`. It verifies the version byte and CRC16-XMODEM checksum. For a muxed address, the output is the underlying 32-byte ed25519 public key without the muxed ID. v14 has no direct Stellar target.
+Accepts Stellar account StrKeys beginning with `G` and muxed accounts beginning with `M`. It verifies the version byte and CRC16-XMODEM checksum. For `M...`, the output is the underlying 32-byte ed25519 public key without the muxed ID; the [Stellar muxed-account format](https://developers.stellar.org/docs/build/guides/transactions/pooled-accounts-muxed-accounts-memos) therefore makes different muxed IDs for the same account produce the same hex value. The raw public key is compatible with `-c S`, but the source mode must reproduce the Stellar key derivation and `-save` formats the match as Solana.
 
 ```bash
 tools/stellar_address_to_hex stellar-addresses.txt stellar-public-keys.txt
+XorFilter -i stellar-public-keys.txt -check
+./METAL_CRYPTO_TOOLKIT -priv -hex -i private-seeds.txt \
+  -c S -xu stellar-public-keys_0.xor_u
 ```
 
 #### `stacks_address_to_hex` - Stacks
 
-Accepts supported Stacks mainnet and testnet C32Check address versions, verifies the C32 alphabet, version, payload size, and checksum, and returns the 20-byte HASH160. v14 has no direct Stacks target.
+Accepts the four standard [Stacks C32Check](https://docs.stacks.co/more-guides/c32check) versions and returns their 20-byte HASH160 after validating the alphabet, version, payload length, and checksum. Keep the address classes separate:
+
+- `SP` mainnet and `ST` testnet are P2PKH. Their HASH160 is compatible with `-c c` for the normal compressed public key or `-c u` if the address was deliberately created from an uncompressed key;
+- `SM` mainnet and `SN` testnet are P2SH. The payload does not describe the redeem script, so it is not a generic single-key target and must not automatically be searched with `-c s`.
+
+`-save` on `c` or `u` produces a Bitcoin address. Compare the found HASH160 with the converter output when searching Stacks P2PKH.
 
 ```bash
 tools/stacks_address_to_hex stacks-addresses.txt stacks-hash160.txt
+XorFilter -i stacks-p2pkh-hash160.txt -check
+./METAL_CRYPTO_TOOLKIT -priv -hex -i private-keys.txt \
+  -c c -xu stacks-p2pkh-hash160_0.xor_u
 ```
 
 #### `ton_address_to_hex` - TON
 
-Accepts a friendly Base64/Base64URL TON address, `workchain:64-hex`, or a raw 32-byte hex account ID. Friendly addresses are checked for a supported tag, exact length, and CRC16. The workchain and flags are address metadata; the output contains only the 32-byte account ID expected by target `-c T`.
+Accepts a friendly Base64/Base64URL TON address, `workchain:64-hex`, or a raw 32-byte account ID. Friendly addresses are checked for a supported tag, exact length, and CRC16. Workchain, bounceable/test flags, and presentation are discarded, so friendly forms of the same account produce the same hex. Use `-c T` with the `-ton-type` that generated the source wallet contract.
 
 ```bash
 tools/ton_address_to_hex ton-addresses.txt ton-account-ids.txt
@@ -648,23 +688,38 @@ tools/tron_address_to_hex tron-addresses.txt ethereum-style-account-ids.txt
 
 #### `xrp_address_to_hex` - XRP Ledger
 
-Accepts an XRP Classic address or a ready 20-byte hex account ID. It uses the XRP Base58 alphabet, verifies Base58Check and the account-address version byte, and writes the 20-byte account ID for target `-c X`.
+Accepts an XRP Classic address or ready 20-byte account ID. It uses the XRP Base58 alphabet, verifies Base58Check and the Classic account version, and writes the account ID used by `-c X`. A Classic address does not identify the source curve: use `-xrp-type 1` for secp256k1 or `-xrp-type 2` for ed25519 according to the source wallet. X-addresses are not accepted.
 
 ```bash
 tools/xrp_address_to_hex xrp-addresses.txt xrp-account-ids.txt
+XorFilter -i xrp-account-ids.txt -check
+./METAL_CRYPTO_TOOLKIT -priv -hex -i private-keys.txt \
+  -c X -xrp-type 1 -xu xrp-account-ids_0.xor_u
 ```
 
 #### `tezos_address_to_hex` - Tezos
 
-Accepts `tz1` (ed25519) and `tz2` (secp256k1) implicit accounts, validates their Base58Check prefix and checksum, and writes the 20-byte key hash used by target `-c Z`. Other Tezos prefixes are intentionally rejected.
+Accepts `tz1` ed25519 and `tz2` secp256k1 implicit accounts, validates their Base58Check prefix and checksum, and writes the 20-byte key hash used by `-c Z`. Search `tz1` with `-xtz-type 2` and `tz2` with `-xtz-type 1`. Keep them in separate filters. `tz3`, `KT1`, and other Tezos address classes are intentionally rejected.
 
 ```bash
 tools/tezos_address_to_hex tezos-addresses.txt tezos-key-hashes.txt
+XorFilter -i tezos-tz1-key-hashes.txt -check
+./METAL_CRYPTO_TOOLKIT -priv -hex -i private-seeds.txt \
+  -c Z -xtz-type 2 -xu tezos-tz1-key-hashes_0.xor_u
 ```
 
-For `multicoin_base58_bech32_address_to_hex`, the selected Toolkit branch still matters. A P2PKH payload may belong to `c` or `u` depending on the public key that created it; a P2SH-wrapped SegWit target belongs to `s`. P2WSH and Taproot addresses are both converted directly to the 20-byte RIPEMD-160 matcher expected by `-c p` and `-c r`, respectively. The resulting file can be passed to XorFilter without an additional OpenSSL conversion. The converter cannot infer a private-key branch or original network from a bare 20-byte payload alone, so keep P2PKH, P2SH-wrapped SegWit, P2WSH, and Taproot in separate input files and filters.
+For `multicoin_base58_bech32_address_to_hex`, the resulting P2WSH and Taproot files can be passed directly to XorFilter; no additional OpenSSL conversion is required. A raw 32-byte line is preserved intentionally. If it is a full Taproot output key rather than an already prepared matcher, provide the Bech32m address or calculate the required 20-byte RIPEMD-160 before building the filter.
 
-If a line is supplied as raw 32-byte hex rather than as a printable address, the converter preserves all 32 bytes. This is intentional: a bare binary value carries no address version from which the program could infer whether RIPEMD-160 is required. For a ready-to-use Taproot matcher, provide the Taproot Bech32m address or provide the already calculated 20-byte hex value.
+### How 20-byte and 32-byte lists are filtered
+
+The converter output and the filter key are related but not identical concepts:
+
+- converters write the complete target value they derive, without silently truncating it: 40 hex characters for a 20-byte result or 64 for a 32-byte result;
+- the current [XorFilter](https://github.com/XopMC/XorFilter) format derives its key from the first 20 bytes of each input line, and the Toolkit's Bloom/XOR lookup checks those same first 20 bytes;
+- a filter built from 32-byte targets is therefore a 160-bit prefilter. A match still stores the complete candidate payload, but every Binary Fuse filter is probabilistic; each output profile has its documented false-positive rate;
+- verify every reported result against the original complete converter output. For alternate-network mappings such as Algorand/Stellar through `S` or Cosmos/Stacks through `c`, compare the raw payload because `-save` uses the branch's native Solana or Bitcoin formatting.
+
+Do not mix currencies, key algorithms, address constructions, or 20/32-byte widths in one converter input. Even when two families share the same byte width, separate filters prevent an accepted match from being attributed to the wrong branch.
 
 The complete filter-preparation path is:
 
@@ -682,7 +737,7 @@ mkdir -p filters
   -c a -xu filters/cardano-targets_0.xor_u -save -o found.txt
 ```
 
-[XopMC/XorFilter](https://github.com/XopMC/XorFilter) creates the actual Binary Fuse filter. The converters only prepare its input list. Keep separate lists and filters for each target family even when two families happen to use the same byte width. Never mix 20-byte and 32-byte values, Bitcoin branches with XRP/Cosmos payloads, or P2WSH matcher values with Taproot matcher values in one filter.
+[XopMC/XorFilter](https://github.com/XopMC/XorFilter) creates the actual Binary Fuse filter; the converters only prepare its input list. Keep the converter's full output as the authoritative list used to verify findings.
 
 ## Output, buffers, and devices
 
@@ -2326,7 +2381,7 @@ Metal-кернел -> компактный фильтр -> редкое совп
 
 ## Преобразование адресов в hex
 
-В папке `tools/` находятся 14 небольших программ. Они принимают обычные адреса криптовалют или закодированные строки, проверяют формат и контрольную сумму, а затем записывают настоящие двоичные байты в виде строчного hex. Эти программы не перебирают ключи и не создают Bloom- или XOR-фильтры. Они только готовят правильный исходный список для программы, которая строит фильтр.
+В папке `tools/` находятся 14 небольших программ. Они проверяют обычные адреса криптовалют или закодированные строки и формируют из них то двоичное значение, которое сравнивает выбранная ветка цели. Это значение записывается в виде строчного hex. Конвертеры не перебирают ключи и не создают Bloom- или XOR-фильтры. Их единственная задача — подготовить чистый однородный список для программы, которая строит фильтр.
 
 У всех программ одинаковый интерфейс:
 
@@ -2340,35 +2395,46 @@ TOOL -h
 - `-t N` задает от 1 до 256 потоков CPU; по умолчанию используется число логических процессоров Mac;
 - пробелы по краям строк и переносы CRLF разрешены, пустые строки пропускаются;
 - правильные значения записываются в исходном порядке, по одному строчному hex на строку;
-- отклоненные исходные строки без изменений попадают в `name-invalid.txt`; если ошибок нет, такой файл не создается;
+- отклоненные строки записываются в `name-invalid.txt` после удаления пробелов по краям; если ошибок нет, такой файл не создается;
 - отдельные плохие строки не делают весь запуск ошибочным. Код возврата `1` означает ошибку параметров, открытия/записи файла или внутренний сбой.
 
 Первый правильный результат задает длину всех значений в текущем выходном файле. Если следующий адрес преобразуется в другое число байтов, он попадет в `-invalid.txt`. Такая проверка не дает случайно смешать, например, 20-байтовые и 32-байтовые цели.
 
 После сборки из исходников исполняемый файл находится по пути `tools/<проект>/bin/<программа>`. В готовом архиве выпуска все 14 программ лежат прямо в распакованной папке `tools/`.
 
-| Программа | Что можно подать на вход | Что записывается в hex | Подходящая цель `-c` |
+| Программа | Что можно подать на вход | Что записывается в hex | Совместимая ветка Toolkit |
 | --- | --- | --- | --- |
-| `cardano_address_to_hex` | Cardano Shelley Bech32 или Byron Base58 с проверкой CBOR/CRC | SHA-256 от декодированного адреса, 32 байта / 64 hex-символа | `a` |
-| `algorand_address_to_hex` | 58-символьный адрес Algorand Base32 с checksum SHA-512/256 | открытый ключ 32 байта / 64 hex-символа | отдельной цели в v14 нет |
-| `multicoin_base58_bech32_address_to_hex` | мультивалютные Bitcoin-подобные Base58Check, SegWit Bech32/Bech32m, CashAddr либо готовый hex на 20/32 байта | 20-байтовое значение сравнения для поддерживаемых адресов; raw hex сохраняет исходную длину 20/32 байта | `c`, `u`, `s`, `p` или `r` |
-| `base64_data_to_hex` | строгий Base64 или Base64URL с padding либо без него | декодированные байты; одна длина на файл | заранее заданного семейства нет |
-| `cosmos_bnb_address_to_hex` | Bech32 семейства Cosmos либо готовый 20-байтовый hex | payload 20 байтов / 40 hex-символов | отдельной цели в v14 нет |
-| `polkadot_kusama_address_to_hex` | SS58 с одно- или двухбайтовым префиксом сети и checksum Blake2b | account ID 32 байта / 64 hex-символа | `d` |
-| `filecoin_address_to_hex` | Filecoin `f1`, `t1`, `f410` или `t410` с checksum Blake2b | payload 20 байтов / 40 hex-символов | `f` |
-| `solana_address_to_hex` | открытый ключ Base58, который декодируется ровно в 32 байта | открытый ключ 32 байта / 64 hex-символа | `S` |
-| `stellar_address_to_hex` | Stellar StrKey `G...` или muxed-адрес `M...` с CRC16 | исходный открытый ключ ed25519, 32 байта / 64 hex-символа | отдельной цели в v14 нет |
-| `stacks_address_to_hex` | адрес Stacks mainnet/testnet в формате C32Check | HASH160 20 байтов / 40 hex-символов | отдельной цели в v14 нет |
-| `ton_address_to_hex` | friendly-адрес TON Base64/Base64URL, `workchain:hex` либо готовый 32-байтовый hex | account ID 32 байта / 64 hex-символа | `T` |
-| `tron_address_to_hex` | адрес Tron Base58Check с буквы `T` либо готовый 20-байтовый hex | Ethereum-подобный account ID 20 байтов / 40 hex-символов | `e` |
-| `xrp_address_to_hex` | XRP Classic Base58Check либо готовый 20-байтовый hex | account ID 20 байтов / 40 hex-символов | `X` |
-| `tezos_address_to_hex` | адрес Tezos `tz1` или `tz2` с Base58Check | key hash 20 байтов / 40 hex-символов | `Z` |
+| `cardano_address_to_hex` | Cardano Shelley Bech32 или Byron Base58 с проверкой CBOR/CRC | SHA-256 от декодированного адреса, 32 байта / 64 hex-символа | `-c a` с подходящим `-ada-type` |
+| `algorand_address_to_hex` | 58-символьный адрес Algorand Base32 с checksum SHA-512/256 | исходный открытый ключ ed25519, 32 байта / 64 hex-символа | `-c S` |
+| `multicoin_base58_bech32_address_to_hex` | Bitcoin-подобные Base58Check, SegWit Bech32/Bech32m, CashAddr либо готовый hex на 20/32 байта | 20-байтовое значение сравнения для адреса; raw hex сохраняет длину 20/32 байта | `-c c`, `u`, `s`, `p` или `r` в зависимости от устройства адреса |
+| `base64_data_to_hex` | строгий Base64 или Base64URL с padding либо без него | декодированные байты; одна длина на файл | определяется тем, что означают декодированные байты |
+| `cosmos_bnb_address_to_hex` | Bech32 с 20-байтовым payload либо готовый 20-байтовый hex | payload 20 байтов / 40 hex-символов | `-c c` для обычных secp256k1 account addresses |
+| `polkadot_kusama_address_to_hex` | SS58 с 32-байтовым account ID и одно- или двухбайтовым префиксом сети | account ID 32 байта / 64 hex-символа | `-c d` с `-dot-type 1` или `2` |
+| `filecoin_address_to_hex` | Filecoin `f1`, `t1`, `f410` или `t410` с checksum Blake2b | payload 20 байтов / 40 hex-символов | `-c f -fil-type 1/2`; делегированные `f410/t410` также подходят для `-c e` |
+| `solana_address_to_hex` | открытый ключ Base58, который декодируется ровно в 32 байта | исходный открытый ключ ed25519, 32 байта / 64 hex-символа | `-c S` |
+| `stellar_address_to_hex` | Stellar StrKey `G...` или muxed-адрес `M...` с CRC16 | исходный открытый ключ ed25519, 32 байта / 64 hex-символа | `-c S` |
+| `stacks_address_to_hex` | Stacks C32Check `SP`, `ST`, `SM` или `SN` | HASH160 20 байтов / 40 hex-символов | `SP/ST`: `-c c` или `u`; для `SM/SN` общей single-key ветки нет |
+| `ton_address_to_hex` | friendly-адрес TON Base64/Base64URL, `workchain:hex` либо готовый 32-байтовый hex | account ID 32 байта / 64 hex-символа | `-c T` с подходящим `-ton-type` |
+| `tron_address_to_hex` | адрес Tron Base58Check с буквы `T` либо готовый 20-байтовый hex | совместимый с Ethereum account ID, 20 байтов / 40 hex-символов | `-c e` |
+| `xrp_address_to_hex` | XRP Classic Base58Check либо готовый 20-байтовый hex | account ID 20 байтов / 40 hex-символов | `-c X` с `-xrp-type 1` или `2` |
+| `tezos_address_to_hex` | адрес Tezos `tz1` или `tz2` с Base58Check | key hash 20 байтов / 40 hex-символов | `-c Z`; для `tz1` нужен `-xtz-type 2`, для `tz2` — `1` |
+
+### Совместимость двоичного значения и формат результата
+
+В таблице указана совместимость двоичных значений. Это не означает, что Toolkit напечатает адрес в формате исходной сети. У нескольких сетей совпадает значение, которое сравнивается внутри программы:
+
+- `-c S` сравнивает исходный 32-байтовый открытый ключ ed25519. Поэтому с этой веткой можно использовать списки Solana, Algorand и Stellar, но `-save` подпишет и закодирует результат как Solana;
+- `-c c` сравнивает HASH160 сжатого открытого ключа secp256k1. Такое же 20-байтовое значение используется в обычных secp256k1-аккаунтах Cosmos/BNB и в P2PKH-адресах Stacks, но `-save` сформирует адреса Bitcoin;
+- `-c e` сравнивает 20-байтовое EVM-значение, полученное через Keccak. Эти же байты находятся в адресах Tron и делегированных адресах Filecoin `f410/t410`, но `-save` выведет представление Ethereum;
+- совместимая буква `-c` не выбирает способ получения ключа. Режим входа, трактовка seed, путь деривации, кривая и subtype должны привести к тому же ключу, из которого был создан исходный адрес.
 
 ### Каждая программа отдельно
 
 #### `cardano_address_to_hex` - Cardano
 
-Принимает адреса Shelley `addr...`/`stake...` в Bech32 и Byron в Base58. Для Shelley проверяются сеть, строение адреса и кодирование pointer, если он присутствует. Для Byron проверяются CBOR и CRC. Результатом является 32-байтовый SHA-256, который используется целью `-c a`.
+Принимает адреса Shelley `addr...`/`stake...` в Bech32 и Byron в Base58. Для Shelley проверяются сеть, строение адреса и кодирование pointer, если он присутствует. Для Byron проверяются CBOR и CRC. В файл записывается SHA-256 от декодированных байтов адреса — именно его сравнивает ветка `-c a`.
+
+Необходимо выбрать соответствующий `-ada-type`: Byron, Shelley Base, Enterprise, Reward и Pointer являются разными подтипами. Конвертер также принимает Shelley-адреса, где payment- или stake credential является хешем скрипта. Такой адрес можно правильно декодировать, но обычный перебор приватных ключей не сможет создать его script credential, поэтому сам факт декодирования не делает его key-derived целью.
 
 ```bash
 tools/cardano_address_to_hex cardano-addresses.txt cardano-targets.txt -t 8
@@ -2376,15 +2442,22 @@ tools/cardano_address_to_hex cardano-addresses.txt cardano-targets.txt -t 8
 
 #### `algorand_address_to_hex` - Algorand
 
-Принимает обычный 58-символьный адрес Algorand в верхнем регистре, проверяет алфавит Base32 и checksum SHA-512/256, затем записывает исходный 32-байтовый открытый ключ. В v14 отдельной буквы `-c` для Algorand нет; программа пригодится для подготовки данных для другого ПО.
+Принимает обычный 58-символьный адрес Algorand в верхнем регистре, проверяет алфавит Base32 и checksum SHA-512/256, затем записывает исходный 32-байтовый открытый ключ ed25519, из которого согласно [формату адресов Algorand](https://developer.algorand.org/docs/get-details/encoding/) и состоит основная часть адреса. Эти байты совместимы с `-c S`, потому что ветка `S` сравнивает сам открытый ключ ed25519. Выбранный режим должен получить именно ключ Algorand; `-save` оформит совпадение как Solana, а не восстановит адрес Algorand.
 
 ```bash
 tools/algorand_address_to_hex algorand-addresses.txt algorand-public-keys.txt
+XorFilter -i algorand-public-keys.txt -check
+./METAL_CRYPTO_TOOLKIT -priv -hex -i private-seeds.txt \
+  -c S -xu algorand-public-keys_0.xor_u
 ```
 
 #### `multicoin_base58_bech32_address_to_hex` - мультивалютные Bitcoin-подобные сети
 
-Это общий конвертер для Bitcoin-подобных валют, а не программа только для Bitcoin. Он принимает стандартные Base58Check-адреса с префиксом сети от одного до четырех байтов и 20-байтовым payload, witness v0 в Bech32, Taproot v1 в Bech32m, CashAddr с 20-байтовым payload и готовый hex на 20 или 32 байта. Если из адреса P2WSH или Taproot извлекается 32-байтовый witness program, программа сразу преобразует его в 20-байтовый RIPEMD-160 для сравнения. Строка raw hex длиной 32 байта остается без изменений, потому что это уже явно переданное двоичное значение, а не адрес. Проверка строится по формату, а не по короткому жестко заданному списку монет, поэтому тот же бинарник подходит для совместимых сетей на основе Bitcoin, например Litecoin, Dogecoin, Dash и других. У XRP и Cosmos/BNB другие правила адресов, а для Tron отдельно проверяется префикс `0x41`, поэтому все три семейства оставлены в своих строгих программах. Каждую валюту, ветку адреса и длину значения храните в своем входном файле.
+Это общий конвертер для Bitcoin-подобных валют, а не программа только для Bitcoin. Он принимает Base58Check с правильной checksum, префиксом от одного до четырех байтов и 20-байтовым payload, witness v0 в Bech32, Taproot v1 в Bech32m, CashAddr с 20-байтовым payload и готовый hex на 20 или 32 байта. Конвертер проверяет кодирование, но не содержит списка разрешенных сетевых префиксов и Bech32 HRP. Поэтому по одному payload он не может определить исходную валюту.
+
+P2PKH от сжатого ключа и P2WPKH используют `-c c`; P2PKH от несжатого ключа использует `-c u`. У Base58Check- или CashAddr-адреса P2SH внутри может быть любой redeem script. Используйте `-c s` только тогда, когда точно известно, что это именно P2SH-wrapped SegWit, который строит Toolkit. Обычный multisig и другие P2SH-скрипты автоматически к `s` не относятся. Для P2WSH и Taproot конвертер берет 32-байтовый witness program и сразу рассчитывает 20-байтовый RIPEMD-160, который ожидают `-c p` и `-c r`. Готовый raw hex на 32 байта остается без изменений, потому что в нем нет версии адреса, позволяющей выбрать ветку.
+
+Правила основаны на формате, поэтому тот же бинарник декодирует совместимые сети на основе Bitcoin, например Litecoin, Dogecoin и Dash. Каждую валюту, способ построения адреса и ветку цели храните в отдельном исходном файле и фильтре.
 
 ```bash
 tools/multicoin_base58_bech32_address_to_hex bitcoin-addresses.txt bitcoin-targets.txt
@@ -2392,7 +2465,7 @@ tools/multicoin_base58_bech32_address_to_hex bitcoin-addresses.txt bitcoin-targe
 
 #### `base64_data_to_hex` - данные Base64 и Base64URL
 
-Строго декодирует Base64/Base64URL с padding или без него. Неизвестные символы, смешение двух алфавитов, `=` в неправильном месте и ненулевые неиспользуемые биты отклоняются. В самом Base64 checksum нет, поэтому программа может проверить только кодирование. Все готовые значения в одном файле все равно должны иметь одинаковую длину.
+Строго декодирует Base64/Base64URL с padding или без него. Неизвестные символы, смешение двух алфавитов, `=` в неправильном месте и ненулевые неиспользуемые биты отклоняются. В Base64 нет checksum, и само кодирование ничего не говорит о назначении данных. Выбирайте `-c` только после того, как определили, что находится внутри: account ID, открытый ключ, HASH160 или другое поддерживаемое значение. Все строки в одном файле должны иметь одинаковую длину и смысл.
 
 ```bash
 tools/base64_data_to_hex encoded-values.txt decoded-values.txt
@@ -2400,15 +2473,20 @@ tools/base64_data_to_hex encoded-values.txt decoded-values.txt
 
 #### `cosmos_bnb_address_to_hex` - семейство Cosmos и BNB
 
-Принимает правильный Bech32-адрес семейства Cosmos, включая префиксы Cosmos Hub и BNB, либо готовый 20-байтовый hex. Программа проверяет Bech32 и записывает 20-байтовый payload. Отдельной буквы цели для Cosmos/BNB в v14 нет.
+Принимает Bech32 с 20-байтовым payload, включая обычные адреса Cosmos Hub и BNB, либо готовый 20-байтовый hex. Программа проверяет Bech32, но не сверяет HRP со списком известных сетей. Правильная checksum и длина 20 байтов сами по себе не доказывают принадлежность адреса к определенной сети.
+
+У обычного secp256k1-аккаунта payload равен RIPEMD-160(SHA-256(сжатый открытый ключ)). Это в точности значение ветки `-c c`; тот же порядок вычислений указан в [описании адресов Cosmos SDK](https://docs.cosmos.network/sdk/latest/guides/reference/bech32). Такое соответствие нельзя применять к legacy multisig, validator consensus address, secp256r1 и другим схемам ключей. `-save` оформит совпадение как Bitcoin, поэтому для Cosmos/BNB сравнивайте найденный 20-байтовый payload с результатом конвертера.
 
 ```bash
 tools/cosmos_bnb_address_to_hex cosmos-addresses.txt cosmos-payloads.txt
+XorFilter -i cosmos-payloads.txt -check
+./METAL_CRYPTO_TOOLKIT -priv -hex -i private-keys.txt \
+  -c c -xu cosmos-payloads_0.xor_u
 ```
 
 #### `polkadot_kusama_address_to_hex` - Polkadot, Kusama и Substrate
 
-Принимает SS58 с правильным одно- или двухбайтовым префиксом сети, проверяет checksum Blake2b с префиксом `SS58PRE` и возвращает 32-байтовый account ID. Этот файл используется с `-c d`; печатный номер сети в account ID не входит.
+Принимает полную форму SS58 с 32-байтовым account ID и правильным одно- или двухбайтовым префиксом сети. Программа проверяет checksum Blake2b с префиксом `SS58PRE` и возвращает только account ID. Для ed25519 используйте `-c d -dot-type 1`, для sr25519 — `-c d -dot-type 2`. Префикс SS58 не определяет кривую и не входит в сравниваемое значение. Другие размеры payload и другие схемы ключей не принимаются.
 
 ```bash
 tools/polkadot_kusama_address_to_hex substrate-addresses.txt substrate-account-ids.txt
@@ -2416,10 +2494,16 @@ tools/polkadot_kusama_address_to_hex substrate-addresses.txt substrate-account-i
 
 #### `filecoin_address_to_hex` - Filecoin
 
-Принимает mainnet/testnet адреса `f1`/`t1` и делегированные `f410`/`t410`. Проверяются строчный Base32, протокол или namespace, точная длина payload и checksum Blake2b. Полученные 20 байтов подходят для цели `-c f`.
+Принимает mainnet/testnet адреса `f1`/`t1` и делегированные `f410`/`t410`. Проверяются строчный Base32, протокол или namespace, точная длина payload и checksum Blake2b. Эти два вида нужно хранить отдельно:
+
+- `f1/t1` содержит Filecoin Blake2b-160 от открытого ключа secp256k1 и используется с `-c f -fil-type 1`;
+- `f410/t410` из namespace 10 содержит обычный 20-байтовый адрес Ethereum, как описано в документации [Filecoin Ethereum Address Manager](https://docs.filecoin.io/smart-contracts/filecoin-evm-runtime/address-types). Его можно искать через `-c f -fil-type 2`, чтобы `-save` вывел Filecoin, либо через `-c e`, чтобы получить формат Ethereum.
 
 ```bash
 tools/filecoin_address_to_hex filecoin-addresses.txt filecoin-targets.txt
+XorFilter -i filecoin-f1-targets.txt -check
+./METAL_CRYPTO_TOOLKIT -priv -hex -i private-keys.txt \
+  -c f -fil-type 1 -xu filecoin-f1-targets_0.xor_u
 ```
 
 #### `solana_address_to_hex` - Solana
@@ -2432,23 +2516,34 @@ tools/solana_address_to_hex solana-addresses.txt solana-public-keys.txt
 
 #### `stellar_address_to_hex` - Stellar
 
-Принимает обычный Stellar StrKey с буквы `G` и muxed-адрес с буквы `M`. Проверяются байт версии и checksum CRC16-XMODEM. Для muxed-адреса записывается исходный 32-байтовый открытый ключ ed25519 без muxed ID. Отдельной цели Stellar в v14 нет.
+Принимает обычный Stellar StrKey с буквы `G` и muxed-адрес с буквы `M`. Проверяются байт версии и checksum CRC16-XMODEM. Для `M...` записывается исходный 32-байтовый открытый ключ ed25519 без muxed ID. В [формате muxed accounts Stellar](https://developers.stellar.org/docs/build/guides/transactions/pooled-accounts-muxed-accounts-memos) этот ID является отдельной частью, поэтому разные muxed ID одного аккаунта дают одинаковый hex. Открытый ключ совместим с `-c S`, но исходный режим должен повторить способ получения ключа Stellar, а `-save` оформит результат как Solana.
 
 ```bash
 tools/stellar_address_to_hex stellar-addresses.txt stellar-public-keys.txt
+XorFilter -i stellar-public-keys.txt -check
+./METAL_CRYPTO_TOOLKIT -priv -hex -i private-seeds.txt \
+  -c S -xu stellar-public-keys_0.xor_u
 ```
 
 #### `stacks_address_to_hex` - Stacks
 
-Принимает поддерживаемые mainnet/testnet версии Stacks C32Check, проверяет алфавит C32, версию, длину payload и checksum, затем записывает 20-байтовый HASH160. Отдельной цели Stacks в v14 нет.
+Принимает четыре стандартных варианта [Stacks C32Check](https://docs.stacks.co/more-guides/c32check) и после проверки алфавита, версии, длины и checksum записывает 20-байтовый HASH160. Разные классы адресов необходимо хранить отдельно:
+
+- `SP` в mainnet и `ST` в testnet являются P2PKH. Их HASH160 совместим с `-c c` для обычного сжатого открытого ключа либо с `-c u`, если адрес специально создавался из несжатого ключа;
+- `SM` в mainnet и `SN` в testnet являются P2SH. По payload нельзя восстановить redeem script, поэтому это не общая single-key цель и такие адреса нельзя автоматически запускать через `-c s`.
+
+С ветками `c` и `u` флаг `-save` сформирует адрес Bitcoin. При поиске Stacks P2PKH сравнивайте найденный HASH160 с результатом конвертера.
 
 ```bash
 tools/stacks_address_to_hex stacks-addresses.txt stacks-hash160.txt
+XorFilter -i stacks-p2pkh-hash160.txt -check
+./METAL_CRYPTO_TOOLKIT -priv -hex -i private-keys.txt \
+  -c c -xu stacks-p2pkh-hash160_0.xor_u
 ```
 
 #### `ton_address_to_hex` - TON
 
-Принимает friendly-адрес TON в Base64/Base64URL, запись `workchain:64-hex` или готовый 32-байтовый hex account ID. У friendly-адреса проверяются допустимый tag, точная длина и CRC16. Workchain и флаги являются оформлением адреса; в результат попадает только 32-байтовый account ID для цели `-c T`.
+Принимает friendly-адрес TON в Base64/Base64URL, запись `workchain:64-hex` или готовый 32-байтовый account ID. У friendly-адреса проверяются допустимый tag, точная длина и CRC16. Workchain, bounceable/test flags и внешний вид адреса отбрасываются, поэтому разные friendly-формы одного аккаунта дают одинаковый hex. Используйте `-c T` и тот `-ton-type`, которым был создан исходный wallet contract.
 
 ```bash
 tools/ton_address_to_hex ton-addresses.txt ton-account-ids.txt
@@ -2464,23 +2559,38 @@ tools/tron_address_to_hex tron-addresses.txt ethereum-style-account-ids.txt
 
 #### `xrp_address_to_hex` - XRP Ledger
 
-Принимает XRP Classic или готовый 20-байтовый hex account ID. Используется отдельный алфавит Base58 XRP, проверяются Base58Check и байт версии обычного адреса. Полученные 20 байтов используются с целью `-c X`.
+Принимает XRP Classic или готовый 20-байтовый account ID. Используется отдельный алфавит Base58 XRP, проверяются Base58Check и версия Classic account. Полученные байты используются с `-c X`. По самому Classic address нельзя определить исходную кривую: для secp256k1 укажите `-xrp-type 1`, для ed25519 — `-xrp-type 2` в соответствии с исходным кошельком. X-addresses не принимаются.
 
 ```bash
 tools/xrp_address_to_hex xrp-addresses.txt xrp-account-ids.txt
+XorFilter -i xrp-account-ids.txt -check
+./METAL_CRYPTO_TOOLKIT -priv -hex -i private-keys.txt \
+  -c X -xrp-type 1 -xu xrp-account-ids_0.xor_u
 ```
 
 #### `tezos_address_to_hex` - Tezos
 
-Принимает implicit account `tz1` (ed25519) и `tz2` (secp256k1), проверяет их префикс Base58Check и checksum, затем записывает 20-байтовый key hash для цели `-c Z`. Остальные префиксы Tezos намеренно отклоняются.
+Принимает implicit account `tz1` на ed25519 и `tz2` на secp256k1, проверяет их префикс Base58Check и checksum, затем записывает 20-байтовый key hash для `-c Z`. Для `tz1` используйте `-xtz-type 2`, для `tz2` — `-xtz-type 1`; храните их в разных фильтрах. `tz3`, `KT1` и остальные классы адресов Tezos намеренно отклоняются.
 
 ```bash
 tools/tezos_address_to_hex tezos-addresses.txt tezos-key-hashes.txt
+XorFilter -i tezos-tz1-key-hashes.txt -check
+./METAL_CRYPTO_TOOLKIT -priv -hex -i private-seeds.txt \
+  -c Z -xtz-type 2 -xu tezos-tz1-key-hashes_0.xor_u
 ```
 
-Для `multicoin_base58_bech32_address_to_hex` одной расшифровки адреса недостаточно, чтобы выбрать ветку Toolkit. P2PKH может относиться к `c` или `u` в зависимости от того, какой открытый ключ создал адрес. P2SH-wrapped SegWit относится к `s`. Адреса P2WSH и Taproot сразу преобразуются в 20-байтовый RIPEMD-160, который ожидают `-c p` и `-c r` соответственно. Полученный файл можно сразу передавать в XorFilter: дополнительная обработка через OpenSSL не требуется. По одному 20-байтовому значению программа не может определить ни ветку приватного ключа, ни исходную сеть, поэтому P2PKH, P2SH-wrapped SegWit, P2WSH и Taproot нужно хранить в отдельных исходных файлах и фильтрах.
+Результаты P2WSH и Taproot из `multicoin_base58_bech32_address_to_hex` можно сразу передавать в XorFilter: дополнительная обработка через OpenSSL не нужна. Строка raw hex на 32 байта сохраняется полностью. Если это полный выходной ключ Taproot, а не заранее подготовленное значение сравнения, передайте адрес Bech32m либо самостоятельно рассчитайте требуемый 20-байтовый RIPEMD-160 перед созданием фильтра.
 
-Если строка передана как raw hex длиной 32 байта, а не как печатный адрес, конвертер сохраняет все 32 байта. Это сделано намеренно: в голом двоичном значении нет версии адреса, по которой можно понять, требуется ли RIPEMD-160. Для готового значения сравнения Taproot передавайте адрес Bech32m либо уже рассчитанный 20-байтовый hex.
+### Как фильтруются списки на 20 и 32 байта
+
+Полный результат конвертера и ключ внутри фильтра — не одно и то же:
+
+- конвертеры записывают полное целевое значение, которое они сформировали, без скрытого обрезания: 40 hex-символов для 20-байтового результата или 64 для 32-байтового;
+- текущий формат [XorFilter](https://github.com/XopMC/XorFilter) строит ключ по первым 20 байтам каждой строки, а Bloom/XOR-проверка Toolkit сравнивает те же первые 20 байтов;
+- фильтр из 32-байтовых целей поэтому работает как 160-битный предварительный фильтр. В найденный результат попадает полный payload кандидата, но любой Binary Fuse-фильтр является вероятностным; у каждого формата есть указанная для него вероятность ложного совпадения;
+- каждый найденный результат необходимо сверять с полным исходным списком конвертера. Для Algorand/Stellar через `S` и Cosmos/Stacks через `c` сравнивайте именно двоичные данные, потому что `-save` использует формат Solana или Bitcoin.
+
+Не смешивайте в одном входном файле разные валюты, алгоритмы ключей, способы построения адреса и длины 20/32 байта. Даже при одинаковой длине отдельные фильтры не дадут ошибочно отнести совпадение к другой ветке.
 
 Полная цепочка подготовки фильтра выглядит так:
 
@@ -2498,7 +2608,7 @@ mkdir -p filters
   -c a -xu filters/cardano-targets_0.xor_u -save -o found.txt
 ```
 
-Сам Binary Fuse-фильтр создает отдельный проект [XopMC/XorFilter](https://github.com/XopMC/XorFilter). Конвертеры лишь готовят для него список. Для каждой буквы `-c` и каждого представления цели лучше делать отдельный список и отдельный фильтр, даже если длина значений совпадает. Нельзя смешивать 20 и 32 байта, Bitcoin с XRP/Cosmos или значения сравнения P2WSH со значениями сравнения Taproot.
+Сам Binary Fuse-фильтр создает отдельный проект [XopMC/XorFilter](https://github.com/XopMC/XorFilter). Конвертеры лишь готовят для него список. Полный файл, созданный конвертером, остается основным списком для окончательной проверки найденных результатов.
 
 ## Сохранение, буферы и устройства
 
