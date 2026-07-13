@@ -583,7 +583,8 @@ bool decode_multicoin_base58_bech32(std::string_view input,
         }
         if (witness_version == 1 && address.encoding == Bech32Encoding::bech32m &&
             program.size() == 32) {
-            output = std::move(program);
+            const auto digest = ripemd160(program.data(), program.size());
+            output.assign(digest.begin(), digest.end());
             return true;
         }
         return false;

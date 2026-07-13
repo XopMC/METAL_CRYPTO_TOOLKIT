@@ -388,7 +388,7 @@ The BIP-39 passphrase is the optional text added to the mnemonic-to-seed calcula
 
 The `p` filter matcher uses RIPEMD160 of the 32-byte P2WSH witness program. A found record contains the full 32-byte program, and `-save` prints it in Bech32 address form. Build P2WSH filters from the matcher values expected by this program, not by mixing raw addresses or unrelated 32-byte values.
 
-The `r` branch follows the same separation between the saved value and the matcher: a found record contains the 32-byte Taproot output key, but `-hash` and filters compare its 20-byte RIPEMD-160. A raw 32-byte Taproot key must therefore be converted to that matcher before it is passed to XorFilter.
+The `r` branch follows the same separation between the saved value and the matcher: a found record contains the 32-byte Taproot output key, but `-hash` and filters compare its 20-byte RIPEMD-160. The multicurrency converter performs this RIPEMD-160 step automatically when its input is a Taproot Bech32m address. If the starting input is instead a raw 32-byte output key, calculate the matcher separately or provide an already calculated 20-byte hex value.
 
 ### Network and address variants
 
@@ -535,7 +535,7 @@ When built from source, a binary is placed at `tools/<project>/bin/<tool>`. In t
 | --- | --- | --- | --- |
 | `cardano_address_to_hex` | Cardano Shelley Bech32 or Byron Base58 with CBOR/CRC validation | SHA-256 of the decoded address, 32 bytes / 64 hex characters | `a` |
 | `algorand_address_to_hex` | 58-character Algorand Base32 address with SHA-512/256 checksum | 32-byte public key / 64 hex characters | no direct target in v14 |
-| `multicoin_base58_bech32_address_to_hex` | Multicurrency Bitcoin-like Base58Check, SegWit Bech32/Bech32m, CashAddr, or raw 20/32-byte hex | 20 or 32 bytes, depending on the address type | `c`, `u`, `s`, `p`, or `r` after the step below |
+| `multicoin_base58_bech32_address_to_hex` | Multicurrency Bitcoin-like Base58Check, SegWit Bech32/Bech32m, CashAddr, or raw 20/32-byte hex | 20-byte matcher for supported addresses; raw hex keeps its original 20/32-byte width | `c`, `u`, `s`, `p`, or `r` |
 | `base64_data_to_hex` | Strict Base64 or Base64URL, padded or unpadded | decoded bytes; one width per file | no fixed target family |
 | `cosmos_bnb_address_to_hex` | Cosmos-family Bech32 or raw 20-byte hex | 20-byte payload / 40 hex characters | no direct target in v14 |
 | `polkadot_kusama_address_to_hex` | SS58 with a one- or two-byte network prefix and Blake2b checksum | 32-byte account ID / 64 hex characters | `d` |
@@ -568,7 +568,7 @@ tools/algorand_address_to_hex algorand-addresses.txt algorand-public-keys.txt
 
 #### `multicoin_base58_bech32_address_to_hex` - multicurrency Bitcoin-like networks
 
-This is the general converter for Bitcoin-like currencies, not a Bitcoin-only program. It accepts standard Base58Check addresses with a one- to four-byte network prefix and a 20-byte payload, witness v0 Bech32, Taproot v1 Bech32m, CashAddr with a 20-byte payload, and ready 20- or 32-byte hex. The rules are format-based rather than tied to a short hardcoded coin list, so compatible Bitcoin-derived networks such as Litecoin, Dogecoin, Dash, and others use the same binary. XRP and Cosmos/BNB use different address rules, while Tron has a dedicated `0x41` prefix check; all three remain in their own strict converters. Keep each currency, address branch, and byte width in a separate input file.
+This is the general converter for Bitcoin-like currencies, not a Bitcoin-only program. It accepts standard Base58Check addresses with a one- to four-byte network prefix and a 20-byte payload, witness v0 Bech32, Taproot v1 Bech32m, CashAddr with a 20-byte payload, and ready 20- or 32-byte hex. A 32-byte P2WSH or Taproot witness program decoded from an address is immediately reduced to its 20-byte RIPEMD-160 matcher. A raw 32-byte hex line remains unchanged because it is already an explicitly prepared binary value rather than an address. The rules are format-based rather than tied to a short hardcoded coin list, so compatible Bitcoin-derived networks such as Litecoin, Dogecoin, Dash, and others use the same binary. XRP and Cosmos/BNB use different address rules, while Tron has a dedicated `0x41` prefix check; all three remain in their own strict converters. Keep each currency, address branch, and byte width in a separate input file.
 
 ```bash
 tools/multicoin_base58_bech32_address_to_hex bitcoin-addresses.txt bitcoin-targets.txt
@@ -662,17 +662,9 @@ Accepts `tz1` (ed25519) and `tz2` (secp256k1) implicit accounts, validates their
 tools/tezos_address_to_hex tezos-addresses.txt tezos-key-hashes.txt
 ```
 
-For `multicoin_base58_bech32_address_to_hex`, the selected Toolkit branch still matters. A P2PKH payload may belong to `c` or `u` depending on the public key that created it; a P2SH-wrapped SegWit target belongs to `s`. A P2WSH address is converted directly to the 20-byte RIPEMD-160 value expected by `-c p`. The converter cannot infer a private-key branch or network from a bare 20-byte payload alone.
+For `multicoin_base58_bech32_address_to_hex`, the selected Toolkit branch still matters. A P2PKH payload may belong to `c` or `u` depending on the public key that created it; a P2SH-wrapped SegWit target belongs to `s`. P2WSH and Taproot addresses are both converted directly to the 20-byte RIPEMD-160 matcher expected by `-c p` and `-c r`, respectively. The resulting file can be passed to XorFilter without an additional OpenSSL conversion. The converter cannot infer a private-key branch or original network from a bare 20-byte payload alone, so keep P2PKH, P2SH-wrapped SegWit, P2WSH, and Taproot in separate input files and filters.
 
-Taproot is the deliberate exception. The converter keeps each address's complete 32-byte output key, while the v14 `-c r` matcher uses RIPEMD-160 of that key. Convert the homogeneous 32-byte output file into a separate matcher file before running XorFilter:
-
-```bash
-while IFS= read -r key; do
-  printf '%s' "$key" | xxd -r -p | openssl dgst -ripemd160 -binary | xxd -p -c 40
-done < taproot-output-keys.txt > taproot-matchers.txt
-```
-
-Use `taproot-matchers.txt` as XorFilter input. Keep `taproot-output-keys.txt` only when the complete 32-byte output keys are needed.
+If a line is supplied as raw 32-byte hex rather than as a printable address, the converter preserves all 32 bytes. This is intentional: a bare binary value carries no address version from which the program could infer whether RIPEMD-160 is required. For a ready-to-use Taproot matcher, provide the Taproot Bech32m address or provide the already calculated 20-byte hex value.
 
 The complete filter-preparation path is:
 
@@ -690,7 +682,7 @@ mkdir -p filters
   -c a -xu filters/cardano-targets_0.xor_u -save -o found.txt
 ```
 
-[XopMC/XorFilter](https://github.com/XopMC/XorFilter) creates the actual Binary Fuse filter. The converters only prepare its input list. Keep separate lists and filters for each target family even when two families happen to use the same byte width. Never mix 20-byte and 32-byte values, Bitcoin branches with XRP/Cosmos payloads, or P2WSH matcher values with the separately prepared Taproot matcher values in one filter.
+[XopMC/XorFilter](https://github.com/XopMC/XorFilter) creates the actual Binary Fuse filter. The converters only prepare its input list. Keep separate lists and filters for each target family even when two families happen to use the same byte width. Never mix 20-byte and 32-byte values, Bitcoin branches with XRP/Cosmos payloads, or P2WSH matcher values with Taproot matcher values in one filter.
 
 ## Output, buffers, and devices
 
@@ -1804,11 +1796,11 @@ Reduce the command to one known candidate and one direct target before testing a
 
 - open the generated `*-invalid.txt`; it contains the original rejected lines;
 - confirm that the address was not copied with an internal space, damaged checksum, unsupported network prefix, or missing character;
-- keep one byte width in each input file. The first valid result fixes the width, so a 32-byte Taproot target is rejected after a 20-byte Bitcoin target;
+- keep one byte width in each input file. Supported printable Bitcoin-like addresses produce 20-byte matcher values, while an explicitly supplied raw 32-byte hex value remains 32 bytes and is rejected after a 20-byte result;
 - remember that `base64_data_to_hex` and `solana_address_to_hex` cannot validate a source checksum because those input formats do not contain one;
 - use the converter's decoded hex output, not the original printable address, as XorFilter input;
 - select the matching `-c` branch. Equal-length values from unrelated currencies are not interchangeable;
-- P2WSH filters contain the converter's 20-byte matcher values. For Taproot, first apply the RIPEMD-160 step shown above and build the filter from those resulting 20-byte matcher values, not from the converter's 32-byte output keys;
+- P2WSH and Taproot filters contain the converter's 20-byte RIPEMD-160 matcher values. Keep these two target families in separate files and filters even though their matcher width is the same;
 - when running a source build, use `tools/<project>/bin/<tool>`; the shorter `tools/<tool>` path belongs to the ready-to-run tools archive.
 
 Test one known address through the converter and one short search range before building a large filter.
@@ -2212,7 +2204,7 @@ Passphrase BIP-39 — это дополнительный текст в прео
 
 Для `p` сравнение с фильтром выполняется по RIPEMD160 от 32-байтового P2WSH witness program. Найденная запись содержит полный 32-байтовый program, а с `-save` он выводится как адрес Bech32. Поэтому фильтр P2WSH нужно строить именно из ожидаемых программой 20-байтовых значений сравнения, а не из текстовых адресов и не из произвольных 32-байтовых строк.
 
-У ветки `r` также различаются сохраняемое значение и значение сравнения. В найденной записи находится полный 32-байтовый выходной ключ Taproot, а `-hash` и фильтры проверяют его 20-байтовый RIPEMD-160. Поэтому перед XorFilter сырой 32-байтовый ключ Taproot нужно отдельно преобразовать в это значение сравнения.
+У ветки `r` также различаются сохраняемое значение и значение сравнения. В найденной записи находится полный 32-байтовый выходной ключ Taproot, а `-hash` и фильтры проверяют его 20-байтовый RIPEMD-160. Мультивалютный конвертер выполняет этот RIPEMD-160 автоматически, когда получает адрес Taproot Bech32m. Если исходными данными является сырой 32-байтовый выходной ключ, значение сравнения нужно рассчитать отдельно либо сразу передать готовый 20-байтовый hex.
 
 ### Варианты сетей и адресов
 
@@ -2359,7 +2351,7 @@ TOOL -h
 | --- | --- | --- | --- |
 | `cardano_address_to_hex` | Cardano Shelley Bech32 или Byron Base58 с проверкой CBOR/CRC | SHA-256 от декодированного адреса, 32 байта / 64 hex-символа | `a` |
 | `algorand_address_to_hex` | 58-символьный адрес Algorand Base32 с checksum SHA-512/256 | открытый ключ 32 байта / 64 hex-символа | отдельной цели в v14 нет |
-| `multicoin_base58_bech32_address_to_hex` | мультивалютные Bitcoin-подобные Base58Check, SegWit Bech32/Bech32m, CashAddr либо готовый hex на 20/32 байта | 20 или 32 байта в зависимости от типа адреса | `c`, `u`, `s`, `p` или `r` после дополнительного шага ниже |
+| `multicoin_base58_bech32_address_to_hex` | мультивалютные Bitcoin-подобные Base58Check, SegWit Bech32/Bech32m, CashAddr либо готовый hex на 20/32 байта | 20-байтовое значение сравнения для поддерживаемых адресов; raw hex сохраняет исходную длину 20/32 байта | `c`, `u`, `s`, `p` или `r` |
 | `base64_data_to_hex` | строгий Base64 или Base64URL с padding либо без него | декодированные байты; одна длина на файл | заранее заданного семейства нет |
 | `cosmos_bnb_address_to_hex` | Bech32 семейства Cosmos либо готовый 20-байтовый hex | payload 20 байтов / 40 hex-символов | отдельной цели в v14 нет |
 | `polkadot_kusama_address_to_hex` | SS58 с одно- или двухбайтовым префиксом сети и checksum Blake2b | account ID 32 байта / 64 hex-символа | `d` |
@@ -2392,7 +2384,7 @@ tools/algorand_address_to_hex algorand-addresses.txt algorand-public-keys.txt
 
 #### `multicoin_base58_bech32_address_to_hex` - мультивалютные Bitcoin-подобные сети
 
-Это общий конвертер для Bitcoin-подобных валют, а не программа только для Bitcoin. Он принимает стандартные Base58Check-адреса с префиксом сети от одного до четырех байтов и 20-байтовым payload, witness v0 в Bech32, Taproot v1 в Bech32m, CashAddr с 20-байтовым payload и готовый hex на 20 или 32 байта. Проверка строится по формату, а не по короткому жестко заданному списку монет, поэтому тот же бинарник подходит для совместимых сетей на основе Bitcoin, например Litecoin, Dogecoin, Dash и других. У XRP и Cosmos/BNB другие правила адресов, а для Tron отдельно проверяется префикс `0x41`, поэтому все три семейства оставлены в своих строгих программах. Каждую валюту, ветку адреса и длину значения храните в своем входном файле.
+Это общий конвертер для Bitcoin-подобных валют, а не программа только для Bitcoin. Он принимает стандартные Base58Check-адреса с префиксом сети от одного до четырех байтов и 20-байтовым payload, witness v0 в Bech32, Taproot v1 в Bech32m, CashAddr с 20-байтовым payload и готовый hex на 20 или 32 байта. Если из адреса P2WSH или Taproot извлекается 32-байтовый witness program, программа сразу преобразует его в 20-байтовый RIPEMD-160 для сравнения. Строка raw hex длиной 32 байта остается без изменений, потому что это уже явно переданное двоичное значение, а не адрес. Проверка строится по формату, а не по короткому жестко заданному списку монет, поэтому тот же бинарник подходит для совместимых сетей на основе Bitcoin, например Litecoin, Dogecoin, Dash и других. У XRP и Cosmos/BNB другие правила адресов, а для Tron отдельно проверяется префикс `0x41`, поэтому все три семейства оставлены в своих строгих программах. Каждую валюту, ветку адреса и длину значения храните в своем входном файле.
 
 ```bash
 tools/multicoin_base58_bech32_address_to_hex bitcoin-addresses.txt bitcoin-targets.txt
@@ -2486,17 +2478,9 @@ tools/xrp_address_to_hex xrp-addresses.txt xrp-account-ids.txt
 tools/tezos_address_to_hex tezos-addresses.txt tezos-key-hashes.txt
 ```
 
-Для `multicoin_base58_bech32_address_to_hex` одной расшифровки адреса недостаточно, чтобы выбрать ветку Toolkit. P2PKH может относиться к `c` или `u` в зависимости от того, какой открытый ключ создал адрес. P2SH-wrapped SegWit относится к `s`. Адрес P2WSH сразу преобразуется в 20-байтовый RIPEMD-160, который ожидает `-c p`. По одному 20-байтовому payload программа не может определить ни ветку приватного ключа, ни исходную сеть.
+Для `multicoin_base58_bech32_address_to_hex` одной расшифровки адреса недостаточно, чтобы выбрать ветку Toolkit. P2PKH может относиться к `c` или `u` в зависимости от того, какой открытый ключ создал адрес. P2SH-wrapped SegWit относится к `s`. Адреса P2WSH и Taproot сразу преобразуются в 20-байтовый RIPEMD-160, который ожидают `-c p` и `-c r` соответственно. Полученный файл можно сразу передавать в XorFilter: дополнительная обработка через OpenSSL не требуется. По одному 20-байтовому значению программа не может определить ни ветку приватного ключа, ни исходную сеть, поэтому P2PKH, P2SH-wrapped SegWit, P2WSH и Taproot нужно хранить в отдельных исходных файлах и фильтрах.
 
-Taproot является отдельным случаем. Конвертер сохраняет полный 32-байтовый выходной ключ адреса, но в v14 ветка `-c r` сравнивает RIPEMD-160 от этого ключа. Перед XorFilter преобразуйте однородный файл с 32-байтовыми ключами в отдельный файл значений сравнения:
-
-```bash
-while IFS= read -r key; do
-  printf '%s' "$key" | xxd -r -p | openssl dgst -ripemd160 -binary | xxd -p -c 40
-done < taproot-output-keys.txt > taproot-matchers.txt
-```
-
-В XorFilter передавайте `taproot-matchers.txt`. Файл `taproot-output-keys.txt` нужен только тогда, когда требуется сохранить сами полные 32-байтовые ключи.
+Если строка передана как raw hex длиной 32 байта, а не как печатный адрес, конвертер сохраняет все 32 байта. Это сделано намеренно: в голом двоичном значении нет версии адреса, по которой можно понять, требуется ли RIPEMD-160. Для готового значения сравнения Taproot передавайте адрес Bech32m либо уже рассчитанный 20-байтовый hex.
 
 Полная цепочка подготовки фильтра выглядит так:
 
@@ -2514,7 +2498,7 @@ mkdir -p filters
   -c a -xu filters/cardano-targets_0.xor_u -save -o found.txt
 ```
 
-Сам Binary Fuse-фильтр создает отдельный проект [XopMC/XorFilter](https://github.com/XopMC/XorFilter). Конвертеры лишь готовят для него список. Для каждой буквы `-c` и каждого представления цели лучше делать отдельный список и отдельный фильтр, даже если длина значений совпадает. Нельзя смешивать 20 и 32 байта, Bitcoin с XRP/Cosmos или значения сравнения P2WSH с отдельно подготовленными значениями сравнения Taproot.
+Сам Binary Fuse-фильтр создает отдельный проект [XopMC/XorFilter](https://github.com/XopMC/XorFilter). Конвертеры лишь готовят для него список. Для каждой буквы `-c` и каждого представления цели лучше делать отдельный список и отдельный фильтр, даже если длина значений совпадает. Нельзя смешивать 20 и 32 байта, Bitcoin с XRP/Cosmos или значения сравнения P2WSH со значениями сравнения Taproot.
 
 ## Сохранение, буферы и устройства
 
@@ -3635,11 +3619,11 @@ otool -l ./METAL_CRYPTO_TOOLKIT | grep -A3 __metallib
 
 - откройте созданный файл `*-invalid.txt`: в нем находятся исходные строки, которые не прошли проверку;
 - проверьте, не появился ли пробел внутри адреса, не повреждена ли checksum, поддерживается ли префикс сети и не потерян ли один символ;
-- храните в одном файле значения одной длины. Первый правильный адрес задает длину, поэтому 32-байтовая цель Taproot будет отклонена после 20-байтовой цели Bitcoin;
+- храните в одном файле значения одной длины. Поддерживаемые печатные Bitcoin-подобные адреса дают 20-байтовые значения сравнения, а явно переданный raw hex длиной 32 байта остается 32-байтовым и будет отклонен после 20-байтового результата;
 - у `base64_data_to_hex` и `solana_address_to_hex` нет возможности проверить checksum: сами входные форматы ее не содержат;
 - передавайте в XorFilter полученный hex, а не исходный напечатанный адрес;
 - выбирайте соответствующую букву `-c`. Одинаковая длина значений разных валют не делает их взаимозаменяемыми;
-- фильтр P2WSH строится из 20-байтовых значений сравнения, созданных конвертером. Для Taproot сначала выполните показанный выше шаг RIPEMD-160 и стройте фильтр из полученных 20-байтовых значений сравнения, а не из 32-байтовых выходных ключей конвертера;
+- фильтры P2WSH и Taproot строятся из созданных конвертером 20-байтовых RIPEMD-160. Несмотря на одинаковую длину, эти два семейства целей нужно хранить в разных файлах и фильтрах;
 - при сборке из исходников запускайте `tools/<проект>/bin/<программа>`. Короткий путь `tools/<программа>` используется в готовом архиве tools.
 
 Сначала пропустите через конвертер один заранее известный адрес и проверьте его на коротком диапазоне. Большой фильтр создавайте только после этого.
