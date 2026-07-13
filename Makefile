@@ -34,6 +34,7 @@ HOST_OBJS := $(HOST_SRCS:%.mm=$(BUILD_DIR)/%.o)
 CPP_SRCS := \
 	base58.cpp filter.cpp \
 	MacFileSystem.cpp \
+	PoetryHost.cpp \
 	SecpPrecompute.cpp \
 	host_secp/HostSecp256k1.cpp \
 	old_electrum_host.cpp \
@@ -50,7 +51,7 @@ CPP_OBJS := $(CPP_SRCS:%.cpp=$(BUILD_DIR)/%.o)
 C_OBJS := $(C_SRCS:%.c=$(BUILD_DIR)/%.o)
 DEPS := $(HOST_OBJS:.o=.d) $(CPP_OBJS:.o=.d) $(C_OBJS:.o=.d)
 
-LOCALIZED_HOST_HEADERS := Makefile KernelRuntime.h MacFileSystem.h SecpPrecompute.h \
+LOCALIZED_HOST_HEADERS := Makefile KernelRuntime.h MacFileSystem.h Poetry.h PoetryHost.h SecpPrecompute.h \
 	main_priv_recovery_runtime.h xor_filter_core.h \
 	Prng32ComboAllowlist.generated.h Prng64ComboAllowlist.generated.h \
 	Kernels/ProfanityHost.h Kernels/WalletModesHost.h Kernels/XpReplayHost.h \

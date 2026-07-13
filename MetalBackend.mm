@@ -924,6 +924,7 @@ bool uses_worker_common_function_constants(const std::string& name) {
     static const char* names[] = {
         "worker",
         "workerPRIV",
+        "workerPoetry",
         "worker_seq",
         "worker_seq_hexset",
         "worker_gen",
@@ -3028,6 +3029,14 @@ metalError_t metal_launch_impl(const char* function_name,
             st = append_filter_bindings(bindings);
             if (st != metalSuccess) return st;
             st = append_found_full(bindings, false, true, true, true);
+            if (st != metalSuccess) return st;
+        } else if (name == "workerPoetry") {
+            st = append_filter_bindings(bindings);
+            if (st != metalSuccess) return st;
+            st = append_found_flexible(bindings,
+                                       true, true, true, true, false, true,
+                                       false, false, false, false, true, false,
+                                       true, true);
             if (st != metalSuccess) return st;
         } else if (starts_with(name, "workerPRIV_seq_vanity")) {
             st = append_filter_bindings(bindings);

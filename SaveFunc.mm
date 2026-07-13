@@ -3400,6 +3400,112 @@ fail:
 	delete[] rounds;
 }
 
+static void SaveResultPoetry_Worker(FILE* file,
+	uint32_t* pFounds,
+	bool save,
+	char (*foundStrings)[512],
+	uint32_t(*len_h)[1],
+	unsigned char (*foundPrvKeys)[64],
+	uint32_t(*foundHash160)[20],
+	uint8_t* coin_type,
+	int64_t* rounds,
+	unsigned long long count) {
+	for (uint64_t i = 0; i < count; ++i) {
+		if (!save_cpu_postcheck_and_count(pFounds, foundHash160, i, coin_type[i])) {
+			continue;
+		}
+		const std::string phrase(foundStrings[i], static_cast<size_t>(len_h[i][0]));
+		const PrivEmitHeads heads = make_priv_emit_heads(
+			phrase + ":",
+			"\n[!] Found: " + phrase + ":");
+		emit_priv_worker_result(file, heads, foundPrvKeys[i], foundHash160[i],
+			coin_type[i], rounds[i], save, true, 8);
+	}
+	if (save) {
+		save_output_flush(file);
+	}
+
+	delete[] foundStrings;
+	delete[] len_h;
+	delete[] foundPrvKeys;
+	delete[] foundHash160;
+	delete[] coin_type;
+	delete[] rounds;
+	STOP_THREAD = false;
+}
+
+METAL_HOST void SaveResultPoetry(FILE* file, uint32_t& Founds, bool save,
+	const vector<string>& Der_list) {
+	(void)Der_list;
+	STOP_THREAD = true;
+	unsigned long long resultsCountHost = 0;
+	SAVE_METAL_OR_RETURN("save.snapshot.count.poetry",
+		metalReadStateValue(&resultsCountHost, d_resultsCount, sizeof(resultsCountHost),
+			0, metalMemcpyDeviceToHost));
+
+	if (resultsCountHost == 0) {
+		save_clear_results_count_best_effort("save.clear_device.count.poetry");
+		return;
+	}
+
+	size_t count = static_cast<size_t>(resultsCountHost);
+	if (count > MAX_FOUNDS) count = MAX_FOUNDS;
+
+	char (*foundStrings)[512] = new char[count][512];
+	uint32_t(*len_h)[1] = new uint32_t[count][1];
+	unsigned char (*foundPrvKeys)[64] = new unsigned char[count][64];
+	uint32_t(*foundHash160)[20] = new uint32_t[count][20];
+	uint8_t* coin_type = new uint8_t[count];
+	int64_t* rounds = new int64_t[count];
+
+	char (*dev_foundStrings)[512] = nullptr;
+	uint32_t(*dev_len)[1] = nullptr;
+	unsigned char (*dev_foundPrvKeys)[64] = nullptr;
+	uint32_t(*dev_foundHash160)[20] = nullptr;
+	uint8_t* dev_type = nullptr;
+	int64_t* dev_rounds = nullptr;
+
+	SAVE_METAL_OR_GOTO("save.snapshot.symbols.poetry", metalReadStateValue(&dev_foundStrings, d_foundStrings, sizeof(dev_foundStrings)), fail_poetry);
+	SAVE_METAL_OR_GOTO("save.snapshot.symbols.poetry", metalReadStateValue(&dev_len, d_len, sizeof(dev_len)), fail_poetry);
+	SAVE_METAL_OR_GOTO("save.snapshot.symbols.poetry", metalReadStateValue(&dev_foundPrvKeys, d_foundPrvKeys, sizeof(dev_foundPrvKeys)), fail_poetry);
+	SAVE_METAL_OR_GOTO("save.snapshot.symbols.poetry", metalReadStateValue(&dev_foundHash160, d_foundHash160, sizeof(dev_foundHash160)), fail_poetry);
+	SAVE_METAL_OR_GOTO("save.snapshot.symbols.poetry", metalReadStateValue(&dev_type, d_type, sizeof(dev_type)), fail_poetry);
+	SAVE_METAL_OR_GOTO("save.snapshot.symbols.poetry", metalReadStateValue(&dev_rounds, d_round, sizeof(dev_rounds)), fail_poetry);
+
+	SAVE_METAL_OR_GOTO("save.snapshot.copy.poetry", metalMemcpy(foundStrings, dev_foundStrings, count * 512 * sizeof(char), metalMemcpyDeviceToHost), fail_poetry);
+	SAVE_METAL_OR_GOTO("save.snapshot.copy.poetry", metalMemcpy(len_h, dev_len, count * sizeof(uint32_t), metalMemcpyDeviceToHost), fail_poetry);
+	SAVE_METAL_OR_GOTO("save.snapshot.copy.poetry", metalMemcpy(foundPrvKeys, dev_foundPrvKeys, count * 64 * sizeof(uint8_t), metalMemcpyDeviceToHost), fail_poetry);
+	SAVE_METAL_OR_GOTO("save.snapshot.copy.poetry", metalMemcpy(foundHash160, dev_foundHash160, count * 20 * sizeof(uint32_t), metalMemcpyDeviceToHost), fail_poetry);
+	SAVE_METAL_OR_GOTO("save.snapshot.copy.poetry", metalMemcpy(coin_type, dev_type, count * sizeof(uint8_t), metalMemcpyDeviceToHost), fail_poetry);
+	SAVE_METAL_OR_GOTO("save.snapshot.copy.poetry", metalMemcpy(rounds, dev_rounds, count * sizeof(int64_t), metalMemcpyDeviceToHost), fail_poetry);
+
+	SAVE_METAL_OR_GOTO("save.clear_device.poetry", metalMemset(dev_foundStrings, 0, count * 512 * sizeof(char)), fail_poetry);
+	SAVE_METAL_OR_GOTO("save.clear_device.poetry", metalMemset(dev_len, 0, count * sizeof(uint32_t)), fail_poetry);
+	SAVE_METAL_OR_GOTO("save.clear_device.poetry", metalMemset(dev_foundPrvKeys, 0, count * 64 * sizeof(uint8_t)), fail_poetry);
+	SAVE_METAL_OR_GOTO("save.clear_device.poetry", metalMemset(dev_foundHash160, 0, count * 20 * sizeof(uint32_t)), fail_poetry);
+	SAVE_METAL_OR_GOTO("save.clear_device.poetry", metalMemset(dev_type, 0, count * sizeof(uint8_t)), fail_poetry);
+	SAVE_METAL_OR_GOTO("save.clear_device.poetry", metalMemset(dev_rounds, 0, count * sizeof(int64_t)), fail_poetry);
+
+	save_clear_results_count_best_effort("save.clear_device.count.poetry");
+	{
+		std::lock_guard<std::mutex> lock(g_save_threads_mutex);
+		enqueue_async_save_task_for_current_gpu("poetry", count, save,
+			SaveResultPoetry_Worker, file, &Founds, save, foundStrings, len_h,
+			foundPrvKeys, foundHash160, coin_type, rounds, count);
+	}
+
+	if (FULL) flush_all_async_save_queues();
+	return;
+
+fail_poetry:
+	delete[] foundStrings;
+	delete[] len_h;
+	delete[] foundPrvKeys;
+	delete[] foundHash160;
+	delete[] coin_type;
+	delete[] rounds;
+}
+
 static std::string build_profanity_prefix(const ProfanityVerifiedResult& result) {
 	char head[96];
 	std::snprintf(head, sizeof(head),
@@ -6604,5 +6710,4 @@ METAL_HOST void SaveResultArmoryRootGen(FILE* file, uint32_t& Founds, bool save,
 
 
 }
-
 

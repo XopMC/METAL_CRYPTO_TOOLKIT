@@ -12,6 +12,7 @@
 #include <shared_mutex>
 #include <queue>
 #include "KernelRuntime.h"
+#include "PoetryHost.h"
 #include "SecpPrecompute.h"
 #include "Kernels/ProfanityHost.h"
 #include "Kernels/WalletModesHost.h"
@@ -356,6 +357,7 @@ struct RecoveryPreparedTask {
 };
 
 bool RECOVERY_MODE = false;
+static bool POETRY_MODE = false;
 static bool PROFANITY_MODE = false;
 static bool KEYSTORE_MODE = false;
 static bool WALLETDAT_MODE = false;
@@ -7185,6 +7187,7 @@ enum class HelpTopic {
     PassThread,
     Priv,
     PrivRecovery,
+    Poetry,
     Minikeys,
     MinikeysSeed,
     Xp,
@@ -7262,7 +7265,7 @@ enum class HelpTopic {
 "[!]        -xtz-type LIST              XTZ curves: 1=secp256k1, 2=ed25519.\n"
 
 static const char* kLegacyDetailedHelp = R"HELP(
-[!] ================== METAL_CRYPTO_TOOLKIT v13 FULL HELP ==================
+[!] ================== METAL_CRYPTO_TOOLKIT v14 FULL HELP ==================
 
 [!] [!] QUICK START [!]
 [!] -h / -help                      Show this help and exit.
@@ -9239,6 +9242,7 @@ static HelpTopic detect_help_topic(int argc, char** argv) {
         if (is_help_topic_arg(arg, "-priv")) {
             return has_arg(argc, argv, "-recovery") ? HelpTopic::PrivRecovery : HelpTopic::Priv;
         }
+        if (is_help_topic_arg(arg, "-poetry")) return HelpTopic::Poetry;
         if (is_help_topic_arg(arg, "-minikeys")) {
             return has_arg(argc, argv, "-seed") ? HelpTopic::MinikeysSeed : HelpTopic::Minikeys;
         }
@@ -9299,6 +9303,7 @@ static const char* help_topic_command(HelpTopic topic) {
     case HelpTopic::PassThread: return "-pass_thread";
     case HelpTopic::Priv: return "-priv";
     case HelpTopic::PrivRecovery: return "-priv -recovery";
+    case HelpTopic::Poetry: return "-poetry";
     case HelpTopic::Minikeys: return "-minikeys";
     case HelpTopic::MinikeysSeed: return "-minikeys -seed";
     case HelpTopic::Xp: return "-xp";
@@ -9378,6 +9383,7 @@ static void printHelpShort() {
 [!] [!] PRIVATE KEY / HISTORICAL REPLAY MODES [!] [!]
 [!] -priv                         Raw private key search.
 [!] -priv -recovery               Raw private key template recovery.
+[!] -poetry                       Poetry brainwallet phrase recovery.
 [!] -minikeys                     Casascius minikey search.
 [!] -minikeys -seed               Deterministic Casascius minikey seed mode.
 [!] -xp                           XP/OpenSSL historical private replay.
@@ -9405,7 +9411,7 @@ static void printHelpShort() {
 [!] -multibitwallet               MultiBit wallet recovery.
 [!] -bisqwallet                   Bisq wallet hash recovery.
 [!] -dogechainwallet              Dogechain.info wallet recovery.
-[!] -bip38                        Reserved in v13; verification is disabled.
+[!] -bip38                        Reserved in v14; verification is disabled.
 [!] -ethpresale                   Ethereum presale wallet recovery.
 [!] -androidwallet                Android wallet backup recovery.
 [!]
@@ -10306,14 +10312,14 @@ static void printHelpEthPresaleSection() {
 
 static void printHelpBip38Section() {
     puts(R"HELP(
-[!] MAIN MODE: -bip38  (reserved in v13)
+[!] MAIN MODE: -bip38  (reserved in v14)
 [!]
 [!] Status:
 [!] This build can parse metadata for both BIP38 private-key profiles:
 [!]   6P... payload 01 42 <flag> <addresshash4> <encrypted32>
 [!]   6P... payload 01 43 <flag> <addresshash4> <ownerentropy8> <encryptedpart1_8> <encryptedpart2_16>
 [!]
-[!] Password computation and result verification are disabled in v13.
+[!] Password computation and result verification are disabled in v14.
 [!] The mode cannot confirm a password or write a recovered private key.
 [!] It is listed only so scripts can detect that the command name is reserved.
 )HELP");
@@ -10647,6 +10653,9 @@ static void printHelpModeSection(HelpTopic topic) {
     case HelpTopic::Priv:
         printHelpPrivSection();
         break;
+    case HelpTopic::Poetry:
+        poetry_print_help();
+        break;
     case HelpTopic::Xp:
         printHelpRange("[!] MAIN MODE: -xp", "[!] MAIN MODE: -minikeys");
         break;
@@ -10769,6 +10778,8 @@ static bool walletjs_is_supported_cli_profile(const char* raw, std::string& err)
     return false;
 }
 
+#include "PoetryProcess.inl"
+
 int main(int argc, char** argv)
 {
     setlocale(LC_ALL, "en_US.UTF-8");
@@ -10776,7 +10787,7 @@ int main(int argc, char** argv)
         std::ios_base::sync_with_stdio(false);
         std::cin.tie(nullptr);
     }
-    printf("[!] METAL_CRYPTO_TOOLKIT v13.0.0 by @XopMC for Crypto Community\n");
+    printf("[!] METAL_CRYPTO_TOOLKIT v14.0.0 by @XopMC for Crypto Community\n");
 
     if (argc == 1) {
         printHelpShort();
@@ -10788,6 +10799,18 @@ int main(int argc, char** argv)
     }
     if (!readArgs(argc, argv)) {
         return 2;
+    }
+    if (POETRY_MODE) {
+        std::string poetry_error;
+        if (!poetry_validate_cli_surface(argc, argv, poetry_error) ||
+            !poetry_prepare_templates(isRandom, g_poetry_templates, g_poetry_dictionary, poetry_error)) {
+            std::cerr << "[!] Error: " << poetry_error << " [!]" << std::endl;
+            return 2;
+        }
+        if (!mnemonicFiles.empty() || useDirectory) {
+            std::cerr << "[!] Error: Poetry input must be attached to -poetry; use -poetry -i FILE [!]" << std::endl;
+            return 2;
+        }
     }
 
     if (is_pending_exact_wallet_seed_mode()) {
@@ -10806,7 +10829,7 @@ int main(int argc, char** argv)
 
     if (!PROFANITY_MODE && !KEYSTORE_MODE && !WALLETDAT_MODE && !WALLETJS_MODE &&
         !is_browserlike_wallet_mode() && !ELECTRUMWALLET_MODE && !EXODUSSECO_MODE && !BITCOINJWALLET_MODE && !ANDROIDWALLET_MODE && !ARMORYWALLET_MODE && !WALLETSCAN_MODE && !XP_MODE &&
-        !IS_PRIV && !IS_MINIKEYS && !BRAIN && !OLD && !ARMORY)
+        !IS_PRIV && !IS_MINIKEYS && !POETRY_MODE && !BRAIN && !OLD && !ARMORY)
     {
         bool derivations_loaded = false;
         if (!Derivations_list.empty() && !derIndex.empty()) {
@@ -10925,7 +10948,7 @@ int main(int argc, char** argv)
     if (has_generic_derivation_targets() && derivation_type_enabled(DERIVATION_TYPE_MASK_BIP32)) { secp256_host = true; }
     if (has_generic_derivation_targets() && (derivation_type_enabled(DERIVATION_TYPE_MASK_SLIP0010) || derivation_type_enabled(DERIVATION_TYPE_MASK_BIP32_ED25519))) { ed25519_host = true; }
     if (Dot && !g_substrate_paths_host.empty()) { ed25519_host = true; }
-    if (Ada && (IS_PRIV || IS_MINIKEYS || BRAIN)) { ed25519_host = true; }
+    if (Ada && (IS_PRIV || IS_MINIKEYS || POETRY_MODE || BRAIN)) { ed25519_host = true; }
     if (Ethereum || Compressed || Uncompressed || Segwit || P2wsh || Xpoint || Solana || Taproot || Dot || Aptos || Sui || Xrp || Iota || Ada || Icp || Fil || Xtz) { Ton_only = false; }
 
     if (!set_bit)
@@ -10939,7 +10962,7 @@ int main(int argc, char** argv)
             // BIP39-like recovery runs are usually short and startup-bound, so use a lighter secp table.
             PARAM_ECMULT_WINDOW_SIZE = 10;
         }
-        else if (IS_PRIV || IS_MINIKEYS)
+        else if (IS_PRIV || IS_MINIKEYS || POETRY_MODE)
         {
             PARAM_ECMULT_WINDOW_SIZE = 18;
         }
@@ -10968,7 +10991,7 @@ int main(int argc, char** argv)
 
     unsigned int requested_blocks = set_block ? BLOCK_NUMBER : 0u;
 
-    if ((IS_PRIV || IS_MINIKEYS || BRAIN) && (Rounds >= 10 && !set_block && !set_thread))
+    if ((IS_PRIV || IS_MINIKEYS || POETRY_MODE || BRAIN) && (Rounds >= 10 && !set_block && !set_thread))
     {
         requested_blocks = 128u;
         printf("[!][!][!] Warning: -round >= 10 ---> GPU blocks count reduced to 128 [!][!][!]\n");
@@ -10986,7 +11009,7 @@ int main(int argc, char** argv)
     }
     std::cout << "\n";
 
-    if ((IS_PRIV || IS_MINIKEYS || PROFANITY_MODE || XP_MODE) && !seqMode && !isRandom)
+    if ((IS_PRIV || IS_MINIKEYS || POETRY_MODE || PROFANITY_MODE || XP_MODE) && !seqMode && !isRandom)
     {
         printf("[!] Number of keys per thread: %d\n", THREAD_STEPS);
 
@@ -11075,7 +11098,7 @@ int main(int argc, char** argv)
         }
     }
     activate_gpu_context(g_gpu_contexts.front());
-    if (!IS_PRIV && !IS_MINIKEYS && !BRAIN && !KEYSTORE_MODE && !WALLETDAT_MODE && !WALLETJS_MODE &&
+    if (!IS_PRIV && !IS_MINIKEYS && !POETRY_MODE && !BRAIN && !KEYSTORE_MODE && !WALLETDAT_MODE && !WALLETJS_MODE &&
         !is_browserlike_wallet_mode() && !ELECTRUMWALLET_MODE && !EXODUSSECO_MODE && !BITCOINJWALLET_MODE && !ANDROIDWALLET_MODE && !ARMORYWALLET_MODE && !WALLETSCAN_MODE && !XP_MODE) {
         if (OLD)
         {
@@ -11130,7 +11153,11 @@ int main(int argc, char** argv)
         };
     speedThread = std::thread(SpeedThreadFunc);
 
-    if (KEYSTORE_MODE)
+    if (POETRY_MODE)
+    {
+        metalStatus = processMetalPoetry();
+    }
+    else if (KEYSTORE_MODE)
     {
         metalStatus = processMetalKeystore();
     }
@@ -13396,7 +13423,7 @@ int main(int argc, char** argv)
     shutdown_async_save_queues();
 
     s_time = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
-    if (!PROFANITY_MODE && !XP_MODE && !IS_PRIV && !IS_MINIKEYS)
+    if (!PROFANITY_MODE && !XP_MODE && !IS_PRIV && !IS_MINIKEYS && !POETRY_MODE)
     {
         std::cout << "\n[!] Processed " << counterTotal << " lines." << " Found: " << Founds << ". Program finished at " << std::ctime(&s_time);
     }
@@ -13436,6 +13463,7 @@ static inline bool crypted_default_mnemonic_mode_selected() {
         !ARMORYWALLET_MODE &&
         !WALLETSCAN_MODE &&
         !RECOVERY_MODE &&
+        !POETRY_MODE &&
         !IS_PRIV &&
         !IS_MINIKEYS &&
         !SEED &&
@@ -13506,6 +13534,15 @@ bool readArgs(int argc, char** argv) {
             }
             DEVICE_NR = DEVICE_LIST.front();
             a++;
+            continue;
+        }
+        if (strcmp(argv[a], "-poetry") == 0) {
+            std::string poetry_error;
+            if (!poetry_cli_consume(argc, argv, a, poetry_error)) {
+                fprintf(stderr, "[!] Error: %s [!]\n", poetry_error.c_str());
+                return false;
+            }
+            POETRY_MODE = true;
             continue;
         }
         if (strcmp(argv[a], "-profanity") == 0) {
@@ -18972,6 +19009,10 @@ bool checkDevice() {
                         tuneProfile = "profanity_search_mixed";
                     }
                 }
+            }
+            else if (POETRY_MODE) {
+                blocksPerSm = 8u;
+                tuneProfile = isRandomInputMode ? "poetry_random" : "poetry_finite";
             }
             else if (IS_PRIV || (IS_MINIKEYS && !IS_MINIKEYS_SEED)) {
                 if ((isSeqInputMode || (IS_MINIKEYS && !IS_MINIKEYS_SEED)) && !isRandomInputMode && !isPrngInputMode && !isFileInputMode) {
@@ -58672,11 +58713,14 @@ static inline uint32_t substrate_suri_output_count_for_stats() {
 }
 
 static inline bool direct_key_material_mode_for_stats() {
-    return IS_PRIV || IS_MINIKEYS || BRAIN;
+    return IS_PRIV || IS_MINIKEYS || POETRY_MODE || BRAIN;
 }
 
 static inline double current_hash_speed_multiplier() {
     const double target_count = static_cast<double>(c_counter + ((Ada && g_ada_pointer_set) ? 1 : 0));
+    if (POETRY_MODE) {
+        return target_count > 0.0 ? target_count : 1.0;
+    }
     if (!g_bip_derivations_loaded && !direct_key_material_mode_for_stats() && !OLD && !ARMORY) {
         const uint32_t substrate_count = substrate_suri_output_count_for_stats();
         return substrate_count == 0u ? target_count : static_cast<double>(substrate_count);
@@ -58864,7 +58908,7 @@ void printSpeed(double speed, int byte_p, uint32_t seed_p, int skip, double vali
             Founds,
             falsePositiveCount);
     }
-    else if (IS_PRIV)
+    else if (IS_PRIV || POETRY_MODE)
     {
         std::string speed_count = formatDouble("%.2f", speed * current_hash_speed_multiplier()) + " Hash/s";
         speedStr = formatDouble("%.2f", speed) + " Key/s";

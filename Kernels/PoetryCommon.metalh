@@ -1,0 +1,150 @@
+#ifndef METAL_CRYPTO_POETRY_COMMON_METALH
+#define METAL_CRYPTO_POETRY_COMMON_METALH
+
+#include <metal_stdlib>
+#include "PrngCommon.metalh"
+
+using namespace metal;
+
+constant uint POETRY_WORD_COUNT = 1626u;
+constant uint POETRY_MAX_WORDS = 24u;
+constant ushort POETRY_WILDCARD_ID = 0xffffu;
+constant uint POETRY_MAX_PHRASE_BYTES = 512u;
+
+struct PoetryTemplateDevice {
+    ushort words[POETRY_MAX_WORDS];
+    uchar wildcard_positions[POETRY_MAX_WORDS];
+    uchar word_count;
+    uchar wildcard_count;
+    uchar random_mode;
+    uchar reserved;
+};
+
+struct PoetryThreadState {
+    ushort digits[POETRY_MAX_WORDS];
+    ulong random_state;
+    uchar active;
+    uchar reserved[7];
+};
+
+static inline bool poetry_add_stride(thread ushort* digits, uchar digit_count, ulong stride) {
+    ulong carry = stride;
+    for (int i = int(digit_count) - 1; i >= 0 && carry != 0ul; --i) {
+        const ulong sum = ulong(digits[i]) + carry;
+        digits[i] = ushort(sum % ulong(POETRY_WORD_COUNT));
+        carry = sum / ulong(POETRY_WORD_COUNT);
+    }
+    return carry == 0ul;
+}
+
+static inline bool poetry_set_digits_from_index(device ushort* digits, uchar digit_count, ulong index) {
+    for (int i = int(digit_count) - 1; i >= 0; --i) {
+        digits[i] = ushort(index % ulong(POETRY_WORD_COUNT));
+        index /= ulong(POETRY_WORD_COUNT);
+    }
+    return index == 0ul;
+}
+
+static inline ushort poetry_random_word_id(thread ulong& state) {
+    const ulong limit = (0ul - ulong(POETRY_WORD_COUNT)) % ulong(POETRY_WORD_COUNT);
+    ulong value;
+    do {
+        value = rng_splitmix64(state);
+    } while (value < limit);
+    return ushort(value % ulong(POETRY_WORD_COUNT));
+}
+
+static inline void poetry_materialize_finite_ids(const device PoetryTemplateDevice& poetry_template,
+                                                  const thread ushort* digits,
+                                                  thread ushort* word_ids) {
+    for (uint i = 0u; i < POETRY_MAX_WORDS; ++i) {
+        word_ids[i] = poetry_template.words[i];
+    }
+    for (uint i = 0u; i < POETRY_MAX_WORDS; ++i) {
+        if (i < uint(poetry_template.wildcard_count)) {
+            word_ids[poetry_template.wildcard_positions[i]] = digits[i];
+        }
+    }
+}
+
+static inline void poetry_materialize_random_ids(const device PoetryTemplateDevice& poetry_template,
+                                                  ulong candidate_seed,
+                                                  thread ushort* word_ids) {
+    for (uint i = 0u; i < POETRY_MAX_WORDS; ++i) {
+        word_ids[i] = poetry_template.words[i];
+    }
+    for (uint i = 0u; i < POETRY_MAX_WORDS; ++i) {
+        if (i < uint(poetry_template.wildcard_count)) {
+            word_ids[poetry_template.wildcard_positions[i]] = poetry_random_word_id(candidate_seed);
+        }
+    }
+}
+
+static inline void poetry_decode_private_key(const thread ushort* word_ids,
+                                              uchar word_count,
+                                              thread uchar* private_key) {
+    for (uint i = 0u; i < 32u; ++i) private_key[i] = 0u;
+    const uint group_count = uint(word_count) / 3u;
+    const uint output_offset = 32u - group_count * 4u;
+    for (uint group = 0u; group < group_count; ++group) {
+        const uint word_offset = group * 3u;
+        const uint w1 = uint(word_ids[word_offset]);
+        const uint w2 = uint(word_ids[word_offset + 1u]);
+        const uint w3 = uint(word_ids[word_offset + 2u]);
+        const uint delta21 = (w2 + POETRY_WORD_COUNT - w1) % POETRY_WORD_COUNT;
+        const uint delta32 = (w3 + POETRY_WORD_COUNT - w2) % POETRY_WORD_COUNT;
+        const uint block = uint(ulong(w1) + ulong(POETRY_WORD_COUNT) * ulong(delta21) +
+                                ulong(POETRY_WORD_COUNT) * ulong(POETRY_WORD_COUNT) * ulong(delta32));
+        thread uchar* out = private_key + output_offset + group * 4u;
+        out[0] = uchar(block >> 24u);
+        out[1] = uchar(block >> 16u);
+        out[2] = uchar(block >> 8u);
+        out[3] = uchar(block);
+    }
+}
+
+static inline ushort poetry_build_phrase(const thread ushort* word_ids,
+                                          uchar word_count,
+                                          const device char* dictionary_blob,
+                                          const device ushort* dictionary_offsets,
+                                          const device uchar* dictionary_lengths,
+                                          thread char* output) {
+    ushort length = 0u;
+    for (uint i = 0u; i < uint(word_count); ++i) {
+        if (i != 0u) output[length++] = ' ';
+        const ushort word_id = word_ids[i];
+        const ushort offset = dictionary_offsets[word_id];
+        const uchar word_length = dictionary_lengths[word_id];
+        for (uint j = 0u; j < uint(word_length); ++j) {
+            output[length++] = dictionary_blob[uint(offset) + j];
+        }
+    }
+    output[length] = 0;
+    return length;
+}
+
+static inline ushort poetry_phrase_for_lane(const device PoetryTemplateDevice& poetry_template,
+                                             const thread ushort* batch_start_digits,
+                                             const thread ulong* lane_seeds,
+                                             uint lane,
+                                             ulong global_stride,
+                                             const device char* dictionary_blob,
+                                             const device ushort* dictionary_offsets,
+                                             const device uchar* dictionary_lengths,
+                                             thread char* phrase) {
+    ushort word_ids[POETRY_MAX_WORDS];
+    if (poetry_template.random_mode != 0u) {
+        poetry_materialize_random_ids(poetry_template, lane_seeds[lane], word_ids);
+    } else {
+        ushort digits[POETRY_MAX_WORDS];
+        for (uint i = 0u; i < POETRY_MAX_WORDS; ++i) digits[i] = batch_start_digits[i];
+        for (uint i = 0u; i < lane; ++i) {
+            (void)poetry_add_stride(digits, poetry_template.wildcard_count, global_stride);
+        }
+        poetry_materialize_finite_ids(poetry_template, digits, word_ids);
+    }
+    return poetry_build_phrase(word_ids, poetry_template.word_count, dictionary_blob,
+                               dictionary_offsets, dictionary_lengths, phrase);
+}
+
+#endif

@@ -9,7 +9,7 @@
   <img alt="Platform" src="https://img.shields.io/badge/platform-macOS%2015%2B-111827?style=for-the-badge">
   <img alt="Architecture" src="https://img.shields.io/badge/architecture-Apple%20Silicon-0f766e?style=for-the-badge">
   <img alt="GPU API" src="https://img.shields.io/badge/GPU-Metal%203-2563eb?style=for-the-badge">
-  <img alt="Version" src="https://img.shields.io/badge/version-v13-b45309?style=for-the-badge">
+  <img alt="Version" src="https://img.shields.io/badge/version-v14-b45309?style=for-the-badge">
   <a href="#support-the-project"><img alt="Sponsor" src="https://img.shields.io/badge/Sponsor-Support%20development-EA4AAA?style=for-the-badge&amp;logo=githubsponsors&amp;logoColor=white"></a>
 </p>
 
@@ -25,7 +25,7 @@ Author: Mikhail Khoroshavin, also known as **XopMC**
 
 The program can:
 
-- process BIP-39 mnemonics, entropy, seed bytes, BIP32 master material, derivation paths, BIP-39 passphrases, and several legacy seed formats;
+- process BIP-39 mnemonics, Poetry brainwallet phrases, entropy, seed bytes, BIP32 master material, derivation paths, BIP-39 passphrases, and several legacy seed formats;
 - check secp256k1, ed25519, and sr25519 results for Bitcoin, Ethereum, TON, Solana, Polkadot/Substrate, Cardano, Filecoin, IOTA, Aptos, Sui, XRP, ICP, and Tezos;
 - search direct values or large target collections stored in Bloom and XOR filters;
 - examine raw private-key ranges, incomplete hexadecimal templates, Casascius minikeys, and known historical generator families;
@@ -49,7 +49,7 @@ Recommended precautions:
 
 ### Requirements
 
-#### Ready-to-run v13 release
+#### Ready-to-run v14 release
 
 - Apple Silicon Mac (`arm64`);
 - macOS 15.0 or newer;
@@ -68,23 +68,23 @@ The release contains one executable. The Metal library is embedded in its Mach-O
 
 ### Download, verify, and run
 
-Download these two files from the [v13 release](https://github.com/XopMC/METAL_CRYPTO_TOOLKIT/releases/tag/v13):
+Download these two files from the [v14 release](https://github.com/XopMC/METAL_CRYPTO_TOOLKIT/releases/tag/v14):
 
-- `METAL_CRYPTO_TOOLKIT-v13-macos-arm64.tar.gz`
-- `METAL_CRYPTO_TOOLKIT-v13-macos-arm64.tar.gz.sha256`
+- `METAL_CRYPTO_TOOLKIT-v14-macos-arm64.tar.gz`
+- `METAL_CRYPTO_TOOLKIT-v14-macos-arm64.tar.gz.sha256`
 
 The same release also contains the optional address-conversion package:
 
-- `METAL_CRYPTO_TOOLKIT-tools-v13-macos-arm64.tar.gz`
-- `METAL_CRYPTO_TOOLKIT-tools-v13-macos-arm64.tar.gz.sha256`
+- `METAL_CRYPTO_TOOLKIT-tools-v14-macos-arm64.tar.gz`
+- `METAL_CRYPTO_TOOLKIT-tools-v14-macos-arm64.tar.gz.sha256`
 
 It is needed only when printable cryptocurrency addresses must be converted into the homogeneous hexadecimal lists accepted by filter builders. It does not contain or replace the main Toolkit executable.
 
 Then run:
 
 ```bash
-shasum -a 256 -c METAL_CRYPTO_TOOLKIT-v13-macos-arm64.tar.gz.sha256
-tar -xzf METAL_CRYPTO_TOOLKIT-v13-macos-arm64.tar.gz
+shasum -a 256 -c METAL_CRYPTO_TOOLKIT-v14-macos-arm64.tar.gz.sha256
+tar -xzf METAL_CRYPTO_TOOLKIT-v14-macos-arm64.tar.gz
 chmod +x METAL_CRYPTO_TOOLKIT
 ./METAL_CRYPTO_TOOLKIT -help
 ```
@@ -92,8 +92,8 @@ chmod +x METAL_CRYPTO_TOOLKIT
 To install the optional converter package:
 
 ```bash
-shasum -a 256 -c METAL_CRYPTO_TOOLKIT-tools-v13-macos-arm64.tar.gz.sha256
-tar -xzf METAL_CRYPTO_TOOLKIT-tools-v13-macos-arm64.tar.gz
+shasum -a 256 -c METAL_CRYPTO_TOOLKIT-tools-v14-macos-arm64.tar.gz.sha256
+tar -xzf METAL_CRYPTO_TOOLKIT-tools-v14-macos-arm64.tar.gz
 chmod +x tools/*
 tools/cardano_address_to_hex -h
 ```
@@ -159,8 +159,8 @@ Show the main mode list:
 Установка необязательного набора конвертеров:
 
 ```bash
-shasum -a 256 -c METAL_CRYPTO_TOOLKIT-tools-v13-macos-arm64.tar.gz.sha256
-tar -xzf METAL_CRYPTO_TOOLKIT-tools-v13-macos-arm64.tar.gz
+shasum -a 256 -c METAL_CRYPTO_TOOLKIT-tools-v14-macos-arm64.tar.gz.sha256
+tar -xzf METAL_CRYPTO_TOOLKIT-tools-v14-macos-arm64.tar.gz
 chmod +x tools/*
 tools/cardano_address_to_hex -h
 ```
@@ -169,6 +169,7 @@ Show the detailed help for a mode:
 
 ```bash
 ./METAL_CRYPTO_TOOLKIT -mnemonic -help
+./METAL_CRYPTO_TOOLKIT -poetry -help
 ./METAL_CRYPTO_TOOLKIT -priv -help
 ./METAL_CRYPTO_TOOLKIT -walletdat -help
 ./METAL_CRYPTO_TOOLKIT -xp -help
@@ -427,7 +428,7 @@ After an optional `0x` prefix, `-hash` must contain an even number of hexadecima
 - the ordinary 20-byte path cannot match a `-hash` longer than 40 hex characters;
 - a longer-value comparison accepts 21 to 32 bytes only when that mode explicitly provides enough bytes for comparison.
 
-In v13, the raw `-priv` and private Vanity-walk kernels use the ordinary 20-byte comparison even for a 32-byte output such as `-c x`. In those private-key paths, a direct `-hash` longer than 20 bytes cannot match. Some other modes explicitly compare longer values and can use up to 32 bytes.
+In v14, the raw `-priv` and private Vanity-walk kernels use the ordinary 20-byte comparison even for a 32-byte output such as `-c x`. In those private-key paths, a direct `-hash` longer than 20 bytes cannot match. Some other modes explicitly compare longer values and can use up to 32 bytes.
 
 This option expects decoded binary bytes written in hex, not a Base58, Bech32, SS58, or other printable address. For example, the `-c p` P2WSH branch compares a 20-byte RIPEMD160 matcher even though its found record carries the complete 32-byte witness program.
 
@@ -533,15 +534,15 @@ When built from source, a binary is placed at `tools/<project>/bin/<tool>`. In t
 | Tool | Accepted input | Hex result | Related `-c` target |
 | --- | --- | --- | --- |
 | `cardano_address_to_hex` | Cardano Shelley Bech32 or Byron Base58 with CBOR/CRC validation | SHA-256 of the decoded address, 32 bytes / 64 hex characters | `a` |
-| `algorand_address_to_hex` | 58-character Algorand Base32 address with SHA-512/256 checksum | 32-byte public key / 64 hex characters | no direct target in v13 |
+| `algorand_address_to_hex` | 58-character Algorand Base32 address with SHA-512/256 checksum | 32-byte public key / 64 hex characters | no direct target in v14 |
 | `multicoin_base58_bech32_address_to_hex` | Multicurrency Bitcoin-like Base58Check, SegWit Bech32/Bech32m, CashAddr, or raw 20/32-byte hex | 20 or 32 bytes, depending on the address type | `c`, `u`, `s`, `p`, or `r` after the step below |
 | `base64_data_to_hex` | Strict Base64 or Base64URL, padded or unpadded | decoded bytes; one width per file | no fixed target family |
-| `cosmos_bnb_address_to_hex` | Cosmos-family Bech32 or raw 20-byte hex | 20-byte payload / 40 hex characters | no direct target in v13 |
+| `cosmos_bnb_address_to_hex` | Cosmos-family Bech32 or raw 20-byte hex | 20-byte payload / 40 hex characters | no direct target in v14 |
 | `polkadot_kusama_address_to_hex` | SS58 with a one- or two-byte network prefix and Blake2b checksum | 32-byte account ID / 64 hex characters | `d` |
 | `filecoin_address_to_hex` | Filecoin `f1`, `t1`, `f410`, or `t410` address with Blake2b checksum | 20-byte payload / 40 hex characters | `f` |
 | `solana_address_to_hex` | Base58 public key, exactly 32 decoded bytes | 32-byte public key / 64 hex characters | `S` |
-| `stellar_address_to_hex` | Stellar `G...` account or muxed `M...` StrKey with CRC16 | underlying 32-byte ed25519 public key / 64 hex characters | no direct target in v13 |
-| `stacks_address_to_hex` | Stacks mainnet/testnet C32Check address | 20-byte hash160 / 40 hex characters | no direct target in v13 |
+| `stellar_address_to_hex` | Stellar `G...` account or muxed `M...` StrKey with CRC16 | underlying 32-byte ed25519 public key / 64 hex characters | no direct target in v14 |
+| `stacks_address_to_hex` | Stacks mainnet/testnet C32Check address | 20-byte hash160 / 40 hex characters | no direct target in v14 |
 | `ton_address_to_hex` | TON friendly Base64/Base64URL, `workchain:hex`, or raw 32-byte hex | 32-byte account ID / 64 hex characters | `T` |
 | `tron_address_to_hex` | Tron Base58Check address beginning with `T`, or raw 20-byte hex | 20-byte Ethereum-style account ID / 40 hex characters | `e` |
 | `xrp_address_to_hex` | XRP Classic Base58Check or raw 20-byte hex | 20-byte account ID / 40 hex characters | `X` |
@@ -559,7 +560,7 @@ tools/cardano_address_to_hex cardano-addresses.txt cardano-targets.txt -t 8
 
 #### `algorand_address_to_hex` - Algorand
 
-Accepts a canonical 58-character uppercase Algorand address, verifies its Base32 alphabet and SHA-512/256 checksum, and returns the underlying 32-byte public key. v13 has no direct Algorand `-c` target; this tool is useful when preparing data for other software.
+Accepts a canonical 58-character uppercase Algorand address, verifies its Base32 alphabet and SHA-512/256 checksum, and returns the underlying 32-byte public key. v14 has no direct Algorand `-c` target; this tool is useful when preparing data for other software.
 
 ```bash
 tools/algorand_address_to_hex algorand-addresses.txt algorand-public-keys.txt
@@ -583,7 +584,7 @@ tools/base64_data_to_hex encoded-values.txt decoded-values.txt
 
 #### `cosmos_bnb_address_to_hex` - Cosmos-family and BNB
 
-Accepts a valid Cosmos-family Bech32 address, including Cosmos Hub and BNB-style prefixes, or a ready 20-byte hex value. It checks Bech32 and writes the 20-byte payload. v13 has no separate Cosmos/BNB target letter.
+Accepts a valid Cosmos-family Bech32 address, including Cosmos Hub and BNB-style prefixes, or a ready 20-byte hex value. It checks Bech32 and writes the 20-byte payload. v14 has no separate Cosmos/BNB target letter.
 
 ```bash
 tools/cosmos_bnb_address_to_hex cosmos-addresses.txt cosmos-payloads.txt
@@ -615,7 +616,7 @@ tools/solana_address_to_hex solana-addresses.txt solana-public-keys.txt
 
 #### `stellar_address_to_hex` - Stellar
 
-Accepts Stellar account StrKeys beginning with `G` and muxed accounts beginning with `M`. It verifies the version byte and CRC16-XMODEM checksum. For a muxed address, the output is the underlying 32-byte ed25519 public key without the muxed ID. v13 has no direct Stellar target.
+Accepts Stellar account StrKeys beginning with `G` and muxed accounts beginning with `M`. It verifies the version byte and CRC16-XMODEM checksum. For a muxed address, the output is the underlying 32-byte ed25519 public key without the muxed ID. v14 has no direct Stellar target.
 
 ```bash
 tools/stellar_address_to_hex stellar-addresses.txt stellar-public-keys.txt
@@ -623,7 +624,7 @@ tools/stellar_address_to_hex stellar-addresses.txt stellar-public-keys.txt
 
 #### `stacks_address_to_hex` - Stacks
 
-Accepts supported Stacks mainnet and testnet C32Check address versions, verifies the C32 alphabet, version, payload size, and checksum, and returns the 20-byte HASH160. v13 has no direct Stacks target.
+Accepts supported Stacks mainnet and testnet C32Check address versions, verifies the C32 alphabet, version, payload size, and checksum, and returns the 20-byte HASH160. v14 has no direct Stacks target.
 
 ```bash
 tools/stacks_address_to_hex stacks-addresses.txt stacks-hash160.txt
@@ -663,7 +664,7 @@ tools/tezos_address_to_hex tezos-addresses.txt tezos-key-hashes.txt
 
 For `multicoin_base58_bech32_address_to_hex`, the selected Toolkit branch still matters. A P2PKH payload may belong to `c` or `u` depending on the public key that created it; a P2SH-wrapped SegWit target belongs to `s`. A P2WSH address is converted directly to the 20-byte RIPEMD-160 value expected by `-c p`. The converter cannot infer a private-key branch or network from a bare 20-byte payload alone.
 
-Taproot is the deliberate exception. The converter keeps each address's complete 32-byte output key, while the v13 `-c r` matcher uses RIPEMD-160 of that key. Convert the homogeneous 32-byte output file into a separate matcher file before running XorFilter:
+Taproot is the deliberate exception. The converter keeps each address's complete 32-byte output key, while the v14 `-c r` matcher uses RIPEMD-160 of that key. Convert the homogeneous 32-byte output file into a separate matcher file before running XorFilter:
 
 ```bash
 while IFS= read -r key; do
@@ -702,7 +703,7 @@ mkdir -p filters
 | `-silent` | Suppress found lines on the terminal. It does not change the mode-specific file behavior described below. |
 | `-fsize N` | Result slots per device. Default: `150000`. |
 
-For `-mnemonic`, `-recovery`, `-entropy`, `-seed`, `-hmac`, `-bip32`, `-der_thread`, `-pass_thread`, `-priv`, `-minikeys`, `-brain`, old Electrum, and Armory key-search flows, the result file is opened in append mode and every match is written even when `-save` is absent. The flag does not validate or confirm a candidate and it does not change target matching. It changes only the final representation:
+For `-mnemonic`, `-recovery`, `-poetry`, `-entropy`, `-seed`, `-hmac`, `-bip32`, `-der_thread`, `-pass_thread`, `-priv`, `-minikeys`, `-brain`, old Electrum, and Armory key-search flows, the result file is opened in append mode and every match is written even when `-save` is absent. The flag does not validate or confirm a candidate and it does not change target matching. It changes only the final representation:
 
 - without `-save`, most matched hashes and fixed-width payloads are written as raw hexadecimal data;
 - with `-save`, Bitcoin, TON, Solana, Polkadot/Substrate, Filecoin, IOTA, XRP, Tezos, and other supported target payloads are converted to their mode-specific printable address form;
@@ -823,6 +824,69 @@ The example replaces the final word with valid English BIP-39 words, validates e
 Do not use the hexadecimal-template rules from `-priv -recovery` here. A mnemonic `*` represents one whole word.
 
 For predictable recovery, provide an exact BIP-39 word count and mark every unknown position explicitly. The current parser can pad a short template with additional wildcards until its word count is at least three and divisible by three, and it can map an unknown written word to the nearest dictionary entry. Do not rely on either convenience behavior in an evidence-sensitive search.
+
+#### `-poetry`
+
+**Use it for:** restoring a Poetry brainwallet phrase when all words are known or when one or more whole words are missing. Poetry is a separate phrase format, not BIP-39: it does not use a BIP-39 checksum, PBKDF2 passphrase, mnemonic seed, or derivation path.
+
+**Ways to supply templates:**
+
+| Source | Command form | Behavior |
+| --- | --- | --- |
+| Inline | `-poetry "TEMPLATE"` | Adds one template written directly in the command. Repeat `-poetry "..."` to add several finite tasks. |
+| File | `-poetry -i FILE` | Reads one non-empty template from each non-empty line. The option can be repeated for more files. |
+| Standard input | `-poetry` | Reads one non-empty template per line from stdin. Standard input can be selected only once. |
+
+A template must contain exactly `3`, `6`, `9`, `12`, `15`, `18`, `21`, or `24` whitespace-separated words. Write a standalone `*` for every unknown word. The program never adds missing wildcards automatically, so `just just *` has one unknown position and `* * *` has three.
+
+The mode uses its embedded 1626-word Poetry dictionary. Fixed words are converted to lowercase. If a written word is absent from the dictionary, the closest dictionary word is selected and a `Recovery replace` message is printed. Check those messages before a long search: a spelling correction changes the fixed phrase being tested.
+
+**How the phrase becomes a key:** every dictionary word has a numeric position. Each consecutive group of three positions is decoded into four bytes according to the Poetry format. A 3-word phrase therefore contributes 4 significant bytes, a 6-word phrase contributes 8, and a 24-word phrase contributes all 32. Shorter results are left-padded with zero bytes to form one 32-byte key. That key is checked directly; there is no intermediate mnemonic seed or child-key derivation.
+
+The resulting key is sent through the target families selected by `-c`. Direct `-hash`/`-target` prefixes and Bloom/XOR filters work as described in the target sections above. Use secp256k1 targets such as `c`, `u`, `s`, `p`, `r`, `e`, or `x` for an ordinary private-key interpretation; ed25519/sr25519 and network-specific targets use the corresponding key interpretation implemented by that branch.
+
+**Finite and random enumeration:**
+
+| Mode | Behavior |
+| --- | --- |
+| Finite, default | Enumerates all `1626^N` combinations for `N` wildcards. The rightmost `*` changes fastest. A template without `*` is checked once. The exact combination count is printed before the task. Multiple templates run sequentially, while selected Metal devices divide each task without intentionally overlapping candidate ordinals. |
+| `-random` | Replaces wildcard positions indefinitely with randomly generated dictionary words. It requires exactly one template and at least one `*`; there is no natural completion point. Fixed words never change. |
+
+Useful key-processing controls are `-round N` for plus/minus keys around every decoded value and `-em` for secp256k1 endomorphism. For ed25519-oriented checks, `-scalar` treats the decoded bytes as a scalar, `-LE` selects little-endian scalar input together with `-scalar`, and `-shash` treats the decoded bytes as pre-clamp ed25519 hash material.
+
+Poetry owns its candidate source. Do not combine it with another main mode; generic file or directory controls such as `-f`, `-all`, or `-delete`; range and direction controls such as `-start`, `-end`, `-step`, `-back`, or `-both`; `-hex`, `-hexset`, `-size`, `-sizes`, `-recovery`, `-wordlist`, `-prng`, `-prng64`, `-comb`, `-mutation`, BIP-39 passphrase options, `-d`, `-d-type`, `-d-dot`, `-pass_thread`, or `-der_thread`. Use `-poetry -i FILE`, not a standalone generic `-i FILE`.
+
+**Found record:** the completed phrase is prepended to the ordinary key result. The saved form is:
+
+```text
+phrase:private:currency:payload
+```
+
+Without `-save`, `payload` normally remains the matched hash or fixed-width value in hexadecimal form. With `-save`, supported target families write their printable address representation. Matches are appended to `-o FILE` (default `result.txt`), so the essential relationship is always `phrase:<result>` and the exact completed phrase can be recovered from every line.
+
+Finite inline example:
+
+```bash
+./METAL_CRYPTO_TOOLKIT -poetry "just just *" -c c \
+  -hash 00112233445566778899aabbccddeeff00112233 \
+  -save -o poetry-found.txt
+```
+
+File and standard-input examples:
+
+```bash
+./METAL_CRYPTO_TOOLKIT -poetry -i poetry-templates.txt \
+  -device 0 -c cus -xc btc-targets.xor_c -o poetry-found.txt
+
+./METAL_CRYPTO_TOOLKIT -poetry < poetry-templates.txt
+```
+
+Infinite random example:
+
+```bash
+./METAL_CRYPTO_TOOLKIT -poetry "* * *" -random \
+  -c e -xc ethereum-targets.xor_c -o poetry-found.txt
+```
 
 #### `-der_thread`
 
@@ -1524,7 +1588,7 @@ Result profile is one of `multibit-classic-md5-aes`, `multibit-hd-scrypt-aes`, o
 $bisq$3*<N>*<r>*<p>*<salt_8_bytes_hex>*<blob_32_bytes_hex>
 ```
 
-The first 16 bytes of `blob_32_bytes_hex` are the IV and the next 16 bytes are ciphertext. The password is converted to UTF-16BE, then scrypt and an AES-CBC padding check are applied. `-wallet-scrypt-mem` controls scratch memory. `$bisq$1` and `$bisq$2` tokens are recognized but their check paths are not enabled in v13.
+The first 16 bytes of `blob_32_bytes_hex` are the IV and the next 16 bytes are ciphertext. The password is converted to UTF-16BE, then scrypt and an AES-CBC padding check are applied. `-wallet-scrypt-mem` controls scratch memory. `$bisq$1` and `$bisq$2` tokens are recognized but their check paths are not enabled in v14.
 
 ```bash
 ./METAL_CRYPTO_TOOLKIT -bisqwallet bisq.hash \
@@ -1613,9 +1677,9 @@ Raw secrets can be printed and saved. Use `-silent` when terminal output is not 
 
 These modes print the exact generator and extraction-mode catalogs, then exit. They do not start a search.
 
-## Reserved or inactive in v13
+## Reserved or inactive in v14
 
-The following command names are parsed or documented for future/external compatibility, but must not be used as working recovery modes in v13:
+The following command names are parsed or documented for future/external compatibility, but must not be used as working recovery modes in v14:
 
 - `-bip38`: metadata parsing for non-EC and EC-multiply records exists, but the compute and verification path is disabled in this build; it cannot emit a confirmed password;
 - `-slip39`: exact SLIP-39 share reconstruction worker is not enabled;
@@ -1633,7 +1697,7 @@ This table is a reminder, not a replacement for `<mode> -help`.
 | help | `-h`, `-help` |
 | input | `-i`, `-f`, `-all`, `-hex`, `-delete`, `-comb`, `-space`, `-rep` |
 | sequence | `-start`, `-end`, `-step`, `-endstep`, `-plusstep`, `-addplusstep`, `-back`, `-both`, `-random`, `-n` |
-| templates | `-recovery`, `-hexset`, `-wordlist` |
+| templates | `-recovery`, `-poetry`, `-hexset`, `-wordlist` |
 | transforms | `-iter`, `-utf8`, `-text`, `-size`, `-sizes`, `-w`, `-lang`, `-dub`, `-electrum`, `-128`, `-ton`, `-TON`, `-pbkdf`, `-round` |
 | BIP-39/path | `-pass`, `-passbrute`, `-pass_thread`, `-der_thread`, `-d`, `-d-type`, `-d-dot` |
 | target | `-c`, family subtype switches, `-hash`, `-target`, `-bf`, `-xu`, `-xc`, `-xuc`, `-xh`, `-xx`, `-xb`, `-full` |
@@ -1801,7 +1865,7 @@ xattr -d com.apple.quarantine METAL_CRYPTO_TOOLKIT
 
 Программа умеет:
 
-- работать с мнемониками BIP-39, энтропией, seed, готовым HMAC BIP32, путями деривации и дополнительными passphrase BIP-39;
+- работать с мнемониками BIP-39, фразами Poetry brainwallet, энтропией, seed, готовым HMAC BIP32, путями деривации и дополнительными passphrase BIP-39;
 - получать и проверять результаты secp256k1, ed25519 и sr25519 для Bitcoin, Ethereum, TON, Solana, Polkadot/Substrate, Cardano, Filecoin, IOTA, Aptos, Sui, XRP, ICP и Tezos;
 - искать одну известную цель напрямую либо проверять большие наборы целей через Bloom- и XOR-фильтры;
 - перебирать диапазоны приватов, восстанавливать неизвестные шестнадцатеричные позиции, проверять мини-ключи Casascius и воспроизводить известные старые генераторы;
@@ -1825,7 +1889,7 @@ xattr -d com.apple.quarantine METAL_CRYPTO_TOOLKIT
 
 ### Системные требования
 
-#### Готовый выпуск v13
+#### Готовый выпуск v14
 
 - Mac на Apple Silicon (`arm64`);
 - macOS 15.0 или новее;
@@ -1844,23 +1908,23 @@ xattr -d com.apple.quarantine METAL_CRYPTO_TOOLKIT
 
 ### Загрузка, проверка и первый запуск
 
-На странице [выпуска v13](https://github.com/XopMC/METAL_CRYPTO_TOOLKIT/releases/tag/v13) загрузите:
+На странице [выпуска v14](https://github.com/XopMC/METAL_CRYPTO_TOOLKIT/releases/tag/v14) загрузите:
 
-- `METAL_CRYPTO_TOOLKIT-v13-macos-arm64.tar.gz`;
-- `METAL_CRYPTO_TOOLKIT-v13-macos-arm64.tar.gz.sha256`.
+- `METAL_CRYPTO_TOOLKIT-v14-macos-arm64.tar.gz`;
+- `METAL_CRYPTO_TOOLKIT-v14-macos-arm64.tar.gz.sha256`.
 
 Там же находится необязательный набор программ для преобразования адресов:
 
-- `METAL_CRYPTO_TOOLKIT-tools-v13-macos-arm64.tar.gz`;
-- `METAL_CRYPTO_TOOLKIT-tools-v13-macos-arm64.tar.gz.sha256`.
+- `METAL_CRYPTO_TOOLKIT-tools-v14-macos-arm64.tar.gz`;
+- `METAL_CRYPTO_TOOLKIT-tools-v14-macos-arm64.tar.gz.sha256`.
 
 Он нужен только тогда, когда обычные адреса криптовалют требуется превратить в однородные списки hex для последующего создания фильтров. Основной исполняемый файл Toolkit в этот архив не входит.
 
 Положите оба файла в одну папку и выполните:
 
 ```bash
-shasum -a 256 -c METAL_CRYPTO_TOOLKIT-v13-macos-arm64.tar.gz.sha256
-tar -xzf METAL_CRYPTO_TOOLKIT-v13-macos-arm64.tar.gz
+shasum -a 256 -c METAL_CRYPTO_TOOLKIT-v14-macos-arm64.tar.gz.sha256
+tar -xzf METAL_CRYPTO_TOOLKIT-v14-macos-arm64.tar.gz
 chmod +x METAL_CRYPTO_TOOLKIT
 ./METAL_CRYPTO_TOOLKIT -help
 ```
@@ -1927,6 +1991,7 @@ make tools-clean
 
 ```bash
 ./METAL_CRYPTO_TOOLKIT -mnemonic -help
+./METAL_CRYPTO_TOOLKIT -poetry -help
 ./METAL_CRYPTO_TOOLKIT -priv -help
 ./METAL_CRYPTO_TOOLKIT -walletdat -help
 ./METAL_CRYPTO_TOOLKIT -xp -help
@@ -2189,7 +2254,7 @@ Passphrase BIP-39 — это дополнительный текст в прео
 
 В `-hash` передаются декодированные двоичные байты в виде hex, а не адрес Base58, Bech32, SS58 или другого печатного формата. Например, `-c p` для P2WSH сравнивает 20-байтовый RIPEMD160, хотя в найденную запись помещается полный 32-байтовый witness program.
 
-В v13 последовательные и Vanity-кернелы `-priv` используют обычную 20-байтовую проверку даже для 32-байтового результата, такого как `-c x`. В этих маршрутах прямой `-hash` длиннее 20 байтов совпасть не может. Некоторые другие режимы отдельно сравнивают более длинные значения и могут проверять до 32 байтов.
+В v14 последовательные и Vanity-кернелы `-priv` используют обычную 20-байтовую проверку даже для 32-байтового результата, такого как `-c x`. В этих маршрутах прямой `-hash` длиннее 20 байтов совпасть не может. Некоторые другие режимы отдельно сравнивают более длинные значения и могут проверять до 32 байтов.
 
 Повторяющиеся последовательности `001122...` в примерах показывают только формат и длину hex. Это не встроенные цели программы. Замените их конкретным полным значением либо известным начальным префиксом для своей разрешенной задачи.
 
@@ -2293,15 +2358,15 @@ TOOL -h
 | Программа | Что можно подать на вход | Что записывается в hex | Подходящая цель `-c` |
 | --- | --- | --- | --- |
 | `cardano_address_to_hex` | Cardano Shelley Bech32 или Byron Base58 с проверкой CBOR/CRC | SHA-256 от декодированного адреса, 32 байта / 64 hex-символа | `a` |
-| `algorand_address_to_hex` | 58-символьный адрес Algorand Base32 с checksum SHA-512/256 | открытый ключ 32 байта / 64 hex-символа | отдельной цели в v13 нет |
+| `algorand_address_to_hex` | 58-символьный адрес Algorand Base32 с checksum SHA-512/256 | открытый ключ 32 байта / 64 hex-символа | отдельной цели в v14 нет |
 | `multicoin_base58_bech32_address_to_hex` | мультивалютные Bitcoin-подобные Base58Check, SegWit Bech32/Bech32m, CashAddr либо готовый hex на 20/32 байта | 20 или 32 байта в зависимости от типа адреса | `c`, `u`, `s`, `p` или `r` после дополнительного шага ниже |
 | `base64_data_to_hex` | строгий Base64 или Base64URL с padding либо без него | декодированные байты; одна длина на файл | заранее заданного семейства нет |
-| `cosmos_bnb_address_to_hex` | Bech32 семейства Cosmos либо готовый 20-байтовый hex | payload 20 байтов / 40 hex-символов | отдельной цели в v13 нет |
+| `cosmos_bnb_address_to_hex` | Bech32 семейства Cosmos либо готовый 20-байтовый hex | payload 20 байтов / 40 hex-символов | отдельной цели в v14 нет |
 | `polkadot_kusama_address_to_hex` | SS58 с одно- или двухбайтовым префиксом сети и checksum Blake2b | account ID 32 байта / 64 hex-символа | `d` |
 | `filecoin_address_to_hex` | Filecoin `f1`, `t1`, `f410` или `t410` с checksum Blake2b | payload 20 байтов / 40 hex-символов | `f` |
 | `solana_address_to_hex` | открытый ключ Base58, который декодируется ровно в 32 байта | открытый ключ 32 байта / 64 hex-символа | `S` |
-| `stellar_address_to_hex` | Stellar StrKey `G...` или muxed-адрес `M...` с CRC16 | исходный открытый ключ ed25519, 32 байта / 64 hex-символа | отдельной цели в v13 нет |
-| `stacks_address_to_hex` | адрес Stacks mainnet/testnet в формате C32Check | HASH160 20 байтов / 40 hex-символов | отдельной цели в v13 нет |
+| `stellar_address_to_hex` | Stellar StrKey `G...` или muxed-адрес `M...` с CRC16 | исходный открытый ключ ed25519, 32 байта / 64 hex-символа | отдельной цели в v14 нет |
+| `stacks_address_to_hex` | адрес Stacks mainnet/testnet в формате C32Check | HASH160 20 байтов / 40 hex-символов | отдельной цели в v14 нет |
 | `ton_address_to_hex` | friendly-адрес TON Base64/Base64URL, `workchain:hex` либо готовый 32-байтовый hex | account ID 32 байта / 64 hex-символа | `T` |
 | `tron_address_to_hex` | адрес Tron Base58Check с буквы `T` либо готовый 20-байтовый hex | Ethereum-подобный account ID 20 байтов / 40 hex-символов | `e` |
 | `xrp_address_to_hex` | XRP Classic Base58Check либо готовый 20-байтовый hex | account ID 20 байтов / 40 hex-символов | `X` |
@@ -2319,7 +2384,7 @@ tools/cardano_address_to_hex cardano-addresses.txt cardano-targets.txt -t 8
 
 #### `algorand_address_to_hex` - Algorand
 
-Принимает обычный 58-символьный адрес Algorand в верхнем регистре, проверяет алфавит Base32 и checksum SHA-512/256, затем записывает исходный 32-байтовый открытый ключ. В v13 отдельной буквы `-c` для Algorand нет; программа пригодится для подготовки данных для другого ПО.
+Принимает обычный 58-символьный адрес Algorand в верхнем регистре, проверяет алфавит Base32 и checksum SHA-512/256, затем записывает исходный 32-байтовый открытый ключ. В v14 отдельной буквы `-c` для Algorand нет; программа пригодится для подготовки данных для другого ПО.
 
 ```bash
 tools/algorand_address_to_hex algorand-addresses.txt algorand-public-keys.txt
@@ -2343,7 +2408,7 @@ tools/base64_data_to_hex encoded-values.txt decoded-values.txt
 
 #### `cosmos_bnb_address_to_hex` - семейство Cosmos и BNB
 
-Принимает правильный Bech32-адрес семейства Cosmos, включая префиксы Cosmos Hub и BNB, либо готовый 20-байтовый hex. Программа проверяет Bech32 и записывает 20-байтовый payload. Отдельной буквы цели для Cosmos/BNB в v13 нет.
+Принимает правильный Bech32-адрес семейства Cosmos, включая префиксы Cosmos Hub и BNB, либо готовый 20-байтовый hex. Программа проверяет Bech32 и записывает 20-байтовый payload. Отдельной буквы цели для Cosmos/BNB в v14 нет.
 
 ```bash
 tools/cosmos_bnb_address_to_hex cosmos-addresses.txt cosmos-payloads.txt
@@ -2375,7 +2440,7 @@ tools/solana_address_to_hex solana-addresses.txt solana-public-keys.txt
 
 #### `stellar_address_to_hex` - Stellar
 
-Принимает обычный Stellar StrKey с буквы `G` и muxed-адрес с буквы `M`. Проверяются байт версии и checksum CRC16-XMODEM. Для muxed-адреса записывается исходный 32-байтовый открытый ключ ed25519 без muxed ID. Отдельной цели Stellar в v13 нет.
+Принимает обычный Stellar StrKey с буквы `G` и muxed-адрес с буквы `M`. Проверяются байт версии и checksum CRC16-XMODEM. Для muxed-адреса записывается исходный 32-байтовый открытый ключ ed25519 без muxed ID. Отдельной цели Stellar в v14 нет.
 
 ```bash
 tools/stellar_address_to_hex stellar-addresses.txt stellar-public-keys.txt
@@ -2383,7 +2448,7 @@ tools/stellar_address_to_hex stellar-addresses.txt stellar-public-keys.txt
 
 #### `stacks_address_to_hex` - Stacks
 
-Принимает поддерживаемые mainnet/testnet версии Stacks C32Check, проверяет алфавит C32, версию, длину payload и checksum, затем записывает 20-байтовый HASH160. Отдельной цели Stacks в v13 нет.
+Принимает поддерживаемые mainnet/testnet версии Stacks C32Check, проверяет алфавит C32, версию, длину payload и checksum, затем записывает 20-байтовый HASH160. Отдельной цели Stacks в v14 нет.
 
 ```bash
 tools/stacks_address_to_hex stacks-addresses.txt stacks-hash160.txt
@@ -2423,7 +2488,7 @@ tools/tezos_address_to_hex tezos-addresses.txt tezos-key-hashes.txt
 
 Для `multicoin_base58_bech32_address_to_hex` одной расшифровки адреса недостаточно, чтобы выбрать ветку Toolkit. P2PKH может относиться к `c` или `u` в зависимости от того, какой открытый ключ создал адрес. P2SH-wrapped SegWit относится к `s`. Адрес P2WSH сразу преобразуется в 20-байтовый RIPEMD-160, который ожидает `-c p`. По одному 20-байтовому payload программа не может определить ни ветку приватного ключа, ни исходную сеть.
 
-Taproot является отдельным случаем. Конвертер сохраняет полный 32-байтовый выходной ключ адреса, но в v13 ветка `-c r` сравнивает RIPEMD-160 от этого ключа. Перед XorFilter преобразуйте однородный файл с 32-байтовыми ключами в отдельный файл значений сравнения:
+Taproot является отдельным случаем. Конвертер сохраняет полный 32-байтовый выходной ключ адреса, но в v14 ветка `-c r` сравнивает RIPEMD-160 от этого ключа. Перед XorFilter преобразуйте однородный файл с 32-байтовыми ключами в отдельный файл значений сравнения:
 
 ```bash
 while IFS= read -r key; do
@@ -2462,7 +2527,7 @@ mkdir -p filters
 | `-silent` | Не печатает найденные строки в терминал. Поведение файла остается таким, как описано ниже для выбранного режима. |
 | `-fsize N` | Количество мест под результаты на каждом устройстве; по умолчанию `150000`. |
 
-В режимах `-mnemonic`, `-recovery`, `-entropy`, `-seed`, `-hmac`, `-bip32`, `-pass_thread`, `-der_thread`, `-priv`, `-minikeys`, `-brain`, старого Electrum и ключевых режимах Armory файл результата открывается в режиме добавления, а каждое совпадение записывается даже без `-save`. Этот флаг не подтверждает кандидата, не включает дополнительную проверку и не влияет на поиск. Он меняет только конечное представление найденного значения:
+В режимах `-mnemonic`, `-recovery`, `-poetry`, `-entropy`, `-seed`, `-hmac`, `-bip32`, `-pass_thread`, `-der_thread`, `-priv`, `-minikeys`, `-brain`, старого Electrum и ключевых режимах Armory файл результата открывается в режиме добавления, а каждое совпадение записывается даже без `-save`. Этот флаг не подтверждает кандидата, не включает дополнительную проверку и не влияет на поиск. Он меняет только конечное представление найденного значения:
 
 - без `-save` большинство хешей и других двоичных значений записываются как исходный hex;
 - с `-save` значения Bitcoin, TON, Solana, Polkadot/Substrate, Filecoin, IOTA, XRP, Tezos и других поддерживаемых целей преобразуются в предусмотренные для них печатные адреса;
@@ -2596,6 +2661,69 @@ mkdir -p filters
 Для предсказуемого поиска сразу задавайте правильное число слов и отмечайте каждое неизвестное место знаком `*`. Текущий разборщик умеет дополнять слишком короткую фразу звездочками до количества, которое не меньше трех и делится на три, а неизвестное написанное слово может заменить ближайшим словом из словаря. В серьезном восстановлении на такое автоматическое исправление лучше не рассчитывать.
 
 Здесь `*` означает целое слово. Не путайте этот режим с `-priv -recovery`, где одна звездочка — всего одна hex-позиция.
+
+#### `-poetry`
+
+**Когда использовать:** если нужно проверить или восстановить фразу Poetry brainwallet, в которой известны все слова либо пропущено одно или несколько целых слов. Poetry — отдельный формат фразы, а не BIP-39: здесь нет checksum BIP-39, дополнительной passphrase PBKDF2, mnemonic seed и путей деривации.
+
+**Как передать шаблоны:**
+
+| Источник | Вид команды | Что происходит |
+| --- | --- | --- |
+| Прямо в команде | `-poetry "ШАБЛОН"` | Добавляет один шаблон. Для нескольких конечных заданий повторите `-poetry "..."`. |
+| Файл | `-poetry -i FILE` | Читает по одному шаблону из каждой непустой строки. Параметр можно повторить для нескольких файлов. |
+| Стандартный ввод | `-poetry` | Читает по одному непустому шаблону из каждой строки stdin. Выбрать stdin можно только один раз. |
+
+В шаблоне должно быть ровно `3`, `6`, `9`, `12`, `15`, `18`, `21` или `24` слова, разделенных пробелами. Каждое неизвестное слово обозначается отдельным знаком `*`. Программа не добавляет звездочки сама: в `just just *` неизвестна одна позиция, а в `* * *` — все три.
+
+Режим использует встроенный словарь Poetry из 1626 слов. Известные слова переводятся в нижний регистр. Если написанного слова нет в словаре, программа выбирает ближайшее по написанию и показывает строку `Recovery replace`. Перед долгим запуском обязательно проверьте такие сообщения: автоматическая замена меняет фиксированную часть проверяемой фразы.
+
+**Как из фразы получается ключ:** у каждого слова есть номер в словаре. Каждая последовательная группа из трех номеров по правилам Poetry превращается в четыре байта. Поэтому 3 слова дают 4 значащих байта, 6 слов — 8 байтов, а 24 слова — все 32 байта. Короткое значение дополняется нулевыми байтами слева до одного 32-байтового ключа. Этот ключ проверяется напрямую, без промежуточного seed мнемоники и без дочерних ключей.
+
+Из полученного ключа строятся семейства целей, выбранные через `-c`. Прямые префиксы `-hash`/`-target`, Bloom- и XOR-фильтры работают так, как описано выше в разделе целей. Для обычного приватного ключа secp256k1 используются ветки `c`, `u`, `s`, `p`, `r`, `e` и `x`; цели ed25519/sr25519 и отдельных сетей применяют соответствующую обработку ключа, реализованную в этой ветке.
+
+**Конечный и случайный перебор:**
+
+| Вариант | Что происходит |
+| --- | --- |
+| Конечный, по умолчанию | Полностью перебирает все `1626^N` сочетаний для `N` звездочек. Быстрее всего меняется крайняя правая `*`. Шаблон без звездочек проверяется один раз. Перед запуском задания печатается точное число сочетаний. Несколько шаблонов выполняются по очереди, а выбранные Metal-устройства делят пространство одного задания без намеренного пересечения номеров кандидатов. |
+| `-random` | Бесконечно подставляет случайные слова словаря только вместо звездочек. Допускается ровно один шаблон, и в нем должна быть хотя бы одна `*`. Фиксированные слова не меняются; естественной точки завершения у такого запуска нет. |
+
+`-round N` дополнительно проверяет ключи в обе стороны от каждого декодированного значения, а `-em` включает эндоморфизм secp256k1. Для проверок ed25519 флаг `-scalar` считает декодированные байты скаляром, `-LE` вместе с `-scalar` задает little-endian, а `-shash` считает декодированные байты уже полученным хеш-материалом ed25519 до clamp.
+
+У Poetry собственный источник кандидатов. Не сочетайте его с другим основным режимом; общими параметрами файлов и каталогов `-f`, `-all` и `-delete`; диапазонами и направлением `-start`, `-end`, `-step`, `-back` и `-both`; параметрами `-hex`, `-hexset`, `-size`, `-sizes`, `-recovery`, `-wordlist`, `-prng`, `-prng64`, `-comb`, `-mutation`, passphrase BIP-39, `-d`, `-d-type`, `-d-dot`, `-pass_thread` и `-der_thread`. Для файла пишите именно `-poetry -i FILE`, а не отдельный общий `-i FILE`.
+
+**Найденная запись:** готовая фраза добавляется перед обычным результатом ключевого режима. Строка имеет вид:
+
+```text
+phrase:private:currency:payload
+```
+
+Без `-save` поле `payload` обычно остается найденным hash или значением фиксированной длины в hex. С `-save` поддерживаемые цели записываются как обычные печатные адреса. Совпадения дописываются в `-o FILE` (по умолчанию `result.txt`), поэтому связь всегда остается явной: `phrase:<result>`, и по каждой строке можно восстановить точную найденную фразу.
+
+Конечный шаблон прямо в команде:
+
+```bash
+./METAL_CRYPTO_TOOLKIT -poetry "just just *" -c c \
+  -hash 00112233445566778899aabbccddeeff00112233 \
+  -save -o poetry-found.txt
+```
+
+Шаблоны из файла и stdin:
+
+```bash
+./METAL_CRYPTO_TOOLKIT -poetry -i poetry-templates.txt \
+  -device 0 -c cus -xc btc-targets.xor_c -o poetry-found.txt
+
+./METAL_CRYPTO_TOOLKIT -poetry < poetry-templates.txt
+```
+
+Бесконечный случайный перебор:
+
+```bash
+./METAL_CRYPTO_TOOLKIT -poetry "* * *" -random \
+  -c e -xc ethereum-targets.xor_c -o poetry-found.txt
+```
 
 #### `-der_thread`
 
@@ -3293,7 +3421,7 @@ $multibit$3*<N>*<r>*<p>*<salt_8_bytes_hex>*<blob_32_bytes_hex>
 $bisq$3*<N>*<r>*<p>*<salt_8_bytes_hex>*<blob_32_bytes_hex>
 ```
 
-Первые 16 байтов `blob_32_bytes_hex` являются IV, следующие 16 байтов — шифротекстом. Пароль переводится в UTF-16BE, затем выполняются scrypt и проверка padding AES-CBC. `-wallet-scrypt-mem` ограничивает промежуточную память. Метки `$bisq$1` и `$bisq$2` распознаются, но их проверка в v13 не включена.
+Первые 16 байтов `blob_32_bytes_hex` являются IV, следующие 16 байтов — шифротекстом. Пароль переводится в UTF-16BE, затем выполняются scrypt и проверка padding AES-CBC. `-wallet-scrypt-mem` ограничивает промежуточную память. Метки `$bisq$1` и `$bisq$2` распознаются, но их проверка в v14 не включена.
 
 ```bash
 ./METAL_CRYPTO_TOOLKIT -bisqwallet bisq.hash \
@@ -3380,9 +3508,9 @@ WALLETSCAN:<source_file>:<type>:LINE:<line_number>:VALUE:<value>
 
 Печатают полный список генераторов и способов извлечения байтов, затем завершают работу. Сам поиск не запускается.
 
-## Зарезервировано или выключено в v13
+## Зарезервировано или выключено в v14
 
-Следующие имена распознаются командной строкой или оставлены для совместимых форматов, но не являются рабочими режимами восстановления в v13:
+Следующие имена распознаются командной строкой или оставлены для совместимых форматов, но не являются рабочими режимами восстановления в v14:
 
 - `-bip38`: разбор обычных и EC-multiply записей существует, но вычислительная проверка в этой сборке выключена; подтвержденный пароль получить нельзя;
 - `-slip39`: точная сборка долей SLIP-39 не включена;
@@ -3400,7 +3528,7 @@ WALLETSCAN:<source_file>:<type>:LINE:<line_number>:VALUE:<value>
 | справка | `-h`, `-help` |
 | вход | `-i`, `-f`, `-all`, `-hex`, `-delete`, `-comb`, `-space`, `-rep` |
 | последовательность | `-start`, `-end`, `-step`, `-endstep`, `-plusstep`, `-addplusstep`, `-back`, `-both`, `-random`, `-n` |
-| шаблоны | `-recovery`, `-hexset`, `-wordlist` |
+| шаблоны | `-recovery`, `-poetry`, `-hexset`, `-wordlist` |
 | преобразования | `-iter`, `-utf8`, `-text`, `-size`, `-sizes`, `-w`, `-lang`, `-dub`, `-electrum`, `-128`, `-ton`, `-TON`, `-pbkdf`, `-round` |
 | BIP-39 и пути | `-pass`, `-passbrute`, `-pass_thread`, `-der_thread`, `-d`, `-d-type`, `-d-dot` |
 | цели | `-c`, параметры вариантов сетей, `-hash`, `-target`, `-bf`, `-xu`, `-xc`, `-xuc`, `-xh`, `-xx`, `-xb`, `-full` |

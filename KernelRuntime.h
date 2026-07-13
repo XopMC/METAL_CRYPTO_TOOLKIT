@@ -1192,6 +1192,7 @@ METAL_HOST void SaveResultSeedGen(FILE* file, uint32_t& Founds, bool save, vecto
 METAL_HOST void SaveResultGen(FILE* file, uint32_t& Founds, bool save, vector<string> Der_list, int bytes, int mode, int gen, int skipBytes);
 METAL_HOST void SaveResultPRIVGen(FILE* file, uint32_t& Founds, bool save, const vector<string>& Der_list, int bytes, int mode, int gen, int skipBytes);
 METAL_HOST void SaveResultPRIV(FILE* file, uint32_t &Founds, bool save, const vector<string>& Der_list);
+METAL_HOST void SaveResultPoetry(FILE* file, uint32_t& Founds, bool save, const vector<string>& Der_list);
 METAL_HOST void SaveResultProfanity(FILE* file, uint32_t& Founds, bool save, const ProfanityVerifiedResult* results, unsigned long long count);
 METAL_HOST void SaveResultProfanityRecovery(FILE* file, uint32_t& Founds, bool save, const ProfanityRecoveryVerifiedResult* results, unsigned long long count);
 METAL_HOST void SaveResultKeystore(FILE* file, uint32_t& Founds, bool save, const WalletModeResult* results, unsigned long long count, const std::vector<std::string>& target_files);
