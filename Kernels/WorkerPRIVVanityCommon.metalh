@@ -1,0 +1,1470 @@
+#ifndef METAL_CRYPTO_WORKER_PRIV_VANITY_COMMON_METALH
+#define METAL_CRYPTO_WORKER_PRIV_VANITY_COMMON_METALH
+
+#include <metal_stdlib>
+#include "../KernelState.metalh"
+#include "BigIntFunc.metalh"
+#include "FilterCommon.metalh"
+#include "FoundCommon.metalh"
+#include "GPUHash.metalh"
+#include "WorkerPRIVSeqNewCommon.metalh"
+#include "../lib/secp256k1/GPUWalk.metalh"
+
+using namespace metal;
+
+constant uint PRIV_VANITY_BATCH = 32u;
+constant uint PRIV_VANITY_GRP_SIZE = VS_GRP_SIZE;
+constant uint PRIV_VANITY_TABLE_WORDS = VS_GRP_TABLE_WORDS;
+constant uchar PRIV_VANITY_BETA[32] = {
+    0x7au, 0xe9u, 0x6au, 0x2bu, 0x65u, 0x7cu, 0x07u, 0x10u,
+    0x6eu, 0x64u, 0x47u, 0x9eu, 0xacu, 0x34u, 0x34u, 0xe9u,
+    0x00u, 0x9cu, 0xf0u, 0x49u, 0x75u, 0x12u, 0xf5u, 0x89u,
+    0x95u, 0xc1u, 0x39u, 0x6cu, 0x28u, 0x71u, 0x95u, 0x01u
+};
+constant uchar PRIV_VANITY_BETA2[32] = {
+    0x85u, 0x16u, 0x95u, 0xd4u, 0x9au, 0x83u, 0xf8u, 0xefu,
+    0x91u, 0x9bu, 0xb8u, 0x61u, 0x53u, 0xcbu, 0xcbu, 0x16u,
+    0x63u, 0x0fu, 0xb6u, 0x8au, 0xedu, 0x0au, 0x76u, 0x6au,
+    0x3eu, 0xc6u, 0x93u, 0xd6u, 0x8eu, 0x6au, 0xfau, 0x40u
+};
+constant uchar PRIV_VANITY_TAG_TAPTWEAK[32] = {
+    0xe8u, 0x0fu, 0xe1u, 0x63u, 0x9cu, 0x9cu, 0xa0u, 0x50u,
+    0xe3u, 0xafu, 0x1bu, 0x39u, 0xc1u, 0x43u, 0xc6u, 0x3eu,
+    0x42u, 0x9cu, 0xbcu, 0xebu, 0x15u, 0xd9u, 0x40u, 0xfbu,
+    0xb5u, 0xc5u, 0xa1u, 0xf4u, 0xafu, 0x57u, 0xc5u, 0xe9u
+};
+
+enum PrivVanityKind {
+    PrivVanityKindX = 0,
+    PrivVanityKindU = 1,
+    PrivVanityKindS = 2,
+    PrivVanityKindR = 3,
+    PrivVanityKindE = 4,
+    PrivVanityKindC = 5,
+    PrivVanityKindCusr = 6,
+    PrivVanityKindP = 7
+};
+
+static inline void priv_copy_thread_uchar(thread uchar* dst, const thread uchar* src, uint len) {
+    for (uint i = 0u; i < len; ++i) {
+        dst[i] = src[i];
+    }
+}
+
+static inline void priv_hash_words_from_bytes(const thread uchar* bytes, thread uint out_words[8], uint byte_len) {
+    for (uint i = 0u; i < 8u; ++i) {
+        const uint off = i * 4u;
+        if (off + 3u < byte_len) {
+            out_words[i] = uint(bytes[off]) |
+                           ((uint(bytes[off + 1u]) << 8u) & 0x0000ff00u) |
+                           ((uint(bytes[off + 2u]) << 16u) & 0x00ff0000u) |
+                           ((uint(bytes[off + 3u]) << 24u) & 0xff000000u);
+        } else {
+            uint w = 0u;
+            for (uint j = 0u; j < 4u && off + j < byte_len; ++j) {
+                w |= uint(bytes[off + j]) << (8u * j);
+            }
+            out_words[i] = w;
+        }
+    }
+}
+
+static inline bool priv_check_hash_words(device RuntimeConfig& config,
+                                         device XorFilterState& filters,
+                                         device FilterStorageState& storage,
+                                         const device uchar* bloom_storage,
+                                         const device uchar* xor_storage,
+                                         const device uchar* xor_un_storage,
+                                         const device uchar* xor_uc_storage,
+                                         const device uchar* xor_hc_storage,
+                                         const thread uint* hash_words) {
+    return filter_check_hash(config,
+                             filters,
+                             storage,
+                             bloom_storage,
+                             xor_storage,
+                             xor_un_storage,
+                             xor_uc_storage,
+                             xor_hc_storage,
+                             hash_words);
+}
+
+static inline void priv_build_seq128_key(thread uchar out_key[32],
+                                         const device uchar* start_point,
+                                         int mode,
+                                         ulong idx,
+                                         ulong step) {
+    uint c[8];
+    uint r[8];
+    ulong off_lo;
+    ulong off_hi;
+    loadBE256toWords(start_point, c);
+    mul_u64_u64_to_u128(idx, step, off_lo, off_hi);
+    if (mode == 1) {
+        add128to256_device(c, off_lo, off_hi, r);
+    } else {
+        sub128from256_device(c, off_lo, off_hi, r);
+    }
+    storeWordsToBE256(r, out_key);
+}
+
+static inline uint priv_vanity_be32(const thread uchar* p) {
+    return (uint(p[0]) << 24u) | (uint(p[1]) << 16u) | (uint(p[2]) << 8u) | uint(p[3]);
+}
+
+static inline uint priv_vanity_be32(const constant uchar* p) {
+    return (uint(p[0]) << 24u) | (uint(p[1]) << 16u) | (uint(p[2]) << 8u) | uint(p[3]);
+}
+
+static inline void priv_vanity_sha256_taptweak_px(const thread uchar px[32], thread uchar out[32]) {
+    uint h[8];
+    SHA256Initialize(h);
+
+    uint w0[16];
+    for (int i = 0; i < 8; ++i) {
+        w0[i] = priv_vanity_be32(PRIV_VANITY_TAG_TAPTWEAK + 4 * i);
+        w0[i + 8] = priv_vanity_be32(PRIV_VANITY_TAG_TAPTWEAK + 4 * i);
+    }
+    SHA256Transform(h, w0);
+
+    uint w1[16];
+    for (int i = 0; i < 8; ++i) {
+        w1[i] = priv_vanity_be32(px + 4 * i);
+    }
+    w1[8] = 0x80000000u;
+    for (int i = 9; i < 15; ++i) {
+        w1[i] = 0u;
+    }
+    w1[15] = 0x00000300u;
+    SHA256Transform(h, w1);
+
+    for (int i = 0; i < 8; ++i) {
+        out[4 * i + 0] = uchar(h[i] >> 24u);
+        out[4 * i + 1] = uchar(h[i] >> 16u);
+        out[4 * i + 2] = uchar(h[i] >> 8u);
+        out[4 * i + 3] = uchar(h[i]);
+    }
+}
+
+static inline void priv_vanity_tweak_taproot(thread uchar out[32],
+                                             const thread uchar pub_uncomp[65],
+                                             constant secp256k1_ge_storage* precPtr,
+                                             size_t precPitch) {
+    secp256k1_scratch3 scr;
+    int produced = 0;
+
+    if (pub_uncomp[0] != 0x04u) {
+        scr.gej.infinity = 1;
+        for (int k = 0; k < 32; ++k) {
+            out[k] = 0u;
+        }
+        return;
+    }
+
+    secp256k1_fe x;
+    secp256k1_fe y;
+    secp256k1_fe_set_b32(&x, pub_uncomp + 1);
+    secp256k1_fe_set_b32(&y, pub_uncomp + 33);
+    secp256k1_ge p;
+    secp256k1_ge_set_xy(&p, &x, &y);
+
+    secp256k1_fe_normalize_var(&p.y);
+    if (secp256k1_fe_is_odd(&p.y)) {
+        secp256k1_ge pneg = p;
+        secp256k1_fe_negate(&pneg.y, &pneg.y, 1);
+        p = pneg;
+    }
+
+    uchar px[32];
+    uchar tweak_hash[32];
+    secp256k1_fe_normalize_var(&p.x);
+    secp256k1_fe_get_b32(px, &p.x);
+    priv_vanity_sha256_taptweak_px(px, tweak_hash);
+
+    secp256k1_scalar tweak;
+    secp256k1_scalar_set_b32(&tweak, tweak_hash, nullptr);
+
+    secp256k1_gej tweak_g;
+    int window_limit = WINDOWS_SIZE_CONST[0];
+    unsigned int window_mult_limit = ECMULT_WINDOW_SIZE_CONST[0];
+    secp256k1_ecmult_big(&tweak_g, &tweak, precPtr, precPitch, window_limit, window_mult_limit);
+    secp256k1_gej_add_ge_var(&scr.gej, &tweak_g, &p, nullptr);
+
+    if (!scr.gej.infinity) {
+        scr.fe_in = scr.gej.z;
+        produced++;
+    }
+    if (produced > 0) {
+        secp256k1_fe_inv_all_var(produced, &scr.fe_out, &scr.fe_in);
+    }
+
+    if (scr.gej.infinity) {
+        for (int k = 0; k < 32; ++k) {
+            out[k] = 0u;
+        }
+        return;
+    }
+
+    secp256k1_ge tweaked;
+    secp256k1_ge_set_gej_zinv(&tweaked, &scr.gej, &scr.fe_out);
+    secp256k1_fe_normalize_var(&tweaked.y);
+    if (secp256k1_fe_is_odd(&tweaked.y)) {
+        secp256k1_ge_neg(&tweaked, &tweaked);
+    }
+    secp256k1_fe_normalize_var(&tweaked.x);
+    secp256k1_fe_get_b32(out, &tweaked.x);
+}
+
+static inline void priv_vanity_make_found(device char* foundStrings,
+                                          device uchar* foundPrvKeys,
+                                          device uint* foundHash160,
+                                          device uint* foundLen,
+                                          device uint* foundIter,
+                                          device uchar* foundType,
+                                          device uint* foundDerivations,
+                                          device uint* foundDerivations2,
+                                          device char* foundPass,
+                                          device ushort* foundPassSize,
+                                          device long* foundRound,
+                                          device ulong* foundSeed,
+                                          device atomic_uint* resultsCount,
+                                          device RuntimeConfig& config,
+                                          thread FoundBuffers& found) {
+    found.foundStrings = foundStrings;
+    found.foundPrvKeys = foundPrvKeys;
+    found.foundHash160 = foundHash160;
+    found.len = foundLen;
+    found.iter = foundIter;
+    found.type = foundType;
+    found.foundDerivations = foundDerivations;
+    found.foundDerivations2 = foundDerivations2;
+    found.pass = foundPass;
+    found.passSize = foundPassSize;
+    found.round = foundRound;
+    found.seed = foundSeed;
+    found.resultsCount = resultsCount;
+    found.maxFounds = config.maxFounds;
+}
+
+static inline bool priv_vanity_filters_active(device RuntimeConfig& config) {
+    return config.full != 0u || config.hashTargetEnabled != 0u ||
+           config.useBloom != 0u || config.useXor != 0u ||
+           config.useXorUn != 0u || config.useXorUc != 0u ||
+           config.useXorHc != 0u;
+}
+
+static inline uchar priv_vanity_make_endo_type(uchar group, uchar variant) {
+    return uchar(0xa0u + 8u * uint(group) + uint(variant));
+}
+
+constant uchar PRIV_VANITY_ENDO_GROUP_P2WSH = 6u;
+
+static inline uint priv_vanity_walk_pkfield(uint order) {
+    const uint grp_half = PRIV_VANITY_GRP_SIZE / 2u;
+    if (order == 0u) {
+        return grp_half;
+    }
+    if (order == (PRIV_VANITY_GRP_SIZE - 1u)) {
+        return 0u;
+    }
+    const uint offset = (order + 1u) >> 1u;
+    return ((order & 1u) != 0u) ? (grp_half + offset) : (grp_half - offset);
+}
+
+static inline ulong priv_vanity_result_index(int mode, ulong starter, uint pkField) {
+    const ulong batch_base = starter + (ulong(pkField / PRIV_VANITY_GRP_SIZE) * ulong(PRIV_VANITY_GRP_SIZE));
+    const ulong in_batch = ulong(priv_vanity_walk_pkfield(pkField % PRIV_VANITY_GRP_SIZE));
+    return (mode == 1) ? (batch_base + in_batch)
+                       : (batch_base + ulong(PRIV_VANITY_GRP_SIZE) - in_batch);
+}
+
+static inline void priv_vanity_store_result(device bool* isResult,
+                                            device bool* buffResult,
+                                            const thread uchar* private_key32,
+                                            const thread void* payload,
+                                            uint payload_len,
+                                            uchar type_value,
+                                            FoundBuffers found) {
+    if (buffResult != nullptr) {
+        buffResult[0] = true;
+    }
+    if (isResult != nullptr) {
+        isResult[0] = true;
+    }
+    if (found.resultsCount == nullptr) {
+        return;
+    }
+
+    const ulong idx64 = found_atomic_add_count(found.resultsCount, 1u);
+    if (idx64 >= ulong(found.maxFounds)) {
+        return;
+    }
+    const uint idx = uint(idx64);
+
+    if (found.foundPrvKeys != nullptr && private_key32 != nullptr) {
+        found_copy_thread_to_device_uchar(found.foundPrvKeys + ulong(idx) * kFoundPrivateKeyBytes,
+                                          private_key32,
+                                          32u);
+    }
+    if (found.foundHash160 != nullptr) {
+        device uchar* out = reinterpret_cast<device uchar*>(found.foundHash160 + ulong(idx) * kFoundHashWords);
+        for (uint i = 0u; i < kFoundHashWords * 4u; ++i) {
+            out[i] = 0u;
+        }
+        if (payload != nullptr && payload_len > 0u) {
+            found_copy_thread_to_device_bytes(out, payload, min(payload_len, kFoundHashWords * 4u));
+        }
+    }
+    if (found.type != nullptr) {
+        found.type[idx] = type_value;
+    }
+}
+
+static inline void priv_vanity_check_and_store(device bool* isResult,
+                                               device bool* buffResult,
+                                               const thread uchar* private_key32,
+                                               const thread void* payload,
+                                               uint payload_len,
+                                               const thread uint* hash_words,
+                                               uchar type_value,
+                                               device RuntimeConfig& config,
+                                               device XorFilterState& filters,
+                                               device FilterStorageState& filter_storage,
+                                               const device uchar* bloom_storage,
+                                               const device uchar* xor_storage,
+                                               const device uchar* xor_un_storage,
+                                               const device uchar* xor_uc_storage,
+                                               const device uchar* xor_hc_storage,
+                                               FoundBuffers found) {
+    if (priv_check_hash_words(config, filters, filter_storage, bloom_storage, xor_storage,
+                              xor_un_storage, xor_uc_storage, xor_hc_storage, hash_words)) {
+        priv_vanity_store_result(isResult, buffResult, private_key32, payload, payload_len, type_value, found);
+    }
+}
+
+static inline void priv_vanity_copy_x(thread uchar pubkey65[65], const thread uchar x32[32]) {
+    for (uint i = 0u; i < 32u; ++i) {
+        pubkey65[1u + i] = x32[i];
+    }
+}
+
+static inline void priv_vanity_copy_y(thread uchar pubkey65[65], const thread uchar y32[32]) {
+    for (uint i = 0u; i < 32u; ++i) {
+        pubkey65[33u + i] = y32[i];
+    }
+}
+
+static inline void priv_vanity_mul_x_beta(const thread uchar x32[32],
+                                          const constant uchar beta_const[32],
+                                          thread uchar out32[32]) {
+    uchar beta_bytes[32];
+    for (uint i = 0u; i < 32u; ++i) {
+        beta_bytes[i] = beta_const[i];
+    }
+    secp256k1_fe x;
+    secp256k1_fe beta;
+    secp256k1_fe out;
+    secp256k1_fe_set_b32(&x, x32);
+    secp256k1_fe_set_b32(&beta, beta_bytes);
+    secp256k1_fe_mul(&out, &x, &beta);
+    secp256k1_fe_normalize_var(&out);
+    secp256k1_fe_get_b32(out32, &out);
+}
+
+static inline void priv_vanity_neg_y(const thread uchar y32[32], thread uchar out32[32]) {
+    secp256k1_fe y;
+    secp256k1_fe neg;
+    secp256k1_fe_set_b32(&y, y32);
+    secp256k1_fe_negate(&neg, &y, 1);
+    secp256k1_fe_normalize_var(&neg);
+    secp256k1_fe_get_b32(out32, &neg);
+}
+
+static inline void priv_vanity_emit_x(device bool* isResult,
+                                      device bool* buffResult,
+                                      const thread uchar* private_key,
+                                      const thread uchar pubkey65[65],
+                                      device RuntimeConfig& config,
+                                      device XorFilterState& filters,
+                                      device FilterStorageState& filter_storage,
+                                      const device uchar* bloom_storage,
+                                      const device uchar* xor_storage,
+                                      const device uchar* xor_un_storage,
+                                      const device uchar* xor_uc_storage,
+                                      const device uchar* xor_hc_storage,
+                                      FoundBuffers found,
+                                      uchar type_value = 0x05u) {
+    uint xpoint_hash[8] = { 0u };
+    thread uchar* xbytes = reinterpret_cast<thread uchar*>(xpoint_hash);
+    priv_copy_thread_uchar(xbytes, pubkey65 + 1, 32u);
+    priv_vanity_check_and_store(isResult, buffResult, private_key, xpoint_hash, 32u, xpoint_hash,
+                                type_value, config, filters, filter_storage, bloom_storage,
+                                xor_storage, xor_un_storage, xor_uc_storage, xor_hc_storage, found);
+}
+
+static inline void priv_vanity_emit_uncompressed(device bool* isResult,
+                                                 device bool* buffResult,
+                                                 const thread uchar* private_key,
+                                                 thread uchar pubkey65[65],
+                                                 device RuntimeConfig& config,
+                                                 device XorFilterState& filters,
+                                                 device FilterStorageState& filter_storage,
+                                                 const device uchar* bloom_storage,
+                                                 const device uchar* xor_storage,
+                                                 const device uchar* xor_un_storage,
+                                                 const device uchar* xor_uc_storage,
+                                                 const device uchar* xor_hc_storage,
+                                                 FoundBuffers found,
+                                                 uchar type_value = 0x01u) {
+    uint hash160[8] = { 0u };
+    int keyLenSkip = 0;
+    _GetHash160(pubkey65, keyLenSkip, reinterpret_cast<thread uchar*>(hash160));
+    priv_vanity_check_and_store(isResult, buffResult, private_key, hash160, 20u, hash160,
+                                type_value, config, filters, filter_storage, bloom_storage,
+                                xor_storage, xor_un_storage, xor_uc_storage, xor_hc_storage, found);
+}
+
+static inline void priv_vanity_emit_compressed(device bool* isResult,
+                                               device bool* buffResult,
+                                               const thread uchar* private_key,
+                                               thread uchar pubkey65[65],
+                                               device RuntimeConfig& config,
+                                               device XorFilterState& filters,
+                                               device FilterStorageState& filter_storage,
+                                               const device uchar* bloom_storage,
+                                               const device uchar* xor_storage,
+                                               const device uchar* xor_un_storage,
+                                               const device uchar* xor_uc_storage,
+                                               const device uchar* xor_hc_storage,
+                                               FoundBuffers found,
+                                               uchar type_value = 0x02u,
+                                               thread uint* out_hash = nullptr) {
+    uint hash160[8] = { 0u };
+    int keyLenSkip = 0;
+    _GetHash160Comp(pubkey65, keyLenSkip, reinterpret_cast<thread uchar*>(hash160));
+    if (out_hash != nullptr) {
+        for (uint i = 0u; i < 8u; ++i) {
+            out_hash[i] = hash160[i];
+        }
+    }
+    priv_vanity_check_and_store(isResult, buffResult, private_key, hash160, 20u, hash160,
+                                type_value, config, filters, filter_storage, bloom_storage,
+                                xor_storage, xor_un_storage, xor_uc_storage, xor_hc_storage, found);
+}
+
+static inline void priv_vanity_emit_segwit_from_comp_hash(device bool* isResult,
+                                                          device bool* buffResult,
+                                                          const thread uchar* private_key,
+                                                          thread uint hash160[8],
+                                                          device RuntimeConfig& config,
+                                                          device XorFilterState& filters,
+                                                          device FilterStorageState& filter_storage,
+                                                          const device uchar* bloom_storage,
+                                                          const device uchar* xor_storage,
+                                                          const device uchar* xor_un_storage,
+                                                          const device uchar* xor_uc_storage,
+                                                          const device uchar* xor_hc_storage,
+                                                          FoundBuffers found,
+                                                          uchar type_value = 0x03u) {
+    _GetHash160P2SHCompFromHash(hash160, hash160);
+    priv_vanity_check_and_store(isResult, buffResult, private_key, hash160, 20u, hash160,
+                                type_value, config, filters, filter_storage, bloom_storage,
+                                xor_storage, xor_un_storage, xor_uc_storage, xor_hc_storage, found);
+}
+
+static inline void priv_vanity_emit_segwit(device bool* isResult,
+                                           device bool* buffResult,
+                                           const thread uchar* private_key,
+                                           thread uchar pubkey65[65],
+                                           device RuntimeConfig& config,
+                                           device XorFilterState& filters,
+                                           device FilterStorageState& filter_storage,
+                                           const device uchar* bloom_storage,
+                                           const device uchar* xor_storage,
+                                           const device uchar* xor_un_storage,
+                                           const device uchar* xor_uc_storage,
+                                           const device uchar* xor_hc_storage,
+                                           FoundBuffers found,
+                                           uchar type_value = 0x03u) {
+    uint hash160[8] = { 0u };
+    int keyLenSkip = 0;
+    _GetHash160Comp(pubkey65, keyLenSkip, reinterpret_cast<thread uchar*>(hash160));
+    priv_vanity_emit_segwit_from_comp_hash(isResult, buffResult, private_key, hash160, config,
+                                           filters, filter_storage, bloom_storage, xor_storage,
+                                           xor_un_storage, xor_uc_storage, xor_hc_storage, found,
+                                           type_value);
+}
+
+static inline void priv_vanity_emit_p2wsh(device bool* isResult,
+                                          device bool* buffResult,
+                                          const thread uchar* private_key,
+                                          const thread uchar pubkey65[65],
+                                          device RuntimeConfig& config,
+                                          device XorFilterState& filters,
+                                          device FilterStorageState& filter_storage,
+                                          const device uchar* bloom_storage,
+                                          const device uchar* xor_storage,
+                                          const device uchar* xor_un_storage,
+                                          const device uchar* xor_uc_storage,
+                                          const device uchar* xor_hc_storage,
+                                          FoundBuffers found,
+                                          uchar type_value = 0x07u) {
+    uchar p2wsh_hash[32];
+    uint p2wsh_rmd[8] = { 0u };
+    _GetP2WSHComp(pubkey65, p2wsh_hash, p2wsh_rmd);
+    priv_vanity_check_and_store(isResult, buffResult, private_key, p2wsh_hash, 32u, p2wsh_rmd,
+                                type_value, config, filters, filter_storage, bloom_storage,
+                                xor_storage, xor_un_storage, xor_uc_storage, xor_hc_storage, found);
+}
+
+static inline void priv_vanity_emit_parity_fast(PrivVanityKind kind,
+                                                device bool* isResult,
+                                                device bool* buffResult,
+                                                const device uchar* start_point,
+                                                int mode,
+                                                ulong result_index,
+                                                ulong step,
+                                                thread ulong x[4],
+                                                uchar odd_y,
+                                                device RuntimeConfig& config,
+                                                device XorFilterState& filters,
+                                                device FilterStorageState& filter_storage,
+                                                const device uchar* bloom_storage,
+                                                const device uchar* xor_storage,
+                                                const device uchar* xor_un_storage,
+                                                const device uchar* xor_uc_storage,
+                                                const device uchar* xor_hc_storage,
+                                                FoundBuffers found) {
+    if (kind == PrivVanityKindP) {
+        uchar p2wsh_hash[32];
+        uint p2wsh_rmd[8] = { 0u };
+        _GetP2WSHComp_fast(x, odd_y, p2wsh_hash, p2wsh_rmd);
+        if (!priv_check_hash_words(config, filters, filter_storage, bloom_storage, xor_storage,
+                                   xor_un_storage, xor_uc_storage, xor_hc_storage, p2wsh_rmd)) {
+            return;
+        }
+
+        uchar private_key[32];
+        priv_build_seq128_key(private_key, start_point, mode, result_index, step);
+        priv_vanity_store_result(isResult, buffResult, private_key, p2wsh_hash, 32u, 0x07u, found);
+        return;
+    }
+
+    uint hash_words[8] = { 0u };
+    uint payload_len = 20u;
+    uchar type_value = 0u;
+    if (kind == PrivVanityKindC || kind == PrivVanityKindS) {
+        _GetHash160Comp_fast(x, odd_y, reinterpret_cast<thread uchar*>(hash_words));
+        if (kind == PrivVanityKindS) {
+            _GetHash160P2SHCompFromHash(hash_words, hash_words);
+            type_value = 0x03u;
+        } else {
+            type_value = 0x02u;
+        }
+    } else if (kind == PrivVanityKindX) {
+        u64x4_to_x32(x, reinterpret_cast<thread uchar*>(hash_words));
+        payload_len = 32u;
+        type_value = 0x05u;
+    } else {
+        return;
+    }
+
+    if (!priv_check_hash_words(config, filters, filter_storage, bloom_storage, xor_storage,
+                               xor_un_storage, xor_uc_storage, xor_hc_storage, hash_words)) {
+        return;
+    }
+
+    uchar private_key[32];
+    priv_build_seq128_key(private_key, start_point, mode, result_index, step);
+    priv_vanity_store_result(isResult, buffResult, private_key, hash_words, payload_len,
+                             type_value, found);
+}
+
+static inline void priv_vanity_emit_full_y_fast(PrivVanityKind kind,
+                                                device bool* isResult,
+                                                device bool* buffResult,
+                                                const device uchar* start_point,
+                                                int mode,
+                                                ulong result_index,
+                                                ulong step,
+                                                thread ulong x[4],
+                                                thread ulong y[4],
+                                                device RuntimeConfig& config,
+                                                device XorFilterState& filters,
+                                                device FilterStorageState& filter_storage,
+                                                const device uchar* bloom_storage,
+                                                const device uchar* xor_storage,
+                                                const device uchar* xor_un_storage,
+                                                const device uchar* xor_uc_storage,
+                                                const device uchar* xor_hc_storage,
+                                                FoundBuffers found) {
+    uint hash_words[8] = { 0u };
+    uchar type_value;
+    if (kind == PrivVanityKindU) {
+        _GetHash160Uncomp_fast(x, y, reinterpret_cast<thread uchar*>(hash_words));
+        type_value = 0x01u;
+    } else if (kind == PrivVanityKindE) {
+        uchar pubkey65[65];
+        uchar keccak_hash[32];
+        u64x4_to_pubkey65(x, y, pubkey65);
+        keccak(reinterpret_cast<thread char*>(pubkey65 + 1), 64, keccak_hash, 32);
+        for (uint h = 12u, i = 0u; i < 5u; ++i, h += 4u) {
+            hash_words[i] = uint(keccak_hash[h]) |
+                            ((uint(keccak_hash[h + 1u]) << 8u) & 0x0000ff00u) |
+                            ((uint(keccak_hash[h + 2u]) << 16u) & 0x00ff0000u) |
+                            ((uint(keccak_hash[h + 3u]) << 24u) & 0xff000000u);
+        }
+        type_value = 0x06u;
+    } else {
+        return;
+    }
+
+    if (!priv_check_hash_words(config, filters, filter_storage, bloom_storage, xor_storage,
+                               xor_un_storage, xor_uc_storage, xor_hc_storage, hash_words)) {
+        return;
+    }
+
+    uchar private_key[32];
+    priv_build_seq128_key(private_key, start_point, mode, result_index, step);
+    priv_vanity_store_result(isResult, buffResult, private_key, hash_words, 20u,
+                             type_value, found);
+}
+
+static inline ulong priv_vanity_index_from_pkfield(int mode, ulong batch_base, uint pk_field) {
+    return (mode == 1) ? (batch_base + ulong(pk_field))
+                       : (batch_base + ulong(PRIV_VANITY_GRP_SIZE) - ulong(pk_field));
+}
+
+struct PrivVanityParityEmitter {
+    PrivVanityKind kind;
+    device bool* isResult;
+    device bool* buffResult;
+    const device uchar* startPoint;
+    int mode;
+    ulong batchBase;
+    ulong step;
+    device RuntimeConfig* config;
+    device XorFilterState* filters;
+    device FilterStorageState* filterStorage;
+    const device uchar* bloomStorage;
+    const device uchar* xorStorage;
+    const device uchar* xorUnStorage;
+    const device uchar* xorUcStorage;
+    const device uchar* xorHcStorage;
+    FoundBuffers found;
+
+    inline void operator()(thread ulong* x, uchar odd_y, int pkField) thread {
+        // The table direction already matches mode, so pkField is the logical offset
+        // for both forward and backward scans.
+        const ulong resultIndex = batchBase + ulong(uint(pkField));
+        priv_vanity_emit_parity_fast(kind, isResult, buffResult, startPoint, mode, resultIndex,
+                                     step, x, odd_y, *config, *filters, *filterStorage, bloomStorage,
+                                     xorStorage, xorUnStorage, xorUcStorage, xorHcStorage, found);
+    }
+};
+
+struct PrivVanityFullYEmitter {
+    PrivVanityKind kind;
+    device bool* isResult;
+    device bool* buffResult;
+    const device uchar* startPoint;
+    int mode;
+    ulong batchBase;
+    ulong step;
+    device RuntimeConfig* config;
+    device XorFilterState* filters;
+    device FilterStorageState* filterStorage;
+    const device uchar* bloomStorage;
+    const device uchar* xorStorage;
+    const device uchar* xorUnStorage;
+    const device uchar* xorUcStorage;
+    const device uchar* xorHcStorage;
+    FoundBuffers found;
+
+    inline void operator()(thread ulong* x, thread ulong* y, int pkField) thread {
+        const ulong resultIndex = batchBase + ulong(uint(pkField));
+        priv_vanity_emit_full_y_fast(kind, isResult, buffResult, startPoint, mode, resultIndex,
+                                     step, x, y, *config, *filters, *filterStorage, bloomStorage,
+                                     xorStorage, xorUnStorage, xorUcStorage, xorHcStorage, found);
+    }
+};
+
+template <PrivVanityKind Kind>
+struct PrivVanityParityEmitterStatic {
+    device bool* isResult;
+    device bool* buffResult;
+    const device uchar* startPoint;
+    int mode;
+    ulong batchBase;
+    ulong step;
+    device RuntimeConfig* config;
+    device XorFilterState* filters;
+    device FilterStorageState* filterStorage;
+    const device uchar* bloomStorage;
+    const device uchar* xorStorage;
+    const device uchar* xorUnStorage;
+    const device uchar* xorUcStorage;
+    const device uchar* xorHcStorage;
+    FoundBuffers found;
+
+    inline void operator()(thread ulong* x, uchar odd_y, int pkField) thread {
+        const ulong resultIndex = batchBase + ulong(uint(pkField));
+        priv_vanity_emit_parity_fast(Kind, isResult, buffResult, startPoint, mode, resultIndex,
+                                     step, x, odd_y, *config, *filters, *filterStorage, bloomStorage,
+                                     xorStorage, xorUnStorage, xorUcStorage, xorHcStorage, found);
+    }
+};
+
+template <PrivVanityKind Kind>
+struct PrivVanityFullYEmitterStatic {
+    device bool* isResult;
+    device bool* buffResult;
+    const device uchar* startPoint;
+    int mode;
+    ulong batchBase;
+    ulong step;
+    device RuntimeConfig* config;
+    device XorFilterState* filters;
+    device FilterStorageState* filterStorage;
+    const device uchar* bloomStorage;
+    const device uchar* xorStorage;
+    const device uchar* xorUnStorage;
+    const device uchar* xorUcStorage;
+    const device uchar* xorHcStorage;
+    FoundBuffers found;
+
+    inline void operator()(thread ulong* x, thread ulong* y, int pkField) thread {
+        const ulong resultIndex = batchBase + ulong(uint(pkField));
+        priv_vanity_emit_full_y_fast(Kind, isResult, buffResult, startPoint, mode, resultIndex,
+                                     step, x, y, *config, *filters, *filterStorage, bloomStorage,
+                                     xorStorage, xorUnStorage, xorUcStorage, xorHcStorage, found);
+    }
+};
+
+constant uint PRIV_VANITY_WALK_PAIRS = 16u;
+constant uint PRIV_VANITY_WALK_POINTS = PRIV_VANITY_WALK_PAIRS * 2u;
+
+struct PrivVanityWalkScratch {
+    secp256k1_gej points[PRIV_VANITY_WALK_POINTS];
+    secp256k1_fe z[PRIV_VANITY_WALK_POINTS];
+    secp256k1_fe zinv[PRIV_VANITY_WALK_POINTS];
+};
+
+static inline void priv_vanity_emit_parity_gej_batch(PrivVanityKind kind,
+                                                      device bool* isResult,
+                                                      device bool* buffResult,
+                                                      const device uchar* start_point,
+                                                      int mode,
+                                                      ulong batch_base,
+                                                      ulong step,
+                                                      thread PrivVanityWalkScratch& scratch,
+                                                      uint point_count,
+                                                      uint first_offset,
+                                                      bool includes_last_negative,
+                                                      device RuntimeConfig& config,
+                                                      device XorFilterState& filters,
+                                                      device FilterStorageState& filter_storage,
+                                                      const device uchar* bloom_storage,
+                                                      const device uchar* xor_storage,
+                                                      const device uchar* xor_un_storage,
+                                                      const device uchar* xor_uc_storage,
+                                                      const device uchar* xor_hc_storage,
+                                                      FoundBuffers found) {
+    secp256k1_fe_inv_all_var(point_count, scratch.zinv, scratch.z);
+    for (uint i = 0u; i < point_count; ++i) {
+        secp256k1_ge point;
+        secp256k1_ge_set_gej_zinv(&point, &scratch.points[i], &scratch.zinv[i]);
+        ulong x[4];
+        ulong y[4];
+        worker_priv_seq_fe_to_u64x4(x, &point.x);
+        worker_priv_seq_fe_to_u64x4(y, &point.y);
+
+        uint pk_field;
+        if (includes_last_negative && i + 1u == point_count) {
+            pk_field = 0u;
+        } else {
+            const uint pair = i >> 1u;
+            const uint offset = first_offset + pair;
+            pk_field = ((i & 1u) == 0u)
+                ? (PRIV_VANITY_GRP_SIZE / 2u + offset)
+                : (PRIV_VANITY_GRP_SIZE / 2u - offset);
+        }
+        const ulong result_index = priv_vanity_index_from_pkfield(mode, batch_base, pk_field);
+        priv_vanity_emit_parity_fast(kind, isResult, buffResult, start_point, mode, result_index,
+                                     step, x, uchar(y[0] & 1ul), config, filters, filter_storage, bloom_storage,
+                                     xor_storage, xor_un_storage, xor_uc_storage, xor_hc_storage,
+                                     found);
+    }
+}
+
+static inline void priv_vanity_emit_taproot(device bool* isResult,
+                                            device bool* buffResult,
+                                            const thread uchar* private_key,
+                                            thread uchar pubkey65[65],
+                                            constant secp256k1_ge_storage* precPtr,
+                                            ulong precPitch,
+                                            device RuntimeConfig& config,
+                                            device XorFilterState& filters,
+                                            device FilterStorageState& filter_storage,
+                                            const device uchar* bloom_storage,
+                                            const device uchar* xor_storage,
+                                            const device uchar* xor_un_storage,
+                                            const device uchar* xor_uc_storage,
+                                            const device uchar* xor_hc_storage,
+                                            FoundBuffers found,
+                                            uchar type_value = 0x04u) {
+    uchar taproot_hash[32];
+    uint hash160[8] = { 0u };
+    priv_vanity_tweak_taproot(taproot_hash, pubkey65, precPtr, size_t(precPitch));
+    _GetRMD160(reinterpret_cast<thread uint*>(taproot_hash), hash160);
+    priv_vanity_check_and_store(isResult, buffResult, private_key, taproot_hash, 32u, hash160,
+                                type_value, config, filters, filter_storage, bloom_storage,
+                                xor_storage, xor_un_storage, xor_uc_storage, xor_hc_storage, found);
+}
+
+static inline void priv_vanity_emit_eth(device bool* isResult,
+                                        device bool* buffResult,
+                                        const thread uchar* private_key,
+                                        thread uchar pubkey65[65],
+                                        device RuntimeConfig& config,
+                                        device XorFilterState& filters,
+                                        device FilterStorageState& filter_storage,
+                                        const device uchar* bloom_storage,
+                                        const device uchar* xor_storage,
+                                        const device uchar* xor_un_storage,
+                                        const device uchar* xor_uc_storage,
+                                        const device uchar* xor_hc_storage,
+                                        FoundBuffers found,
+                                        uchar type_value = 0x06u) {
+    uchar keccak_hash[32];
+    uint hash160[8] = { 0u };
+    keccak(reinterpret_cast<thread char*>(pubkey65 + 1), 64, keccak_hash, 32);
+    for (uint h = 12u, i = 0u; i < 5u; ++i) {
+        hash160[i] = uint(keccak_hash[h]) |
+                     ((uint(keccak_hash[h + 1u]) << 8u) & 0x0000ff00u) |
+                     ((uint(keccak_hash[h + 2u]) << 16u) & 0x00ff0000u) |
+                     ((uint(keccak_hash[h + 3u]) << 24u) & 0xff000000u);
+        h += 4u;
+    }
+    priv_vanity_check_and_store(isResult, buffResult, private_key, hash160, 20u, hash160,
+                                type_value, config, filters, filter_storage, bloom_storage,
+                                xor_storage, xor_un_storage, xor_uc_storage, xor_hc_storage, found);
+}
+
+static inline void priv_vanity_emit_kind(PrivVanityKind kind,
+                                         device bool* isResult,
+                                         device bool* buffResult,
+                                         const thread uchar* private_key,
+                                         thread uchar pubkey65[65],
+                                         constant secp256k1_ge_storage* precPtr,
+                                         ulong precPitch,
+                                         device RuntimeConfig& config,
+                                         device XorFilterState& filters,
+                                         device FilterStorageState& filter_storage,
+                                         const device uchar* bloom_storage,
+                                         const device uchar* xor_storage,
+                                         const device uchar* xor_un_storage,
+                                         const device uchar* xor_uc_storage,
+                                         const device uchar* xor_hc_storage,
+                                         FoundBuffers found) {
+    switch (kind) {
+        case PrivVanityKindX:
+            priv_vanity_emit_x(isResult, buffResult, private_key, pubkey65, config, filters,
+                               filter_storage, bloom_storage, xor_storage, xor_un_storage,
+                               xor_uc_storage, xor_hc_storage, found);
+            break;
+        case PrivVanityKindU:
+            priv_vanity_emit_uncompressed(isResult, buffResult, private_key, pubkey65, config,
+                                          filters, filter_storage, bloom_storage, xor_storage,
+                                          xor_un_storage, xor_uc_storage, xor_hc_storage, found);
+            break;
+        case PrivVanityKindS:
+            priv_vanity_emit_segwit(isResult, buffResult, private_key, pubkey65, config, filters,
+                                    filter_storage, bloom_storage, xor_storage, xor_un_storage,
+                                    xor_uc_storage, xor_hc_storage, found);
+            if (config.p2wsh != 0u) {
+                priv_vanity_emit_p2wsh(isResult, buffResult, private_key, pubkey65, config, filters,
+                                       filter_storage, bloom_storage, xor_storage, xor_un_storage,
+                                       xor_uc_storage, xor_hc_storage, found);
+            }
+            break;
+        case PrivVanityKindR:
+            priv_vanity_emit_taproot(isResult, buffResult, private_key, pubkey65, precPtr, precPitch,
+                                     config, filters, filter_storage, bloom_storage, xor_storage,
+                                     xor_un_storage, xor_uc_storage, xor_hc_storage, found);
+            break;
+        case PrivVanityKindE:
+            priv_vanity_emit_eth(isResult, buffResult, private_key, pubkey65, config, filters,
+                                 filter_storage, bloom_storage, xor_storage, xor_un_storage,
+                                 xor_uc_storage, xor_hc_storage, found);
+            break;
+        case PrivVanityKindC:
+            priv_vanity_emit_compressed(isResult, buffResult, private_key, pubkey65, config, filters,
+                                        filter_storage, bloom_storage, xor_storage, xor_un_storage,
+                                        xor_uc_storage, xor_hc_storage, found);
+            break;
+        case PrivVanityKindP:
+            priv_vanity_emit_p2wsh(isResult, buffResult, private_key, pubkey65, config, filters,
+                                   filter_storage, bloom_storage, xor_storage, xor_un_storage,
+                                   xor_uc_storage, xor_hc_storage, found);
+            break;
+        case PrivVanityKindCusr:
+            break;
+    }
+}
+
+static inline void priv_vanity_emit_cusr(device bool* isResult,
+                                         device bool* buffResult,
+                                         const thread uchar* private_key,
+                                         thread uchar pubkey65[65],
+                                         constant secp256k1_ge_storage* precPtr,
+                                         ulong precPitch,
+                                         device RuntimeConfig& config,
+                                         device XorFilterState& filters,
+                                         device FilterStorageState& filter_storage,
+                                         const device uchar* bloom_storage,
+                                         const device uchar* xor_storage,
+                                         const device uchar* xor_un_storage,
+                                         const device uchar* xor_uc_storage,
+                                         const device uchar* xor_hc_storage,
+                                         FoundBuffers found) {
+    const bool endo = config.endomorphism != 0u;
+    if (!endo) {
+        uint comp_hash[8] = { 0u };
+        if (config.uncompressed != 0u) {
+            priv_vanity_emit_uncompressed(isResult, buffResult, private_key, pubkey65, config,
+                                          filters, filter_storage, bloom_storage, xor_storage,
+                                          xor_un_storage, xor_uc_storage, xor_hc_storage, found);
+        }
+        if (config.compressed != 0u) {
+            priv_vanity_emit_compressed(isResult, buffResult, private_key, pubkey65, config,
+                                        filters, filter_storage, bloom_storage, xor_storage,
+                                        xor_un_storage, xor_uc_storage, xor_hc_storage, found,
+                                        0x02u, comp_hash);
+        }
+        if (config.segwit != 0u) {
+            if (config.compressed == 0u) {
+                int keyLenSkip = 0;
+                _GetHash160Comp(pubkey65, keyLenSkip, reinterpret_cast<thread uchar*>(comp_hash));
+            }
+            priv_vanity_emit_segwit_from_comp_hash(isResult, buffResult, private_key, comp_hash,
+                                                   config, filters, filter_storage, bloom_storage,
+                                                   xor_storage, xor_un_storage, xor_uc_storage,
+                                                   xor_hc_storage, found);
+        }
+        if (config.p2wsh != 0u) {
+            priv_vanity_emit_p2wsh(isResult, buffResult, private_key, pubkey65, config, filters,
+                                   filter_storage, bloom_storage, xor_storage, xor_un_storage,
+                                   xor_uc_storage, xor_hc_storage, found);
+        }
+        if (config.taproot != 0u) {
+            priv_vanity_emit_taproot(isResult, buffResult, private_key, pubkey65, precPtr, precPitch,
+                                     config, filters, filter_storage, bloom_storage, xor_storage,
+                                     xor_un_storage, xor_uc_storage, xor_hc_storage, found);
+        }
+        if (config.xpoint != 0u) {
+            priv_vanity_emit_x(isResult, buffResult, private_key, pubkey65, config, filters,
+                               filter_storage, bloom_storage, xor_storage, xor_un_storage,
+                               xor_uc_storage, xor_hc_storage, found);
+        }
+        if (config.ethereum != 0u) {
+            priv_vanity_emit_eth(isResult, buffResult, private_key, pubkey65, config, filters,
+                                 filter_storage, bloom_storage, xor_storage, xor_un_storage,
+                                 xor_uc_storage, xor_hc_storage, found);
+        }
+        return;
+    }
+
+    uchar x_beta1[32];
+    uchar x_beta2[32];
+    uchar y_neg[32];
+    priv_vanity_mul_x_beta(pubkey65 + 1, PRIV_VANITY_BETA, x_beta1);
+    priv_vanity_mul_x_beta(pubkey65 + 1, PRIV_VANITY_BETA2, x_beta2);
+    priv_vanity_neg_y(pubkey65 + 33, y_neg);
+    const bool odd_py = (pubkey65[64] & 1u) != 0u;
+
+    for (uint j = 0u; j < 3u; ++j) {
+        uchar vbase = uchar(j * 2u);
+        uchar odd_variant = uchar(vbase + (odd_py ? 0u : 1u));
+        uchar even_variant = uchar(vbase + (odd_py ? 1u : 0u));
+        uchar base_variant = uchar(j * 2u);
+        uchar pub_pos[65];
+        uchar pub_neg[65];
+        pub_pos[0] = 0x04u;
+        pub_neg[0] = 0x04u;
+        if (j == 0u) {
+            priv_vanity_copy_x(pub_pos, pubkey65 + 1);
+            priv_vanity_copy_x(pub_neg, pubkey65 + 1);
+        } else if (j == 1u) {
+            priv_vanity_copy_x(pub_pos, x_beta1);
+            priv_vanity_copy_x(pub_neg, x_beta1);
+        } else {
+            priv_vanity_copy_x(pub_pos, x_beta2);
+            priv_vanity_copy_x(pub_neg, x_beta2);
+        }
+        priv_vanity_copy_y(pub_pos, pubkey65 + 33);
+        priv_vanity_copy_y(pub_neg, y_neg);
+
+        if (config.uncompressed != 0u) {
+            priv_vanity_emit_uncompressed(isResult, buffResult, private_key, pub_pos, config,
+                                          filters, filter_storage, bloom_storage, xor_storage,
+                                          xor_un_storage, xor_uc_storage, xor_hc_storage, found,
+                                          priv_vanity_make_endo_type(2u, uchar(vbase + 0u)));
+            priv_vanity_emit_uncompressed(isResult, buffResult, private_key, pub_neg, config,
+                                          filters, filter_storage, bloom_storage, xor_storage,
+                                          xor_un_storage, xor_uc_storage, xor_hc_storage, found,
+                                          priv_vanity_make_endo_type(2u, uchar(vbase + 1u)));
+        }
+
+        if (config.compressed != 0u || config.segwit != 0u || config.p2wsh != 0u) {
+            uint hash_odd[8] = { 0u };
+            uint hash_even[8] = { 0u };
+            if (config.compressed != 0u) {
+                pub_pos[64] = 1u;
+                priv_vanity_emit_compressed(isResult, buffResult, private_key, pub_pos, config,
+                                            filters, filter_storage, bloom_storage, xor_storage,
+                                            xor_un_storage, xor_uc_storage, xor_hc_storage, found,
+                                            priv_vanity_make_endo_type(0u, odd_variant), hash_odd);
+                pub_pos[64] = 0u;
+                priv_vanity_emit_compressed(isResult, buffResult, private_key, pub_pos, config,
+                                            filters, filter_storage, bloom_storage, xor_storage,
+                                            xor_un_storage, xor_uc_storage, xor_hc_storage, found,
+                                            priv_vanity_make_endo_type(0u, even_variant), hash_even);
+            } else if (config.segwit != 0u) {
+                int keyLenSkipOdd = 0;
+                pub_pos[64] = 1u;
+                _GetHash160Comp(pub_pos, keyLenSkipOdd, reinterpret_cast<thread uchar*>(hash_odd));
+                int keyLenSkipEven = 0;
+                pub_pos[64] = 0u;
+                _GetHash160Comp(pub_pos, keyLenSkipEven, reinterpret_cast<thread uchar*>(hash_even));
+            }
+            if (config.segwit != 0u) {
+                uint seg_hash[8];
+                for (uint i = 0u; i < 8u; ++i) {
+                    seg_hash[i] = hash_odd[i];
+                }
+                priv_vanity_emit_segwit_from_comp_hash(isResult, buffResult, private_key, seg_hash,
+                                                       config, filters, filter_storage, bloom_storage,
+                                                       xor_storage, xor_un_storage, xor_uc_storage,
+                                                       xor_hc_storage, found,
+                                                       priv_vanity_make_endo_type(1u, odd_variant));
+                for (uint i = 0u; i < 8u; ++i) {
+                    seg_hash[i] = hash_even[i];
+                }
+                priv_vanity_emit_segwit_from_comp_hash(isResult, buffResult, private_key, seg_hash,
+                                                       config, filters, filter_storage, bloom_storage,
+                                                       xor_storage, xor_un_storage, xor_uc_storage,
+                                                       xor_hc_storage, found,
+                                                       priv_vanity_make_endo_type(1u, even_variant));
+            }
+            if (config.p2wsh != 0u) {
+                pub_pos[64] = 1u;
+                priv_vanity_emit_p2wsh(isResult, buffResult, private_key, pub_pos, config,
+                                       filters, filter_storage, bloom_storage, xor_storage,
+                                       xor_un_storage, xor_uc_storage, xor_hc_storage, found,
+                                       priv_vanity_make_endo_type(PRIV_VANITY_ENDO_GROUP_P2WSH, odd_variant));
+                pub_pos[64] = 0u;
+                priv_vanity_emit_p2wsh(isResult, buffResult, private_key, pub_pos, config,
+                                       filters, filter_storage, bloom_storage, xor_storage,
+                                       xor_un_storage, xor_uc_storage, xor_hc_storage, found,
+                                       priv_vanity_make_endo_type(PRIV_VANITY_ENDO_GROUP_P2WSH, even_variant));
+            }
+            pub_pos[64] = pubkey65[64];
+        }
+
+        if (config.taproot != 0u) {
+            priv_vanity_emit_taproot(isResult, buffResult, private_key, pub_pos, precPtr, precPitch,
+                                     config, filters, filter_storage, bloom_storage, xor_storage,
+                                     xor_un_storage, xor_uc_storage, xor_hc_storage, found,
+                                     priv_vanity_make_endo_type(4u, base_variant));
+        }
+        if (config.xpoint != 0u) {
+            priv_vanity_emit_x(isResult, buffResult, private_key, pub_pos, config, filters,
+                               filter_storage, bloom_storage, xor_storage, xor_un_storage,
+                               xor_uc_storage, xor_hc_storage, found,
+                               priv_vanity_make_endo_type(5u, base_variant));
+        }
+        if (config.ethereum != 0u) {
+            priv_vanity_emit_eth(isResult, buffResult, private_key, pub_pos, config, filters,
+                                 filter_storage, bloom_storage, xor_storage, xor_un_storage,
+                                 xor_uc_storage, xor_hc_storage, found,
+                                 priv_vanity_make_endo_type(3u, base_variant));
+        }
+    }
+}
+
+static inline void priv_vanity_run(PrivVanityKind kind,
+                                   device bool* isResult,
+                                   device bool* buffResult,
+                                   constant secp256k1_ge_storage* precPtr,
+                                   ulong precPitch,
+                                   int mode,
+                                   const device uchar* start_point,
+                                   ulong step,
+                                   int thread_steps_pub,
+                                   device RuntimeConfig& config,
+                                   device XorFilterState& filters,
+                                   device FilterStorageState& filter_storage,
+                                   const device uchar* bloom_storage,
+                                   const device uchar* xor_storage,
+                                   const device uchar* xor_un_storage,
+                                   const device uchar* xor_uc_storage,
+                                   const device uchar* xor_hc_storage,
+                                   FoundBuffers found,
+                                   uint tid) {
+    if (start_point == nullptr || precPtr == nullptr || thread_steps_pub <= 0 ||
+        config.secp256 == 0u || !priv_vanity_filters_active(config)) {
+        return;
+    }
+
+    const ulong starter = ulong(thread_steps_pub) * ulong(tid);
+    uchar prvKeys[PRIV_VANITY_BATCH * 32u];
+    uchar pubKeys[PRIV_VANITY_BATCH * 65u];
+
+    for (uint base = 0u; base < uint(thread_steps_pub); base += PRIV_VANITY_BATCH) {
+        const uint count = min(PRIV_VANITY_BATCH, uint(thread_steps_pub) - base);
+        for (uint i = 0u; i < count; ++i) {
+            const ulong idx = priv_vanity_result_index(mode, starter, base + i);
+            priv_build_seq128_key(prvKeys + i * 32u, start_point, mode, idx, step);
+        }
+
+        secp256k1_ec_pubkey_create_serialized_batch_myunsafe(pubKeys,
+                                                             prvKeys,
+                                                             int(count),
+                                                             precPtr,
+                                                             size_t(precPitch));
+
+        for (uint i = 0u; i < count; ++i) {
+            thread uchar* private_key = prvKeys + i * 32u;
+            thread uchar* pubkey65 = pubKeys + i * 65u;
+            if (kind == PrivVanityKindCusr) {
+                priv_vanity_emit_cusr(isResult, buffResult, private_key, pubkey65, precPtr,
+                                      precPitch, config, filters, filter_storage, bloom_storage,
+                                      xor_storage, xor_un_storage, xor_uc_storage, xor_hc_storage,
+                                      found);
+            } else {
+                priv_vanity_emit_kind(kind, isResult, buffResult, private_key, pubkey65, precPtr,
+                                      precPitch, config, filters, filter_storage, bloom_storage,
+                                      xor_storage, xor_un_storage, xor_uc_storage, xor_hc_storage,
+                                      found);
+            }
+        }
+    }
+}
+
+static inline void priv_vanity_run_parity_walk(PrivVanityKind kind,
+                                               bool persist_centers,
+                                               device bool* isResult,
+                                               device bool* buffResult,
+                                               constant secp256k1_ge_storage* precPtr,
+                                               ulong precPitch,
+                                               int mode,
+                                               const device uchar* start_point,
+                                               ulong step,
+                                               int thread_steps_pub,
+                                               device ulong* startx_buf,
+                                               device ulong* starty_buf,
+                                               const device ulong* vanity_gx,
+                                               const device ulong* vanity_gy,
+                                               const device ulong* vanity_2gnx,
+                                               const device ulong* vanity_2gny,
+                                               device RuntimeConfig& config,
+                                               device XorFilterState& filters,
+                                               device FilterStorageState& filter_storage,
+                                               const device uchar* bloom_storage,
+                                               const device uchar* xor_storage,
+                                               const device uchar* xor_un_storage,
+                                               const device uchar* xor_uc_storage,
+                                               const device uchar* xor_hc_storage,
+                                               FoundBuffers found,
+                                               uint tid,
+                                               uint tid_in_group,
+                                               uint threads_per_group,
+                                               uint threadgroup_position) {
+    if (startx_buf == nullptr || starty_buf == nullptr || vanity_gx == nullptr ||
+        vanity_gy == nullptr || vanity_2gnx == nullptr || vanity_2gny == nullptr ||
+        step == 0ul || thread_steps_pub <= 0 ||
+        (uint(thread_steps_pub) % PRIV_VANITY_GRP_SIZE) != 0u) {
+        priv_vanity_run(kind, isResult, buffResult, precPtr, precPitch, mode,
+                        start_point, step, thread_steps_pub, config, filters, filter_storage,
+                        bloom_storage, xor_storage, xor_un_storage, xor_uc_storage,
+                        xor_hc_storage, found, tid);
+        return;
+    }
+    if (start_point == nullptr || precPtr == nullptr || config.secp256 == 0u ||
+        !priv_vanity_filters_active(config)) {
+        return;
+    }
+
+    device ulong* start_x_base = startx_buf + ulong(threadgroup_position) *
+        4ul * ulong(threads_per_group);
+    device ulong* start_y_base = starty_buf + ulong(threadgroup_position) *
+        4ul * ulong(threads_per_group);
+    ulong center_x[4];
+    ulong center_y[4];
+    worker_priv_seq_load256a(center_x, start_x_base, tid_in_group, threads_per_group);
+    worker_priv_seq_load256a(center_y, start_y_base, tid_in_group, threads_per_group);
+
+    const ulong starter = ulong(thread_steps_pub) * ulong(tid);
+    const uint num_batches = uint(thread_steps_pub) / PRIV_VANITY_GRP_SIZE;
+    PrivVanityParityEmitter emitter = {
+        kind,
+        isResult,
+        buffResult,
+        start_point,
+        mode,
+        0ul,
+        step,
+        &config,
+        &filters,
+        &filter_storage,
+        bloom_storage,
+        xor_storage,
+        xor_un_storage,
+        xor_uc_storage,
+        xor_hc_storage,
+        found
+    };
+
+    for (uint batch = 0u; batch < num_batches; ++batch) {
+        emitter.batchBase = starter + ulong(batch) * ulong(PRIV_VANITY_GRP_SIZE);
+        vanity_walk_batch_1024_parity(center_x, center_y, vanity_gx, vanity_gy,
+                                      vanity_2gnx, vanity_2gny, mode != 1, emitter);
+    }
+
+    if (persist_centers) {
+        worker_priv_seq_store256a(start_x_base, center_x, tid_in_group, threads_per_group);
+        worker_priv_seq_store256a(start_y_base, center_y, tid_in_group, threads_per_group);
+    }
+}
+
+static inline void priv_vanity_run_full_y_walk(PrivVanityKind kind,
+                                               bool persist_centers,
+                                               device bool* isResult,
+                                               device bool* buffResult,
+                                               constant secp256k1_ge_storage* precPtr,
+                                               ulong precPitch,
+                                               int mode,
+                                               const device uchar* start_point,
+                                               ulong step,
+                                               int thread_steps_pub,
+                                               device ulong* startx_buf,
+                                               device ulong* starty_buf,
+                                               const device ulong* vanity_gx,
+                                               const device ulong* vanity_gy,
+                                               const device ulong* vanity_2gnx,
+                                               const device ulong* vanity_2gny,
+                                               device RuntimeConfig& config,
+                                               device XorFilterState& filters,
+                                               device FilterStorageState& filter_storage,
+                                               const device uchar* bloom_storage,
+                                               const device uchar* xor_storage,
+                                               const device uchar* xor_un_storage,
+                                               const device uchar* xor_uc_storage,
+                                               const device uchar* xor_hc_storage,
+                                               FoundBuffers found,
+                                               uint tid,
+                                               uint tid_in_group,
+                                               uint threads_per_group,
+                                               uint threadgroup_position) {
+    if (startx_buf == nullptr || starty_buf == nullptr || vanity_gx == nullptr ||
+        vanity_gy == nullptr || vanity_2gnx == nullptr || vanity_2gny == nullptr ||
+        step == 0ul || thread_steps_pub <= 0 ||
+        (uint(thread_steps_pub) % PRIV_VANITY_GRP_SIZE) != 0u) {
+        priv_vanity_run(kind, isResult, buffResult, precPtr, precPitch, mode,
+                        start_point, step, thread_steps_pub, config, filters, filter_storage,
+                        bloom_storage, xor_storage, xor_un_storage, xor_uc_storage,
+                        xor_hc_storage, found, tid);
+        return;
+    }
+    if (start_point == nullptr || precPtr == nullptr || config.secp256 == 0u ||
+        !priv_vanity_filters_active(config)) {
+        return;
+    }
+
+    device ulong* start_x_base = startx_buf + ulong(threadgroup_position) *
+        4ul * ulong(threads_per_group);
+    device ulong* start_y_base = starty_buf + ulong(threadgroup_position) *
+        4ul * ulong(threads_per_group);
+    ulong center_x[4];
+    ulong center_y[4];
+    worker_priv_seq_load256a(center_x, start_x_base, tid_in_group, threads_per_group);
+    worker_priv_seq_load256a(center_y, start_y_base, tid_in_group, threads_per_group);
+
+    const ulong starter = ulong(thread_steps_pub) * ulong(tid);
+    const uint num_batches = uint(thread_steps_pub) / PRIV_VANITY_GRP_SIZE;
+    PrivVanityFullYEmitter emitter = {
+        kind, isResult, buffResult, start_point, mode, 0ul, step,
+        &config, &filters, &filter_storage, bloom_storage, xor_storage,
+        xor_un_storage, xor_uc_storage, xor_hc_storage, found
+    };
+
+    for (uint batch = 0u; batch < num_batches; ++batch) {
+        emitter.batchBase = starter + ulong(batch) * ulong(PRIV_VANITY_GRP_SIZE);
+        vanity_walk_batch_1024_full_y(center_x, center_y, vanity_gx, vanity_gy,
+                                      vanity_2gnx, vanity_2gny, mode != 1, emitter);
+    }
+
+    if (persist_centers) {
+        worker_priv_seq_store256a(start_x_base, center_x, tid_in_group, threads_per_group);
+        worker_priv_seq_store256a(start_y_base, center_y, tid_in_group, threads_per_group);
+    }
+}
+
+template <PrivVanityKind Kind, bool PersistCenters>
+static inline void priv_vanity_run_parity_walk_static(device bool* isResult,
+                                                      device bool* buffResult,
+                                                      constant secp256k1_ge_storage* precPtr,
+                                                      ulong precPitch,
+                                                      int mode,
+                                                      const device uchar* start_point,
+                                                      ulong step,
+                                                      int thread_steps_pub,
+                                                      device ulong* startx_buf,
+                                                      device ulong* starty_buf,
+                                                      const device ulong* vanity_gx,
+                                                      const device ulong* vanity_gy,
+                                                      const device ulong* vanity_2gnx,
+                                                      const device ulong* vanity_2gny,
+                                                      device RuntimeConfig& config,
+                                                      device XorFilterState& filters,
+                                                      device FilterStorageState& filter_storage,
+                                                      const device uchar* bloom_storage,
+                                                      const device uchar* xor_storage,
+                                                      const device uchar* xor_un_storage,
+                                                      const device uchar* xor_uc_storage,
+                                                      const device uchar* xor_hc_storage,
+                                                      FoundBuffers found,
+                                                      uint tid,
+                                                      uint tid_in_group,
+                                                      uint threads_per_group,
+                                                      uint threadgroup_position) {
+    if (startx_buf == nullptr || starty_buf == nullptr || vanity_gx == nullptr ||
+        vanity_gy == nullptr || vanity_2gnx == nullptr || vanity_2gny == nullptr ||
+        step == 0ul || thread_steps_pub <= 0 ||
+        (uint(thread_steps_pub) % PRIV_VANITY_GRP_SIZE) != 0u) {
+        priv_vanity_run(Kind, isResult, buffResult, precPtr, precPitch, mode,
+                        start_point, step, thread_steps_pub, config, filters, filter_storage,
+                        bloom_storage, xor_storage, xor_un_storage, xor_uc_storage,
+                        xor_hc_storage, found, tid);
+        return;
+    }
+    if (start_point == nullptr || precPtr == nullptr || config.secp256 == 0u ||
+        !priv_vanity_filters_active(config)) {
+        return;
+    }
+
+    device ulong* start_x_base = startx_buf + ulong(threadgroup_position) *
+        4ul * ulong(threads_per_group);
+    device ulong* start_y_base = starty_buf + ulong(threadgroup_position) *
+        4ul * ulong(threads_per_group);
+    ulong center_x[4];
+    ulong center_y[4];
+    worker_priv_seq_load256a(center_x, start_x_base, tid_in_group, threads_per_group);
+    worker_priv_seq_load256a(center_y, start_y_base, tid_in_group, threads_per_group);
+
+    const ulong starter = ulong(thread_steps_pub) * ulong(tid);
+    const uint num_batches = uint(thread_steps_pub) / PRIV_VANITY_GRP_SIZE;
+    PrivVanityParityEmitterStatic<Kind> emitter = {
+        isResult,
+        buffResult,
+        start_point,
+        mode,
+        0ul,
+        step,
+        &config,
+        &filters,
+        &filter_storage,
+        bloom_storage,
+        xor_storage,
+        xor_un_storage,
+        xor_uc_storage,
+        xor_hc_storage,
+        found
+    };
+
+    for (uint batch = 0u; batch < num_batches; ++batch) {
+        emitter.batchBase = starter + ulong(batch) * ulong(PRIV_VANITY_GRP_SIZE);
+        vanity_walk_batch_1024_parity(center_x, center_y, vanity_gx, vanity_gy,
+                                      vanity_2gnx, vanity_2gny, mode != 1, emitter);
+    }
+
+    if (PersistCenters) {
+        worker_priv_seq_store256a(start_x_base, center_x, tid_in_group, threads_per_group);
+        worker_priv_seq_store256a(start_y_base, center_y, tid_in_group, threads_per_group);
+    }
+}
+
+template <PrivVanityKind Kind, bool PersistCenters>
+static inline void priv_vanity_run_full_y_walk_static(device bool* isResult,
+                                                      device bool* buffResult,
+                                                      constant secp256k1_ge_storage* precPtr,
+                                                      ulong precPitch,
+                                                      int mode,
+                                                      const device uchar* start_point,
+                                                      ulong step,
+                                                      int thread_steps_pub,
+                                                      device ulong* startx_buf,
+                                                      device ulong* starty_buf,
+                                                      const device ulong* vanity_gx,
+                                                      const device ulong* vanity_gy,
+                                                      const device ulong* vanity_2gnx,
+                                                      const device ulong* vanity_2gny,
+                                                      device RuntimeConfig& config,
+                                                      device XorFilterState& filters,
+                                                      device FilterStorageState& filter_storage,
+                                                      const device uchar* bloom_storage,
+                                                      const device uchar* xor_storage,
+                                                      const device uchar* xor_un_storage,
+                                                      const device uchar* xor_uc_storage,
+                                                      const device uchar* xor_hc_storage,
+                                                      FoundBuffers found,
+                                                      uint tid,
+                                                      uint tid_in_group,
+                                                      uint threads_per_group,
+                                                      uint threadgroup_position) {
+    if (startx_buf == nullptr || starty_buf == nullptr || vanity_gx == nullptr ||
+        vanity_gy == nullptr || vanity_2gnx == nullptr || vanity_2gny == nullptr ||
+        step == 0ul || thread_steps_pub <= 0 ||
+        (uint(thread_steps_pub) % PRIV_VANITY_GRP_SIZE) != 0u) {
+        priv_vanity_run(Kind, isResult, buffResult, precPtr, precPitch, mode,
+                        start_point, step, thread_steps_pub, config, filters, filter_storage,
+                        bloom_storage, xor_storage, xor_un_storage, xor_uc_storage,
+                        xor_hc_storage, found, tid);
+        return;
+    }
+    if (start_point == nullptr || precPtr == nullptr || config.secp256 == 0u ||
+        !priv_vanity_filters_active(config)) {
+        return;
+    }
+
+    device ulong* start_x_base = startx_buf + ulong(threadgroup_position) *
+        4ul * ulong(threads_per_group);
+    device ulong* start_y_base = starty_buf + ulong(threadgroup_position) *
+        4ul * ulong(threads_per_group);
+    ulong center_x[4];
+    ulong center_y[4];
+    worker_priv_seq_load256a(center_x, start_x_base, tid_in_group, threads_per_group);
+    worker_priv_seq_load256a(center_y, start_y_base, tid_in_group, threads_per_group);
+
+    const ulong starter = ulong(thread_steps_pub) * ulong(tid);
+    const uint num_batches = uint(thread_steps_pub) / PRIV_VANITY_GRP_SIZE;
+    PrivVanityFullYEmitterStatic<Kind> emitter = {
+        isResult, buffResult, start_point, mode, 0ul, step,
+        &config, &filters, &filter_storage, bloom_storage, xor_storage,
+        xor_un_storage, xor_uc_storage, xor_hc_storage, found
+    };
+
+    for (uint batch = 0u; batch < num_batches; ++batch) {
+        emitter.batchBase = starter + ulong(batch) * ulong(PRIV_VANITY_GRP_SIZE);
+        vanity_walk_batch_1024_full_y(center_x, center_y, vanity_gx, vanity_gy,
+                                      vanity_2gnx, vanity_2gny, mode != 1, emitter);
+    }
+
+    if (PersistCenters) {
+        worker_priv_seq_store256a(start_x_base, center_x, tid_in_group, threads_per_group);
+        worker_priv_seq_store256a(start_y_base, center_y, tid_in_group, threads_per_group);
+    }
+}
+
+#endif

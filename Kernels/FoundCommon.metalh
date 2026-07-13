@@ -1,0 +1,161 @@
+#ifndef METAL_CRYPTO_FOUND_COMMON_METALH
+#define METAL_CRYPTO_FOUND_COMMON_METALH
+
+#include "../KernelState.metalh"
+
+struct FoundBuffers {
+    device char* foundStrings;
+    device uchar* foundPrvKeys;
+    device uint* foundHash160;
+    device uint* len;
+    device uint* iter;
+    device uchar* type;
+    device uint* foundDerivations;
+    device uint* foundDerivations2;
+    device char* pass;
+    device ushort* passSize;
+    device long* round;
+    device ulong* seed;
+    device atomic_uint* resultsCount;
+    uint maxFounds;
+};
+
+static inline ulong found_atomic_add_count(device atomic_uint* counter, uint value) {
+    const uint low = atomic_fetch_add_explicit(counter, value, memory_order_relaxed);
+    if (low + value < low) {
+        atomic_fetch_add_explicit(counter + 1, 1u, memory_order_relaxed);
+    }
+    const uint high = atomic_load_explicit(counter + 1, memory_order_relaxed);
+    return (ulong(high) << 32) | ulong(low);
+}
+
+static inline void found_copy_thread_to_device_char(device char* dst, const thread char* src, uint len) {
+    for (uint i = 0u; i < len; ++i) {
+        dst[i] = src[i];
+    }
+}
+
+static inline void found_copy_thread_to_device_uchar(device uchar* dst, const thread uchar* src, uint len) {
+    for (uint i = 0u; i < len; ++i) {
+        dst[i] = src[i];
+    }
+}
+
+static inline void found_copy_thread_to_device_bytes(device uchar* dst, const thread void* src, uint len) {
+    const thread uchar* p = reinterpret_cast<const thread uchar*>(src);
+    for (uint i = 0u; i < len; ++i) {
+        dst[i] = p[i];
+    }
+}
+
+static inline void found_store_result_compat_len(device bool* isResult,
+                                                 device bool* buffResult,
+                                                 uint starter,
+                                                 uint c_path,
+                                                 const thread char* phrase,
+                                                 uint phrase_len,
+                                                 const thread uchar* private_key32,
+                                                 const thread void* match_data,
+                                                 uint match_data_len,
+                                                 uchar type_value,
+                                                 long current_round,
+                                                 const thread char* pass_start,
+                                                 int pass_size,
+                                                 uchar derivation_tag,
+                                                 device RuntimeConfig& config,
+                                                 FoundBuffers found) {
+    if (buffResult != nullptr) {
+        buffResult[starter] = true;
+    }
+    if (isResult != nullptr) {
+        isResult[0] = true;
+    }
+    if (found.resultsCount == nullptr) {
+        return;
+    }
+
+    const ulong idx64 = found_atomic_add_count(found.resultsCount, 1u);
+    if (idx64 >= ulong(found.maxFounds)) {
+        return;
+    }
+    const uint idx = uint(idx64);
+
+    if (found.foundDerivations != nullptr) {
+        found.foundDerivations[idx] = c_path;
+    }
+    if (found.foundStrings != nullptr && phrase != nullptr && phrase_len > 0u) {
+        const uint n = (phrase_len > kFoundStringBytes) ? kFoundStringBytes : phrase_len;
+        found_copy_thread_to_device_char(found.foundStrings + ulong(idx) * kFoundStringBytes, phrase, n);
+    }
+    if (found.len != nullptr) {
+        found.len[idx] = phrase_len;
+    }
+    if (found.foundPrvKeys != nullptr && private_key32 != nullptr) {
+        found_copy_thread_to_device_uchar(found.foundPrvKeys + ulong(idx) * kFoundPrivateKeyBytes, private_key32, 32u);
+    }
+    if (found.foundHash160 != nullptr && match_data != nullptr && match_data_len > 0u) {
+        const uint n = (match_data_len > (kFoundHashWords * 4u)) ? (kFoundHashWords * 4u) : match_data_len;
+        device uchar* out = reinterpret_cast<device uchar*>(found.foundHash160 + ulong(idx) * kFoundHashWords);
+        found_copy_thread_to_device_bytes(out, match_data, n);
+    }
+    if (found.type != nullptr) {
+        found.type[idx] = type_value;
+    }
+    if (found.round != nullptr) {
+        found.round[idx] = current_round;
+    }
+    if (found.foundDerivations2 != nullptr) {
+        found.foundDerivations2[idx] = uint(derivation_tag);
+    }
+
+    if (config.isPass != 0u) {
+        int copy_len = pass_size;
+        if (copy_len < 0) {
+            copy_len = 0;
+        }
+        if (copy_len > int(kFoundPassBytes)) {
+            copy_len = int(kFoundPassBytes);
+        }
+        if (found.passSize != nullptr) {
+            found.passSize[idx] = ushort(copy_len);
+        }
+        if (found.pass != nullptr && copy_len > 0 && pass_start != nullptr) {
+            found_copy_thread_to_device_char(found.pass + ulong(idx) * kFoundPassBytes, pass_start, uint(copy_len));
+        }
+    }
+}
+
+static inline void found_store_result_compat(device bool* isResult,
+                                             device bool* buffResult,
+                                             uint starter,
+                                             uint c_path,
+                                             const thread char* phrase,
+                                             uint phrase_len,
+                                             const thread uchar* private_key32,
+                                             const thread void* match_data,
+                                             uchar type_value,
+                                             long current_round,
+                                             const thread char* pass_start,
+                                             int pass_size,
+                                             uchar derivation_tag,
+                                             device RuntimeConfig& config,
+                                             FoundBuffers found) {
+    found_store_result_compat_len(isResult,
+                                  buffResult,
+                                  starter,
+                                  c_path,
+                                  phrase,
+                                  phrase_len,
+                                  private_key32,
+                                  match_data,
+                                  32u,
+                                  type_value,
+                                  current_round,
+                                  pass_start,
+                                  pass_size,
+                                  derivation_tag,
+                                  config,
+                                  found);
+}
+
+#endif

@@ -1,0 +1,466 @@
+#ifndef METAL_CRYPTO_FILTER_COMMON_METALH
+#define METAL_CRYPTO_FILTER_COMMON_METALH
+
+#include "../KernelState.metalh"
+#include "TargetCommon.metalh"
+
+inline uint filter_fingerprint(const ulong hash) {
+    return uint(hash ^ (hash >> 32u));
+}
+
+inline ushort filter_fingerprint_uc(const ulong hash) {
+    return ushort(hash ^ (hash >> 32u));
+}
+
+inline uchar filter_fingerprint_hc(const ulong hash) {
+    return uchar(hash ^ (hash >> 32u));
+}
+
+inline ulong filter_murmur64(ulong h) {
+    h ^= h >> 33u;
+    h *= 0xff51afd7ed558ccdul;
+    h ^= h >> 33u;
+    h *= 0xc4ceb9fe1a85ec53ul;
+    h ^= h >> 33u;
+    return h;
+}
+
+inline ulong filter_xor_slot_base(const ulong hash, const ulong segment_count_length) {
+    return mulhi(hash, segment_count_length);
+}
+
+inline bool filter_xor_contains_u32(const ulong item,
+                                    const ulong seed,
+                                    const device uint* fingerprints,
+                                    const ulong array_length,
+                                    const ulong segment_count_length,
+                                    const ulong segment_length,
+                                    const ulong segment_mask) {
+    if (fingerprints == nullptr || array_length == 0ul) {
+        return false;
+    }
+    const ulong hash = filter_murmur64(item + seed);
+    uint f = filter_fingerprint(hash);
+    const ulong base = filter_xor_slot_base(hash, segment_count_length);
+    const ulong hh = hash & ((1ul << 32u) - 1ul);
+    const ulong h0 = base;
+    const ulong h1 = (base + segment_length) ^ ((hh >> 18u) & segment_mask);
+    const ulong h2 = (base + (segment_length << 1u)) ^ (hh & segment_mask);
+    const ulong h3 = base + segment_length * 3ul;
+    if (h0 >= array_length || h1 >= array_length || h2 >= array_length || h3 >= array_length) {
+        return false;
+    }
+    f ^= fingerprints[h0];
+    f ^= fingerprints[h1];
+    f ^= fingerprints[h2];
+    f ^= fingerprints[h3];
+    return f == 0u;
+}
+
+inline bool filter_xor_contains_u16(const ulong item,
+                                    const ulong seed,
+                                    const device ushort* fingerprints,
+                                    const ulong array_length,
+                                    const ulong segment_count_length,
+                                    const ulong segment_length,
+                                    const ulong segment_mask) {
+    if (fingerprints == nullptr || array_length == 0ul) {
+        return false;
+    }
+    const ulong hash = filter_murmur64(item + seed);
+    ushort f = filter_fingerprint_uc(hash);
+    const ulong base = filter_xor_slot_base(hash, segment_count_length);
+    const ulong hh = hash & ((1ul << 32u) - 1ul);
+    const ulong h0 = base;
+    const ulong h1 = (base + segment_length) ^ ((hh >> 18u) & segment_mask);
+    const ulong h2 = (base + (segment_length << 1u)) ^ (hh & segment_mask);
+    const ulong h3 = base + segment_length * 3ul;
+    if (h0 >= array_length || h1 >= array_length || h2 >= array_length || h3 >= array_length) {
+        return false;
+    }
+    f ^= fingerprints[h0];
+    f ^= fingerprints[h1];
+    f ^= fingerprints[h2];
+    f ^= fingerprints[h3];
+    return f == 0u;
+}
+
+inline bool filter_xor_contains_u8(const ulong item,
+                                   const ulong seed,
+                                   const device uchar* fingerprints,
+                                   const ulong array_length,
+                                   const ulong segment_count_length,
+                                   const ulong segment_length,
+                                   const ulong segment_mask) {
+    if (fingerprints == nullptr || array_length == 0ul) {
+        return false;
+    }
+    const ulong hash = filter_murmur64(item + seed);
+    uchar f = filter_fingerprint_hc(hash);
+    const ulong base = filter_xor_slot_base(hash, segment_count_length);
+    const ulong hh = hash & ((1ul << 32u) - 1ul);
+    const ulong h0 = base;
+    const ulong h1 = (base + segment_length) ^ ((hh >> 18u) & segment_mask);
+    const ulong h2 = (base + (segment_length << 1u)) ^ (hh & segment_mask);
+    const ulong h3 = base + segment_length * 3ul;
+    if (h0 >= array_length || h1 >= array_length || h2 >= array_length || h3 >= array_length) {
+        return false;
+    }
+    f ^= fingerprints[h0];
+    f ^= fingerprints[h1];
+    f ^= fingerprints[h2];
+    f ^= fingerprints[h3];
+    return f == 0u;
+}
+
+inline uint filter_bloom_get_bit_ro(const device uchar* bloom, const uint n) {
+    const uchar byte = bloom[n >> 3u];
+    return uint((byte >> (n & 7u)) & 1u);
+}
+
+inline bool filter_bloom_chk_hash160(const device uchar* bloom, const thread uint* h) {
+    const uint h0 = h[0];
+    const uint h1 = h[1];
+    const uint h2 = h[2];
+    const uint h3 = h[3];
+    const uint h4 = h[4];
+
+    if (filter_bloom_get_bit_ro(bloom, h0) == 0u) return false;
+    if (filter_bloom_get_bit_ro(bloom, h1) == 0u) return false;
+    if (filter_bloom_get_bit_ro(bloom, h2) == 0u) return false;
+    if (filter_bloom_get_bit_ro(bloom, h3) == 0u) return false;
+    if (filter_bloom_get_bit_ro(bloom, h4) == 0u) return false;
+    if (filter_bloom_get_bit_ro(bloom, (h0 << 16u) | (h1 >> 16u)) == 0u) return false;
+    if (filter_bloom_get_bit_ro(bloom, (h1 << 16u) | (h2 >> 16u)) == 0u) return false;
+    if (filter_bloom_get_bit_ro(bloom, (h2 << 16u) | (h3 >> 16u)) == 0u) return false;
+    if (filter_bloom_get_bit_ro(bloom, (h3 << 16u) | (h4 >> 16u)) == 0u) return false;
+    if (filter_bloom_get_bit_ro(bloom, (h4 << 16u) | (h0 >> 16u)) == 0u) return false;
+    if (filter_bloom_get_bit_ro(bloom, (h0 << 8u) | (h1 >> 24u)) == 0u) return false;
+    if (filter_bloom_get_bit_ro(bloom, (h1 << 8u) | (h2 >> 24u)) == 0u) return false;
+    if (filter_bloom_get_bit_ro(bloom, (h2 << 8u) | (h3 >> 24u)) == 0u) return false;
+    if (filter_bloom_get_bit_ro(bloom, (h3 << 8u) | (h4 >> 24u)) == 0u) return false;
+    if (filter_bloom_get_bit_ro(bloom, (h4 << 8u) | (h0 >> 24u)) == 0u) return false;
+    if (filter_bloom_get_bit_ro(bloom, (h0 << 24u) | (h1 >> 8u)) == 0u) return false;
+    if (filter_bloom_get_bit_ro(bloom, (h1 << 24u) | (h2 >> 8u)) == 0u) return false;
+    if (filter_bloom_get_bit_ro(bloom, (h2 << 24u) | (h3 >> 8u)) == 0u) return false;
+    if (filter_bloom_get_bit_ro(bloom, (h3 << 24u) | (h4 >> 8u)) == 0u) return false;
+    if (filter_bloom_get_bit_ro(bloom, (h4 << 24u) | (h0 >> 8u)) == 0u) return false;
+    return true;
+}
+
+inline ulong filter_fnv1a_64_hash160_words(const thread uint* hash) {
+    ulong h = 0xcbf29ce484222325ul;
+    for (uint i = 0u; i < 5u; ++i) {
+        const uint word = hash[i];
+        h ^= ulong(word & 0xffu);
+        h *= 0x100000001b3ul;
+        h ^= ulong((word >> 8u) & 0xffu);
+        h *= 0x100000001b3ul;
+        h ^= ulong((word >> 16u) & 0xffu);
+        h *= 0x100000001b3ul;
+        h ^= ulong((word >> 24u) & 0xffu);
+        h *= 0x100000001b3ul;
+    }
+    return h;
+}
+
+inline bool filter_contain_un_half_hash_raw(const ulong hash,
+                                            const device uint* fingerprints,
+                                            const ulong array_length,
+                                            const ulong segment_count_length,
+                                            const ulong segment_length,
+                                            const ulong segment_mask) {
+    if (fingerprints == nullptr || array_length == 0ul) {
+        return false;
+    }
+    uint f = filter_fingerprint(hash);
+    const ulong base = filter_xor_slot_base(hash, segment_count_length);
+    const ulong hh = hash & ((1ul << 32u) - 1ul);
+    const ulong h0 = base;
+    const ulong h1 = (base + segment_length) ^ ((hh >> 18u) & segment_mask);
+    const ulong h2 = (base + (segment_length << 1u)) ^ (hh & segment_mask);
+    const ulong h3 = base + segment_length * 3ul;
+    if (h0 >= array_length || h1 >= array_length || h2 >= array_length || h3 >= array_length) {
+        return false;
+    }
+    f ^= fingerprints[h0];
+    f ^= fingerprints[h1];
+    f ^= fingerprints[h2];
+    f ^= fingerprints[h3];
+    return f == 0u;
+}
+
+inline bool filter_check_hash_xor_un_packed(device RuntimeConfig& config,
+                                            device XorFilterState& filters,
+                                            device FilterStorageState& storage,
+                                            const device uchar* xor_un_storage,
+                                            const thread uint* hash) {
+    const uint mix = hash[4];
+    const uint b0 = mix & 0xffu;
+    const uint b1 = (mix >> 8u) & 0xffu;
+    const uint b2 = (mix >> 16u) & 0xffu;
+    const uint b3 = (mix >> 24u) & 0xffu;
+
+    const uint p0 = (hash[0] & 0x00ffffffu) | ((((hash[0] >> 24u) & 0xffu) & b0) << 24u);
+    const uint p1 = (hash[1] & 0x00ffffffu) | ((((hash[1] >> 24u) & 0xffu) & b1) << 24u);
+    const uint p2 = (hash[2] & 0x00ffffffu) | ((((hash[2] >> 24u) & 0xffu) & b2) << 24u);
+    const uint p3 = (hash[3] & 0x00ffffffu) | ((((hash[3] >> 24u) & 0xffu) & b3) << 24u);
+
+    const uint xor_count = min(storage.xorUnCount, uint(kXorFilterSlots));
+    if (xor_count == 0u) {
+        return false;
+    }
+
+    const ulong packed_lo = (ulong(p1) << 32u) | ulong(p0);
+    const ulong packed_hi = (ulong(p3) << 32u) | ulong(p2);
+    const ulong hash_hi = filter_murmur64(packed_hi + config.seed);
+    const ulong hash_lo = filter_murmur64(packed_lo + config.seed);
+
+    if (xor_count == 1u) {
+        const device uint* fp = reinterpret_cast<const device uint*>(xor_un_storage + storage.xorUnOffsets[0]);
+        const ulong seg_count_len = filters.uncompressed.segmentCountLength[0];
+        const ulong seg_len = filters.uncompressed.segmentLength[0];
+        const ulong seg_mask = filters.uncompressed.segmentLengthMask[0];
+        if (!filter_contain_un_half_hash_raw(hash_hi, fp, filters.uncompressed.arrayLength[0], seg_count_len, seg_len, seg_mask)) {
+            return false;
+        }
+        return filter_contain_un_half_hash_raw(hash_lo, fp, filters.uncompressed.arrayLength[0], seg_count_len, seg_len, seg_mask);
+    }
+
+    for (uint i = 0u; i < xor_count; ++i) {
+        const device uint* fp = reinterpret_cast<const device uint*>(xor_un_storage + storage.xorUnOffsets[i]);
+        const ulong seg_count_len = filters.uncompressed.segmentCountLength[i];
+        const ulong seg_len = filters.uncompressed.segmentLength[i];
+        const ulong seg_mask = filters.uncompressed.segmentLengthMask[i];
+        if (!filter_contain_un_half_hash_raw(hash_hi, fp, filters.uncompressed.arrayLength[i], seg_count_len, seg_len, seg_mask)) {
+            continue;
+        }
+        if (filter_contain_un_half_hash_raw(hash_lo, fp, filters.uncompressed.arrayLength[i], seg_count_len, seg_len, seg_mask)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+inline bool filter_check_hash_bloom_only(device FilterStorageState& storage,
+                                         const device uchar* bloom_storage,
+                                         const thread uint* hash) {
+    const uint bloom_count = min(storage.bloomCount, uint(kBloomFilterSlots));
+    if (bloom_count == 1u) {
+        return filter_bloom_chk_hash160(bloom_storage + storage.bloomOffsets[0], hash);
+    }
+    for (uint i = 0u; i < bloom_count; ++i) {
+        if (filter_bloom_chk_hash160(bloom_storage + storage.bloomOffsets[i], hash)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+inline bool filter_check_hash_active_filters_only(device RuntimeConfig& config,
+                                                  device XorFilterState& filters,
+                                                  device FilterStorageState& storage,
+                                                  const device uchar* bloom_storage,
+                                                  const device uchar* xor_storage,
+                                                  const device uchar* xor_un_storage,
+                                                  const device uchar* xor_uc_storage,
+                                                  const device uchar* xor_hc_storage,
+                                                  const thread uint* hash) {
+    const bool use_bloom = config.useBloom != 0u;
+    const bool use_xor = config.useXor != 0u;
+    const bool use_xor_un = config.useXorUn != 0u;
+    const bool use_xor_uc = config.useXorUc != 0u;
+    const bool use_xor_hc = config.useXorHc != 0u;
+
+    if (use_xor_un && !use_bloom && !use_xor && !use_xor_uc && !use_xor_hc) {
+        return filter_check_hash_xor_un_packed(config, filters, storage, xor_un_storage, hash);
+    }
+    if (use_bloom && !use_xor_un && !use_xor && !use_xor_uc && !use_xor_hc) {
+        return filter_check_hash_bloom_only(storage, bloom_storage, hash);
+    }
+
+    if (use_bloom) {
+        if (filter_check_hash_bloom_only(storage, bloom_storage, hash)) {
+            return true;
+        }
+    }
+    if (use_xor || use_xor_uc || use_xor_hc) {
+        const ulong hash64 = filter_fnv1a_64_hash160_words(hash);
+        const uint xor_count = use_xor ? min(storage.xorCount, uint(kXorFilterSlots)) : 0u;
+        const uint xor_uc_count = use_xor_uc ? min(storage.xorUcCount, uint(kXorFilterSlots)) : 0u;
+        const uint xor_hc_count = use_xor_hc ? min(storage.xorHcCount, uint(kXorFilterSlots)) : 0u;
+
+        for (uint i = 0u; i < xor_count; ++i) {
+            const device uint* fp = reinterpret_cast<const device uint*>(xor_storage + storage.xorOffsets[i]);
+            if (filter_xor_contains_u32(hash64,
+                                        config.seed,
+                                        fp,
+                                        filters.x.arrayLength[i],
+                                        filters.x.segmentCountLength[i],
+                                        filters.x.segmentLength[i],
+                                        filters.x.segmentLengthMask[i])) {
+                return true;
+            }
+        }
+
+        for (uint i = 0u; i < xor_uc_count; ++i) {
+            const device ushort* fp = reinterpret_cast<const device ushort*>(xor_uc_storage + storage.xorUcOffsets[i]);
+            if (filter_xor_contains_u16(hash64,
+                                        config.seed,
+                                        fp,
+                                        filters.uc.arrayLength[i],
+                                        filters.uc.segmentCountLength[i],
+                                        filters.uc.segmentLength[i],
+                                        filters.uc.segmentLengthMask[i])) {
+                return true;
+            }
+        }
+
+        for (uint i = 0u; i < xor_hc_count; ++i) {
+            const device uchar* fp = xor_hc_storage + storage.xorHcOffsets[i];
+            if (filter_xor_contains_u8(hash64,
+                                       config.seed,
+                                       fp,
+                                       filters.hc.arrayLength[i],
+                                       filters.hc.segmentCountLength[i],
+                                       filters.hc.segmentLength[i],
+                                       filters.hc.segmentLengthMask[i])) {
+                return true;
+            }
+        }
+    }
+    if (use_xor_un) {
+        if (filter_check_hash_xor_un_packed(config, filters, storage, xor_un_storage, hash)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+inline bool filter_check_hash(device RuntimeConfig& config,
+                              device XorFilterState& filters,
+                              device FilterStorageState& storage,
+                              const device uchar* bloom_storage,
+                              const device uchar* xor_storage,
+                              const device uchar* xor_un_storage,
+                              const device uchar* xor_uc_storage,
+                              const device uchar* xor_hc_storage,
+                              const thread uint* hash) {
+    if (config.full != 0u) {
+        return true;
+    }
+    const bool use_hash_target = config.hashTargetEnabled != 0u;
+    if (use_hash_target && !check_hash_target_prefix(config, hash)) {
+        return false;
+    }
+    const bool use_bloom = config.useBloom != 0u;
+    const bool use_xor = config.useXor != 0u;
+    const bool use_xor_un = config.useXorUn != 0u;
+    const bool use_xor_uc = config.useXorUc != 0u;
+    const bool use_xor_hc = config.useXorHc != 0u;
+    const bool any_filter = use_bloom || use_xor || use_xor_un || use_xor_uc || use_xor_hc;
+    if (use_hash_target && !any_filter) {
+        return true;
+    }
+
+    if (use_xor_un && !use_bloom && !use_xor && !use_xor_uc && !use_xor_hc) {
+        return filter_check_hash_xor_un_packed(config, filters, storage, xor_un_storage, hash);
+    }
+    if (use_bloom && !use_xor_un && !use_xor && !use_xor_uc && !use_xor_hc) {
+        return filter_check_hash_bloom_only(storage, bloom_storage, hash);
+    }
+
+    return filter_check_hash_active_filters_only(config,
+                                                 filters,
+                                                 storage,
+                                                 bloom_storage,
+                                                 xor_storage,
+                                                 xor_un_storage,
+                                                 xor_uc_storage,
+                                                 xor_hc_storage,
+                                                 hash);
+}
+
+inline bool filter_check_hash_payload(device RuntimeConfig& config,
+                                      device XorFilterState& filters,
+                                      device FilterStorageState& storage,
+                                      const device uchar* bloom_storage,
+                                      const device uchar* xor_storage,
+                                      const device uchar* xor_un_storage,
+                                      const device uchar* xor_uc_storage,
+                                      const device uchar* xor_hc_storage,
+                                      const thread uint* hash,
+                                      uint payload_len) {
+    if (config.full != 0u) {
+        return true;
+    }
+
+    const bool use_hash_target = config.hashTargetEnabled != 0u;
+    if (use_hash_target && !check_hash_target_prefix_payload(config, hash, payload_len)) {
+        return false;
+    }
+
+    if (payload_len < 20u) {
+        return use_hash_target;
+    }
+
+    if (use_hash_target && config.hashTargetLen > 20u) {
+        const bool any_filter = config.useBloom != 0u || config.useXor != 0u ||
+                                config.useXorUn != 0u || config.useXorUc != 0u ||
+                                config.useXorHc != 0u;
+        return any_filter ? filter_check_hash_active_filters_only(config,
+                                                                   filters,
+                                                                   storage,
+                                                                   bloom_storage,
+                                                                   xor_storage,
+                                                                   xor_un_storage,
+                                                                   xor_uc_storage,
+                                                                   xor_hc_storage,
+                                                                   hash)
+                          : true;
+    }
+
+    return filter_check_hash(config,
+                             filters,
+                             storage,
+                             bloom_storage,
+                             xor_storage,
+                             xor_un_storage,
+                             xor_uc_storage,
+                             xor_hc_storage,
+                             hash);
+}
+
+inline bool filter_check_hash_eth(device RuntimeConfig& config,
+                                  device XorFilterState& filters,
+                                  device FilterStorageState& storage,
+                                  const device uchar* bloom_storage,
+                                  const device uchar* xor_storage,
+                                  const device uchar* xor_un_storage,
+                                  const device uchar* xor_uc_storage,
+                                  const device uchar* xor_hc_storage,
+                                  const thread uchar* d_hash) {
+    uint hash[5];
+    for (uint h = 12u, i = 0u; i < 5u; ++i) {
+        const uint b0 = uint(d_hash[h]);
+        const uint b1 = uint(d_hash[h + 1u]);
+        const uint b2 = uint(d_hash[h + 2u]);
+        const uint b3 = uint(d_hash[h + 3u]);
+        hash[i] = b0 |
+                  ((b1 << 8u) & 0x0000ff00u) |
+                  ((b2 << 16u) & 0x00ff0000u) |
+                  ((b3 << 24u) & 0xff000000u);
+        h += 4u;
+    }
+    return filter_check_hash(config,
+                             filters,
+                             storage,
+                             bloom_storage,
+                             xor_storage,
+                             xor_un_storage,
+                             xor_uc_storage,
+                             xor_hc_storage,
+                             hash);
+}
+
+#endif

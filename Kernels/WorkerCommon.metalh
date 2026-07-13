@@ -1,0 +1,1492 @@
+#ifndef METAL_CRYPTO_WORKER_COMMON_METALH
+#define METAL_CRYPTO_WORKER_COMMON_METALH
+
+#include <metal_stdlib>
+#include "WorkerDerThreadCommon.metalh"
+#include "PrngCommon.metalh"
+
+using namespace metal;
+
+#define WORKER_DERIVATION_TYPE_MASK_BIP32 0x01u
+#define WORKER_DERIVATION_TYPE_MASK_SLIP0010 0x02u
+#define WORKER_DERIVATION_TYPE_MASK_BIP32_ED25519 0x04u
+
+#ifndef METAL_CRYPTO_TARGET_FC_DECLARED
+#define METAL_CRYPTO_TARGET_FC_DECLARED
+constant bool TFC_COMPRESSED [[function_constant(0)]];
+constant bool TFC_UNCOMPRESSED [[function_constant(1)]];
+constant bool TFC_SEGWIT [[function_constant(2)]];
+constant bool TFC_P2WSH [[function_constant(3)]];
+constant bool TFC_TAPROOT [[function_constant(4)]];
+constant bool TFC_ETHEREUM [[function_constant(5)]];
+constant bool TFC_XPOINT [[function_constant(6)]];
+constant bool TFC_XRP_SECP [[function_constant(7)]];
+constant bool TFC_SUI_SECP [[function_constant(8)]];
+constant bool TFC_IOTA_SECP [[function_constant(9)]];
+constant bool TFC_APTOS_SECP [[function_constant(10)]];
+constant bool TFC_ICP_SECP [[function_constant(11)]];
+constant bool TFC_FIL_SECP [[function_constant(12)]];
+constant bool TFC_XTZ_SECP [[function_constant(13)]];
+constant bool TFC_SECP_ANY [[function_constant(14)]];
+constant bool TFC_ED_ANY [[function_constant(15)]];
+constant bool TFC_SOLANA [[function_constant(16)]];
+constant bool TFC_DOT [[function_constant(17)]];
+constant bool TFC_ADA [[function_constant(18)]];
+constant bool TFC_TON [[function_constant(19)]];
+constant bool TFC_TON_ALL [[function_constant(20)]];
+constant bool TFC_XRP_ED [[function_constant(21)]];
+constant bool TFC_APTOS_ED [[function_constant(22)]];
+constant bool TFC_SUI_ED [[function_constant(23)]];
+constant bool TFC_IOTA_ED [[function_constant(24)]];
+constant bool TFC_ICP_ED [[function_constant(25)]];
+constant bool TFC_XTZ_ED [[function_constant(26)]];
+#endif
+
+#define WC_FC_COMPRESSED TFC_COMPRESSED
+#define WC_FC_UNCOMPRESSED TFC_UNCOMPRESSED
+#define WC_FC_SEGWIT TFC_SEGWIT
+#define WC_FC_P2WSH TFC_P2WSH
+#define WC_FC_TAPROOT TFC_TAPROOT
+#define WC_FC_ETHEREUM TFC_ETHEREUM
+#define WC_FC_XPOINT TFC_XPOINT
+#define WC_FC_XRP_SECP TFC_XRP_SECP
+#define WC_FC_SUI_SECP TFC_SUI_SECP
+#define WC_FC_IOTA_SECP TFC_IOTA_SECP
+#define WC_FC_APTOS_SECP TFC_APTOS_SECP
+#define WC_FC_ICP_SECP TFC_ICP_SECP
+#define WC_FC_FIL_SECP TFC_FIL_SECP
+#define WC_FC_XTZ_SECP TFC_XTZ_SECP
+#define WC_FC_SECP_ANY TFC_SECP_ANY
+#define WC_FC_ED_ANY TFC_ED_ANY
+#define WC_FC_SOLANA TFC_SOLANA
+#define WC_FC_DOT TFC_DOT
+#define WC_FC_ADA TFC_ADA
+#define WC_FC_TON TFC_TON
+#define WC_FC_TON_ALL TFC_TON_ALL
+#define WC_FC_XRP_ED TFC_XRP_ED
+#define WC_FC_APTOS_ED TFC_APTOS_ED
+#define WC_FC_SUI_ED TFC_SUI_ED
+#define WC_FC_IOTA_ED TFC_IOTA_ED
+#define WC_FC_ICP_ED TFC_ICP_ED
+#define WC_FC_XTZ_ED TFC_XTZ_ED
+
+constant uchar WORKER_BITCOIN_SEED_KEY[12] = {
+    'B', 'i', 't', 'c', 'o', 'i', 'n', ' ', 's', 'e', 'e', 'd'
+};
+
+struct WorkerEnv {
+    device bool* isResult;
+    device bool* buffResult;
+    constant secp256k1_ge_storage* precPtr;
+    ulong precPitch;
+    device RuntimeConfig* config;
+    device XorFilterState* filters;
+    device FilterStorageState* filterStorage;
+    const device uchar* bloomStorage;
+    const device uchar* xorStorage;
+    const device uchar* xorUnStorage;
+    const device uchar* xorUcStorage;
+    const device uchar* xorHcStorage;
+    FoundBuffers found;
+    const device SubstratePathDevice* substratePaths;
+    bool useFoundLenOverride;
+    ulong foundLenOverride;
+};
+
+struct WorkerRuntimeBuffers {
+    device RuntimeConfig* config [[id(0)]];
+    device XorFilterState* filters [[id(1)]];
+    device FilterStorageState* filterStorage [[id(2)]];
+    const device uchar* bloomStorage [[id(3)]];
+    const device uchar* xorStorage [[id(4)]];
+    const device uchar* xorUnStorage [[id(5)]];
+    const device uchar* xorUcStorage [[id(6)]];
+    const device uchar* xorHcStorage [[id(7)]];
+    device char* foundStrings [[id(8)]];
+    device uchar* foundPrvKeys [[id(9)]];
+    device uint* foundHash160 [[id(10)]];
+    device uint* foundLen [[id(11)]];
+    device uint* foundIter [[id(12)]];
+    device uchar* foundType [[id(13)]];
+    device uint* foundDerivations [[id(14)]];
+    device uint* foundDerivations2 [[id(15)]];
+    device char* foundPass [[id(16)]];
+    device ushort* foundPassSize [[id(17)]];
+    device long* foundRound [[id(18)]];
+    device ulong* foundSeed [[id(19)]];
+    device atomic_uint* resultsCount [[id(20)]];
+    const device SubstratePathDevice* substratePaths [[id(21)]];
+    const device char* customDict [[id(22)]];
+};
+
+static inline void worker_make_found_buffers(thread FoundBuffers& found,
+                                             device RuntimeConfig& config,
+                                             device char* foundStrings,
+                                             device uchar* foundPrvKeys,
+                                             device uint* foundHash160,
+                                             device uint* foundLen,
+                                             device uint* foundIter,
+                                             device uchar* foundType,
+                                             device uint* foundDerivations,
+                                             device uint* foundDerivations2,
+                                             device char* foundPass,
+                                             device ushort* foundPassSize,
+                                             device long* foundRound,
+                                             device ulong* foundSeed,
+                                             device atomic_uint* resultsCount) {
+    found.foundStrings = foundStrings;
+    found.foundPrvKeys = foundPrvKeys;
+    found.foundHash160 = foundHash160;
+    found.len = foundLen;
+    found.iter = foundIter;
+    found.type = foundType;
+    found.foundDerivations = foundDerivations;
+    found.foundDerivations2 = foundDerivations2;
+    found.pass = foundPass;
+    found.passSize = foundPassSize;
+    found.round = foundRound;
+    found.seed = foundSeed;
+    found.resultsCount = resultsCount;
+    found.maxFounds = config.maxFounds;
+}
+
+static inline bool worker_init_env(thread WorkerEnv& env,
+                                   thread FoundBuffers& found,
+                                   device bool* isResult,
+                                   device bool* buffResult,
+                                   constant secp256k1_ge_storage* precPtr,
+                                   ulong precPitch,
+                                   const device WorkerRuntimeBuffers& runtime) {
+    if (runtime.config == nullptr || runtime.filters == nullptr || runtime.filterStorage == nullptr) {
+        return false;
+    }
+    worker_make_found_buffers(found,
+                              *runtime.config,
+                              runtime.foundStrings,
+                              runtime.foundPrvKeys,
+                              runtime.foundHash160,
+                              runtime.foundLen,
+                              runtime.foundIter,
+                              runtime.foundType,
+                              runtime.foundDerivations,
+                              runtime.foundDerivations2,
+                              runtime.foundPass,
+                              runtime.foundPassSize,
+                              runtime.foundRound,
+                              runtime.foundSeed,
+                              runtime.resultsCount);
+    env.isResult = isResult;
+    env.buffResult = buffResult;
+    env.precPtr = precPtr;
+    env.precPitch = precPitch;
+    env.config = runtime.config;
+    env.filters = runtime.filters;
+    env.filterStorage = runtime.filterStorage;
+    env.bloomStorage = runtime.bloomStorage;
+    env.xorStorage = runtime.xorStorage;
+    env.xorUnStorage = runtime.xorUnStorage;
+    env.xorUcStorage = runtime.xorUcStorage;
+    env.xorHcStorage = runtime.xorHcStorage;
+    env.found = found;
+    env.substratePaths = runtime.substratePaths;
+    env.useFoundLenOverride = false;
+    env.foundLenOverride = 0ul;
+    return true;
+}
+
+static inline void worker_copy_thread_uchar(thread uchar* dst, const thread uchar* src, uint len) {
+    for (uint i = 0u; i < len; ++i) {
+        dst[i] = src[i];
+    }
+}
+
+static inline void worker_copy_thread_char(thread char* dst, const thread char* src, uint len) {
+    for (uint i = 0u; i < len; ++i) {
+        dst[i] = src[i];
+    }
+}
+
+static inline void worker_copy_device_char(thread char* dst, const device char* src, uint len) {
+    for (uint i = 0u; i < len; ++i) {
+        dst[i] = src[i];
+    }
+}
+
+static inline void worker_copy_device_uchar(thread uchar* dst, const device uchar* src, uint len) {
+    for (uint i = 0u; i < len; ++i) {
+        dst[i] = src[i];
+    }
+}
+
+static inline void worker_zero_uchar(thread uchar* dst, uint len) {
+    for (uint i = 0u; i < len; ++i) {
+        dst[i] = 0u;
+    }
+}
+
+static inline uint worker_clamp512(ulong len) {
+    return (len > 512ul) ? 512u : uint(len);
+}
+
+static inline void worker_hexing(const thread uchar* src, uint src_len, thread uchar* dst, uint dst_len) {
+    const thread uchar hex_chars[16] = {
+        '0', '1', '2', '3', '4', '5', '6', '7',
+        '8', '9', 'a', 'b', 'c', 'd', 'e', 'f'
+    };
+    const uint count = min(src_len, dst_len >> 1u);
+    for (uint i = 0u; i < count; ++i) {
+        const uchar v = src[i];
+        dst[i * 2u] = hex_chars[v >> 4u];
+        dst[i * 2u + 1u] = hex_chars[v & 0x0fu];
+    }
+}
+
+static inline void worker_hash_words_from_bytes(const thread uchar* bytes,
+                                                thread uint out_words[8],
+                                                uint byte_len) {
+    priv_hash_words_from_bytes(bytes, out_words, byte_len);
+}
+
+static inline bool worker_check_hash_words(thread WorkerEnv& env, const thread uint* hash_words) {
+    return filter_check_hash(*env.config,
+                             *env.filters,
+                             *env.filterStorage,
+                             env.bloomStorage,
+                             env.xorStorage,
+                             env.xorUnStorage,
+                             env.xorUcStorage,
+                             env.xorHcStorage,
+                             hash_words);
+}
+
+static inline bool worker_check_hash_payload(thread WorkerEnv& env,
+                                             const thread uint* hash_words,
+                                             uint payload_len) {
+    return filter_check_hash_payload(*env.config,
+                                     *env.filters,
+                                     *env.filterStorage,
+                                     env.bloomStorage,
+                                     env.xorStorage,
+                                     env.xorUnStorage,
+                                     env.xorUcStorage,
+                                     env.xorHcStorage,
+                                     hash_words,
+                                     payload_len);
+}
+
+static inline void worker_store_result(thread WorkerEnv& env,
+                                       const thread char* toHash,
+                                       ulong len,
+                                       const thread uchar* private_key32,
+                                       const thread uchar* payload,
+                                       uint payload_len,
+                                       uchar type_value,
+                                       uint c_path,
+                                       uint c_path2,
+                                       long current_round,
+                                       ushort starter_pass,
+                                       const device char* passStart,
+                                       uint passSize,
+                                       ulong buff_index,
+                                       bool store_seed,
+                                       ulong seed_value,
+                                       uint iter_value,
+                                       bool store_iter) {
+    const ulong stored_len = env.useFoundLenOverride ? env.foundLenOverride : len;
+    adadot_store_result_with_found_len(env.isResult,
+                                       env.buffResult,
+                                       toHash,
+                                       len,
+                                       stored_len,
+                                       private_key32,
+                                       nullptr,
+                                       payload,
+                                       payload_len,
+                                       type_value,
+                                       c_path,
+                                       c_path2,
+                                       current_round,
+                                       starter_pass,
+                                       passStart,
+                                       passSize,
+                                       buff_index,
+                                       store_seed,
+                                       seed_value,
+                                       iter_value,
+                                       store_iter,
+                                       *env.config,
+                                       env.found);
+}
+
+static inline void worker_check_and_store_words(thread WorkerEnv& env,
+                                                const thread char* toHash,
+                                                ulong len,
+                                                const thread uchar* private_key32,
+                                                const thread uchar* payload,
+                                                uint payload_len,
+                                                const thread uint* hash_words,
+                                                uchar type_value,
+                                                uint c_path,
+                                                uint c_path2,
+                                                long current_round,
+                                                ushort starter_pass,
+                                                const device char* passStart,
+                                                uint passSize,
+                                                ulong buff_index,
+                                                bool store_seed,
+                                                ulong seed_value,
+                                                uint iter_value,
+                                                bool store_iter) {
+    if (!target_subtype_enabled(*env.config, type_value)) {
+        return;
+    }
+    if (!worker_check_hash_payload(env, hash_words, payload_len)) {
+        return;
+    }
+    worker_store_result(env, toHash, len, private_key32, payload, payload_len, type_value,
+                        c_path, c_path2, current_round, starter_pass, passStart, passSize,
+                        buff_index, store_seed, seed_value, iter_value, store_iter);
+}
+
+static inline void worker_check_and_store_bytes(thread WorkerEnv& env,
+                                                const thread char* toHash,
+                                                ulong len,
+                                                const thread uchar* private_key32,
+                                                const thread uchar* payload,
+                                                uint payload_len,
+                                                const thread uchar* hash_bytes,
+                                                uint hash_len,
+                                                uchar type_value,
+                                                uint c_path,
+                                                uint c_path2,
+                                                long current_round,
+                                                ushort starter_pass,
+                                                const device char* passStart,
+                                                uint passSize,
+                                                ulong buff_index,
+                                                bool store_seed,
+                                                ulong seed_value,
+                                                uint iter_value,
+                                                bool store_iter) {
+    uint hash_words[8] = { 0 };
+    worker_hash_words_from_bytes(hash_bytes, hash_words, hash_len);
+    worker_check_and_store_words(env, toHash, len, private_key32, payload, payload_len,
+                                 hash_words, type_value, c_path, c_path2, current_round,
+                                 starter_pass, passStart, passSize, buff_index, store_seed,
+                                 seed_value, iter_value, store_iter);
+}
+
+static inline void worker_emit_p2wsh_from_pubkey65(thread WorkerEnv& env,
+                                                   const thread char* toHash,
+                                                   ulong len,
+                                                   const thread uchar* private_key32,
+                                                   const thread uchar* pubkey65,
+                                                   uint c_path,
+                                                   uint c_path2,
+                                                   long current_round,
+                                                   ushort starter_pass,
+                                                   const device char* passStart,
+                                                   uint passSize,
+                                                   ulong buff_index,
+                                                   bool store_seed,
+                                                   ulong seed_value,
+                                                   uint iter_value,
+                                                   bool store_iter) {
+    uchar p2wsh_hash[32] = { 0 };
+    uint p2wsh_rmd[8] = { 0 };
+    _GetP2WSHComp(pubkey65, p2wsh_hash, p2wsh_rmd);
+    worker_check_and_store_words(env, toHash, len, private_key32, p2wsh_hash, 32u,
+                                 p2wsh_rmd, 0x07u, c_path, c_path2, current_round,
+                                 starter_pass, passStart, passSize, buff_index, store_seed,
+                                 seed_value, iter_value, store_iter);
+}
+
+static inline void worker_emit_ton_type(thread WorkerEnv& env,
+                                        const thread char* toHash,
+                                        ulong len,
+                                        const thread uchar* private_key32,
+                                        const thread uchar* publ,
+                                        const constant char* ton_kind,
+                                        uchar type_value,
+                                        uint c_path,
+                                        uint c_path2,
+                                        long current_round,
+                                        ushort starter_pass,
+                                        const device char* passStart,
+                                        uint passSize,
+                                        ulong buff_index,
+                                        bool store_seed,
+                                        ulong seed_value,
+                                        uint iter_value,
+                                        bool store_iter) {
+    uchar hash_addr[32] = { 0 };
+    if (ton_type_enabled_config(*env.config, type_value) &&
+        pubkey_to_hash_ton(publ, ton_kind, hash_addr, (*env.config).tonTypeMask)) {
+        worker_check_and_store_bytes(env, toHash, len, private_key32, hash_addr, 32u,
+                                     hash_addr, 32u, type_value, c_path, c_path2,
+                                     current_round, starter_pass, passStart, passSize,
+                                     buff_index, store_seed, seed_value, iter_value,
+                                     store_iter);
+    }
+}
+
+static inline void worker_transform_material(thread char toHash[512],
+                                             thread ulong& len,
+                                             uchar mode,
+                                             uint iteration,
+                                             bool utf8,
+                                             bool is_str) {
+    if (iteration == 0u) {
+        iteration = 1u;
+    }
+    uchar hash_local[512] = { 0 };
+    switch (mode) {
+    case 0x00u:
+        break;
+    case 0x01u:
+        SHA256(reinterpret_cast<thread uchar*>(toHash), size_t(len), reinterpret_cast<thread uchar*>(toHash));
+        for (uint i = 1u; i < iteration; ++i) {
+            uint hash_len = 32u;
+            if (utf8) {
+                worker_hexing(reinterpret_cast<thread uchar*>(toHash), 32u, hash_local, 64u);
+                worker_copy_thread_uchar(reinterpret_cast<thread uchar*>(toHash), hash_local, 64u);
+                hash_len = 64u;
+            }
+            SHA256(reinterpret_cast<thread uchar*>(toHash), size_t(hash_len), reinterpret_cast<thread uchar*>(toHash));
+        }
+        len = 32ul;
+        if (is_str) {
+            worker_hexing(reinterpret_cast<thread uchar*>(toHash), uint(len), hash_local, uint(len * 2ul));
+            worker_copy_thread_uchar(reinterpret_cast<thread uchar*>(toHash), hash_local, uint(len * 2ul));
+            len *= 2ul;
+        }
+        break;
+    case 0x02u:
+        SHA512(reinterpret_cast<thread uchar*>(toHash), len, reinterpret_cast<thread uchar*>(toHash));
+        for (uint i = 1u; i < iteration; ++i) {
+            uint hash_len = 64u;
+            if (utf8) {
+                worker_hexing(reinterpret_cast<thread uchar*>(toHash), 64u, hash_local, 128u);
+                worker_copy_thread_uchar(reinterpret_cast<thread uchar*>(toHash), hash_local, 128u);
+                hash_len = 128u;
+            }
+            SHA512(reinterpret_cast<thread uchar*>(toHash), ulong(hash_len), reinterpret_cast<thread uchar*>(toHash));
+        }
+        len = 64ul;
+        if (is_str) {
+            worker_hexing(reinterpret_cast<thread uchar*>(toHash), uint(len), hash_local, uint(len * 2ul));
+            worker_copy_thread_uchar(reinterpret_cast<thread uchar*>(toHash), hash_local, uint(len * 2ul));
+            len *= 2ul;
+        }
+        break;
+    case 0x03u:
+        keccak(toHash, int(len), reinterpret_cast<thread uchar*>(toHash), 32);
+        for (uint i = 1u; i < iteration; ++i) {
+            uint hash_len = 32u;
+            if (utf8) {
+                worker_hexing(reinterpret_cast<thread uchar*>(toHash), 32u, hash_local, 64u);
+                worker_copy_thread_uchar(reinterpret_cast<thread uchar*>(toHash), hash_local, 64u);
+                hash_len = 64u;
+            }
+            keccak(toHash, int(hash_len), reinterpret_cast<thread uchar*>(toHash), 32);
+        }
+        len = 32ul;
+        if (is_str) {
+            worker_hexing(reinterpret_cast<thread uchar*>(toHash), uint(len), hash_local, uint(len * 2ul));
+            worker_copy_thread_uchar(reinterpret_cast<thread uchar*>(toHash), hash_local, uint(len * 2ul));
+            len *= 2ul;
+        }
+        break;
+    case 0x04u:
+        sha3_256(toHash, int(len), reinterpret_cast<thread uchar*>(toHash));
+        for (uint i = 1u; i < iteration; ++i) {
+            uint hash_len = 32u;
+            if (utf8) {
+                worker_hexing(reinterpret_cast<thread uchar*>(toHash), 32u, hash_local, 64u);
+                worker_copy_thread_uchar(reinterpret_cast<thread uchar*>(toHash), hash_local, 64u);
+                hash_len = 64u;
+            }
+            sha3_256(toHash, int(hash_len), reinterpret_cast<thread uchar*>(toHash));
+        }
+        len = 32ul;
+        if (is_str) {
+            worker_hexing(reinterpret_cast<thread uchar*>(toHash), uint(len), hash_local, uint(len * 2ul));
+            worker_copy_thread_uchar(reinterpret_cast<thread uchar*>(toHash), hash_local, uint(len * 2ul));
+            len *= 2ul;
+        }
+        break;
+    case 0x05u:
+        MD5(reinterpret_cast<thread uchar*>(toHash), size_t(len), reinterpret_cast<thread uchar*>(toHash));
+        for (uint i = 1u; i < iteration; ++i) {
+            uint hash_len = 16u;
+            if (utf8) {
+                worker_hexing(reinterpret_cast<thread uchar*>(toHash), 16u, hash_local, 32u);
+                worker_copy_thread_uchar(reinterpret_cast<thread uchar*>(toHash), hash_local, 32u);
+                hash_len = 32u;
+            }
+            MD5(reinterpret_cast<thread uchar*>(toHash), size_t(hash_len), reinterpret_cast<thread uchar*>(toHash));
+        }
+        len = 16ul;
+        if (is_str) {
+            worker_hexing(reinterpret_cast<thread uchar*>(toHash), uint(len), hash_local, uint(len * 2ul));
+            worker_copy_thread_uchar(reinterpret_cast<thread uchar*>(toHash), hash_local, uint(len * 2ul));
+            len *= 2ul;
+        }
+        break;
+    case 0x06u:
+        worker_hexing(reinterpret_cast<thread uchar*>(toHash), uint(len), hash_local, min(512u, uint(len * 2ul)));
+        worker_copy_thread_uchar(reinterpret_cast<thread uchar*>(toHash), hash_local, min(512u, uint(len * 2ul)));
+        len = min(512ul, len * 2ul);
+        break;
+    default:
+        break;
+    }
+}
+
+static inline void worker_make_pbkdf_salt(device RuntimeConfig& config,
+                                          const device char* passwd,
+                                          uint pass_size,
+                                          thread uchar salt_buf[136],
+                                          thread ulong& salt_len) {
+    const bool electrum = config.electrum != 0u;
+    const constant uchar* salt_src = electrum ? recovery_electrum_salt : recovery_salt;
+    for (uint i = 0u; i < 8u; ++i) {
+        salt_buf[i] = salt_src[i];
+    }
+    const uint pass_copy = min(pass_size, 128u);
+    for (uint i = 0u; i < pass_copy; ++i) {
+        salt_buf[8u + i] = uchar(passwd[i]);
+    }
+    salt_len = ulong(8u + pass_copy);
+}
+
+static inline void worker_hmac_to_extended_constant(const constant uchar* key,
+                                                    ulong key_len,
+                                                    const thread uchar* data,
+                                                    ulong data_len,
+                                                    thread extended_private_key_t& out) {
+    uchar h[64] = { 0 };
+    if (key_len == 12ul && data_len == 64ul) {
+        HMAC_SHA512_12_64(key, data, h);
+    } else {
+        HMAC_SHA512(key, key_len, data, data_len, h);
+    }
+    for (uint i = 0u; i < 32u; ++i) {
+        out.key[i] = h[i];
+        out.chain_code[i] = h[32u + i];
+    }
+}
+
+static inline void worker_btc_seed64_to_extended(const thread uchar* data,
+                                                 thread extended_private_key_t& out) {
+    uchar h[64] = { 0 };
+    HMAC_SHA512_BTC_SEED_64(data, h);
+    for (uint i = 0u; i < 32u; ++i) {
+        out.key[i] = h[i];
+        out.chain_code[i] = h[32u + i];
+    }
+}
+
+static inline void worker_ed_seed64_to_extended(const thread uchar* data,
+                                                thread extended_private_key_t& out) {
+    uchar h[64] = { 0 };
+    HMAC_SHA512_ED25519_SEED_64(data, h);
+    for (uint i = 0u; i < 32u; ++i) {
+        out.key[i] = h[i];
+        out.chain_code[i] = h[32u + i];
+    }
+}
+
+static inline uint worker_derivation_offset(const device uint* derindex, uint start) {
+    uint off = 0u;
+    for (uint i = 0u; i < start; ++i) {
+        off += derindex[i];
+    }
+    return off;
+}
+
+static inline bool worker_derivation_path_equal(const device uint* a,
+                                                uint a_len,
+                                                const device uint* b,
+                                                uint b_len) {
+    if (a_len != b_len) {
+        return false;
+    }
+    for (uint i = 0u; i < a_len; ++i) {
+        if (a[i] != b[i]) {
+            return false;
+        }
+    }
+    return true;
+}
+
+static inline void worker_get_next_secp_key(thread WorkerEnv& env,
+                                            const thread extended_private_key_t& master,
+                                            const device uint* deriv,
+                                            const device uint* derindex,
+                                            uint path_offset,
+                                            uint path_len,
+                                            uint path_index,
+                                            uint der_indexes_size,
+                                            thread uchar next_key[32],
+                                            thread bool& has_next) {
+    has_next = false;
+    if (path_index + 1u >= der_indexes_size || derindex == nullptr || deriv == nullptr) {
+        return;
+    }
+    const uint next_len = derindex[path_index + 1u];
+    const uint next_offset = path_offset + path_len;
+    if (worker_derivation_path_equal(deriv + path_offset, path_len, deriv + next_offset, next_len)) {
+        return;
+    }
+    der_get_child_key_secp256k1(env.precPtr, size_t(env.precPitch), &master,
+                                deriv + next_offset, next_len, next_key);
+    has_next = true;
+}
+
+static inline bool worker_secp_taproot_only(device RuntimeConfig& config) {
+    return (WC_FC_TAPROOT && config.taproot != 0u) &&
+           !(WC_FC_UNCOMPRESSED && config.uncompressed != 0u) &&
+           !(WC_FC_COMPRESSED && config.compressed != 0u) &&
+           !(WC_FC_SEGWIT && config.segwit != 0u) &&
+           !(WC_FC_P2WSH && config.p2wsh != 0u) &&
+           !(WC_FC_ETHEREUM && config.ethereum != 0u) &&
+           !(WC_FC_XPOINT && config.xpoint != 0u) &&
+           !(WC_FC_XRP_SECP && config.xrp != 0u && xrp_type_enabled(config, 0x90u)) &&
+           !(WC_FC_SUI_SECP && config.sui != 0u && sui_type_enabled(config, 0x70u)) &&
+           !(WC_FC_IOTA_SECP && config.iota != 0u && iota_type_enabled(config, 0x50u)) &&
+           !(WC_FC_APTOS_SECP && config.aptos != 0u && aptos_type_enabled(config, 0x22u)) &&
+           !(WC_FC_ICP_SECP && config.icp != 0u && icp_type_enabled(config, 0x53u)) &&
+           !(WC_FC_FIL_SECP && config.fil != 0u) &&
+           !(WC_FC_XTZ_SECP && config.xtz != 0u && xtz_type_enabled(config, 0x92u));
+}
+
+static inline void worker_emit_secp_targets_from_key(thread WorkerEnv& env,
+                                                     const thread char* toHash,
+                                                     ulong len,
+                                                     const thread uchar key32[32],
+                                                     uint c_path,
+                                                     uint c_path2,
+                                                     ushort starter_pass,
+                                                     const device char* passStart,
+                                                     uint passSize,
+                                                     ulong buff_index,
+                                                     ulong round,
+                                                     bool store_seed,
+                                                     ulong seed_value,
+                                                     uint iter_value,
+                                                     bool store_iter) {
+    uchar prv[32] = { 0 };
+    worker_copy_thread_uchar(prv, key32, 32u);
+    if (round > 0ul) {
+        bump_key_256(prv, round, false);
+    }
+    const bool taproot_only = worker_secp_taproot_only(*env.config);
+
+    for (ulong s = 0ul; s <= 2ul * round; ++s) {
+        const long current_round = long(s) - long(round);
+        if (taproot_only) {
+            secp256k1_ge pub_ge;
+            secp256k1_ec_pubkey_create_ge(&pub_ge, prv, env.precPtr, size_t(env.precPitch));
+            uint hash160[8] = { 0 };
+            uchar tap_hash[32] = { 0 };
+            TweakTaproot_ge(tap_hash, &pub_ge, env.precPtr, size_t(env.precPitch));
+            _GetRMD160(reinterpret_cast<thread uint*>(tap_hash), hash160);
+            worker_check_and_store_words(env, toHash, len, prv, tap_hash, 32u, hash160,
+                                         0x04u, c_path, c_path2, current_round, starter_pass,
+                                         passStart, passSize, buff_index, store_seed, seed_value,
+                                         iter_value, store_iter);
+        } else {
+        uchar pubkey[65] = { 0x04u };
+        secp256k1_ec_pubkey_create(reinterpret_cast<thread secp256k1_pubkey*>(pubkey + 1),
+                                   prv,
+                                   env.precPtr,
+                                   size_t(env.precPitch));
+
+        uint hash160[8] = { 0 };
+        int keyLenSkip = 0;
+        if (WC_FC_UNCOMPRESSED && (*env.config).uncompressed != 0u) {
+            _GetHash160(pubkey, keyLenSkip, reinterpret_cast<thread uchar*>(hash160));
+            worker_check_and_store_words(env, toHash, len, prv, reinterpret_cast<thread uchar*>(hash160), 20u,
+                                         hash160, 0x01u, c_path, c_path2, current_round, starter_pass,
+                                         passStart, passSize, buff_index, store_seed, seed_value, iter_value,
+                                         store_iter);
+        }
+        if (WC_FC_COMPRESSED && (*env.config).compressed != 0u) {
+            keyLenSkip = 0;
+            _GetHash160Comp(pubkey, keyLenSkip, reinterpret_cast<thread uchar*>(hash160));
+            worker_check_and_store_words(env, toHash, len, prv, reinterpret_cast<thread uchar*>(hash160), 20u,
+                                         hash160, 0x02u, c_path, c_path2, current_round, starter_pass,
+                                         passStart, passSize, buff_index, store_seed, seed_value, iter_value,
+                                         store_iter);
+        }
+        if (WC_FC_SEGWIT && (*env.config).segwit != 0u) {
+            keyLenSkip = 0;
+            if ((*env.config).compressed == 0u) {
+                _GetHash160Comp(pubkey, keyLenSkip, reinterpret_cast<thread uchar*>(hash160));
+            }
+            _GetHash160P2SHCompFromHash(hash160, hash160);
+            worker_check_and_store_words(env, toHash, len, prv, reinterpret_cast<thread uchar*>(hash160), 20u,
+                                         hash160, 0x03u, c_path, c_path2, current_round, starter_pass,
+                                         passStart, passSize, buff_index, store_seed, seed_value, iter_value,
+                                         store_iter);
+        }
+        if (WC_FC_P2WSH && (*env.config).p2wsh != 0u) {
+            worker_emit_p2wsh_from_pubkey65(env, toHash, len, prv, pubkey, c_path, c_path2,
+                                            current_round, starter_pass, passStart, passSize, buff_index,
+                                            store_seed, seed_value, iter_value, store_iter);
+        }
+        if (WC_FC_TAPROOT && (*env.config).taproot != 0u) {
+            uchar tap_hash[32] = { 0 };
+            TweakTaproot(tap_hash, pubkey, env.precPtr, size_t(env.precPitch));
+            _GetRMD160(reinterpret_cast<thread uint*>(tap_hash), hash160);
+            worker_check_and_store_words(env, toHash, len, prv, tap_hash, 32u, hash160,
+                                         0x04u, c_path, c_path2, current_round, starter_pass,
+                                         passStart, passSize, buff_index, store_seed, seed_value,
+                                         iter_value, store_iter);
+        }
+        if (WC_FC_ETHEREUM && (*env.config).ethereum != 0u) {
+            uchar keccak_hash[32] = { 0 };
+            keccak(reinterpret_cast<thread char*>(pubkey + 1), 64, keccak_hash, 32);
+            for (uint h = 12u, i = 0u; i < 5u; ++i) {
+                hash160[i] = uint(keccak_hash[h]) |
+                             ((uint(keccak_hash[h + 1u]) << 8u) & 0x0000ff00u) |
+                             ((uint(keccak_hash[h + 2u]) << 16u) & 0x00ff0000u) |
+                             ((uint(keccak_hash[h + 3u]) << 24u) & 0xff000000u);
+                h += 4u;
+            }
+            worker_check_and_store_words(env, toHash, len, prv, reinterpret_cast<thread uchar*>(hash160), 20u,
+                                         hash160, 0x06u, c_path, c_path2, current_round, starter_pass,
+                                         passStart, passSize, buff_index, store_seed, seed_value, iter_value,
+                                         store_iter);
+        }
+        if (WC_FC_XPOINT && (*env.config).xpoint != 0u) {
+            uint xpoint_hash[8] = { 0 };
+            thread uchar* xbytes = reinterpret_cast<thread uchar*>(xpoint_hash);
+            worker_copy_thread_uchar(xbytes, pubkey + 1, 32u);
+            worker_check_and_store_words(env, toHash, len, prv, xbytes, 32u, xpoint_hash,
+                                         0x05u, c_path, c_path2, current_round, starter_pass,
+                                         passStart, passSize, buff_index, store_seed, seed_value,
+                                         iter_value, store_iter);
+        }
+        if (WC_FC_XRP_SECP && (*env.config).xrp != 0u && xrp_type_enabled(*env.config, 0x90u)) {
+            keyLenSkip = 0;
+            _GetHash160Comp(pubkey, keyLenSkip, reinterpret_cast<thread uchar*>(hash160));
+            worker_check_and_store_words(env, toHash, len, prv, reinterpret_cast<thread uchar*>(hash160), 20u,
+                                         hash160, 0x90u, c_path, c_path2, current_round, starter_pass,
+                                         passStart, passSize, buff_index, store_seed, seed_value, iter_value,
+                                         store_iter);
+        }
+        if (WC_FC_SUI_SECP && (*env.config).sui != 0u && sui_type_enabled(*env.config, 0x70u)) {
+            uchar buff[34] = { 0 };
+            buff[0] = 0x01u;
+            buff[1] = 0x02u + (pubkey[64] & 1u);
+            worker_copy_thread_uchar(buff + 2, pubkey + 1, 32u);
+            uchar hash_addr[32] = { 0 };
+            Blake2b_256(buff, 34u, hash_addr);
+            worker_check_and_store_bytes(env, toHash, len, prv, hash_addr, 32u, hash_addr, 32u,
+                                         0x70u, c_path, c_path2, current_round, starter_pass,
+                                         passStart, passSize, buff_index, store_seed, seed_value,
+                                         iter_value, store_iter);
+        }
+        if (WC_FC_IOTA_SECP && (*env.config).iota != 0u && iota_type_enabled(*env.config, 0x50u)) {
+            uchar buff[34] = { 0 };
+            buff[0] = 0x01u;
+            buff[1] = 0x02u + (pubkey[64] & 1u);
+            worker_copy_thread_uchar(buff + 2, pubkey + 1, 32u);
+            uchar hash_addr[32] = { 0 };
+            Blake2b_256(buff, 34u, hash_addr);
+            worker_check_and_store_bytes(env, toHash, len, prv, hash_addr, 32u, hash_addr, 32u,
+                                         0x50u, c_path, c_path2, current_round, starter_pass,
+                                         passStart, passSize, buff_index, store_seed, seed_value,
+                                         iter_value, store_iter);
+        }
+        if (WC_FC_APTOS_SECP && (*env.config).aptos != 0u && aptos_type_enabled(*env.config, 0x22u)) {
+            uchar buff[35] = { 0 };
+            buff[0] = 0x01u;
+            buff[1] = 0x02u + (pubkey[64] & 1u);
+            worker_copy_thread_uchar(buff + 2, pubkey + 1, 32u);
+            buff[34] = 0x02u;
+            uchar hash_addr[32] = { 0 };
+            sha3_256(reinterpret_cast<thread char*>(buff), 35, hash_addr);
+            worker_check_and_store_bytes(env, toHash, len, prv, hash_addr, 32u, hash_addr, 32u,
+                                         0x22u, c_path, c_path2, current_round, starter_pass,
+                                         passStart, passSize, buff_index, store_seed, seed_value,
+                                         iter_value, store_iter);
+        }
+        if (WC_FC_ICP_SECP && (*env.config).icp != 0u && icp_type_enabled(*env.config, 0x53u)) {
+            uchar principal[29] = { 0 };
+            uchar hash_addr[32] = { 0 };
+            icp_principal_from_secp256k1(pubkey, principal);
+            icp_account_identifier(principal, nullptr, hash_addr);
+            worker_check_and_store_bytes(env, toHash, len, prv, hash_addr, 32u, hash_addr, 32u,
+                                         0x53u, c_path, c_path2, current_round, starter_pass,
+                                         passStart, passSize, buff_index, store_seed, seed_value,
+                                         iter_value, store_iter);
+        }
+        if (WC_FC_FIL_SECP && (*env.config).fil != 0u) {
+            if (fil_type_enabled(*env.config, 0x41u)) {
+                uchar hash_addr[20] = { 0 };
+                Blake2b_160(pubkey, 65u, hash_addr);
+                worker_check_and_store_bytes(env, toHash, len, prv, hash_addr, 20u, hash_addr, 20u,
+                                             0x41u, c_path, c_path2, current_round, starter_pass,
+                                             passStart, passSize, buff_index, store_seed, seed_value,
+                                             iter_value, store_iter);
+            }
+            if (fil_type_enabled(*env.config, 0x42u)) {
+                uchar keccak_hash[32] = { 0 };
+                uint fil_hash[8] = { 0 };
+                keccak(reinterpret_cast<thread char*>(pubkey + 1), 64, keccak_hash, 32);
+                for (uint h = 12u, i = 0u; i < 5u; ++i) {
+                    fil_hash[i] = uint(keccak_hash[h]) |
+                                  ((uint(keccak_hash[h + 1u]) << 8u) & 0x0000ff00u) |
+                                  ((uint(keccak_hash[h + 2u]) << 16u) & 0x00ff0000u) |
+                                  ((uint(keccak_hash[h + 3u]) << 24u) & 0xff000000u);
+                    h += 4u;
+                }
+                worker_check_and_store_words(env, toHash, len, prv, reinterpret_cast<thread uchar*>(fil_hash), 20u,
+                                             fil_hash, 0x42u, c_path, c_path2, current_round, starter_pass,
+                                             passStart, passSize, buff_index, store_seed, seed_value,
+                                             iter_value, store_iter);
+            }
+        }
+        if (WC_FC_XTZ_SECP && (*env.config).xtz != 0u && xtz_type_enabled(*env.config, 0x92u)) {
+            uchar buff[33] = { 0 };
+            buff[0] = 0x02u + (pubkey[64] & 1u);
+            worker_copy_thread_uchar(buff + 1, pubkey + 1, 32u);
+            uchar hash_addr[20] = { 0 };
+            Blake2b_160(buff, 33u, hash_addr);
+            worker_check_and_store_bytes(env, toHash, len, prv, hash_addr, 20u, hash_addr, 20u,
+                                         0x92u, c_path, c_path2, current_round, starter_pass,
+                                         passStart, passSize, buff_index, store_seed, seed_value,
+                                         iter_value, store_iter);
+        }
+        }
+
+        if (s < 2ul * round) {
+            bump_key_256(prv, 1ul, true);
+        }
+    }
+}
+
+static inline void worker_emit_ed_targets_from_key(thread WorkerEnv& env,
+                                                   const thread char* toHash,
+                                                   ulong len,
+                                                   const thread uchar key32[32],
+                                                   const thread uchar* next_key,
+                                                   uint c_path,
+                                                   uint c_path2,
+                                                   ushort starter_pass,
+                                                   const device char* passStart,
+                                                   uint passSize,
+                                                   ulong buff_index,
+                                                   ulong round,
+                                                   bool store_seed,
+                                                   ulong seed_value,
+                                                   uint iter_value,
+                                                   bool store_iter,
+                                                   bool invert_scalar_for_ada,
+                                                   bool emit_ada_raw = true) {
+    const bool needs_common_pub = (WC_FC_DOT && (*env.config).dot != 0u &&
+                                   dot_type_enabled(*env.config, 0x30u)) ||
+                                  (WC_FC_SOLANA && (*env.config).solana != 0u) ||
+                                  (WC_FC_TON && (*env.config).ton != 0u) ||
+                                  (WC_FC_TON_ALL && (*env.config).tonAll != 0u) ||
+                                  (WC_FC_XRP_ED && (*env.config).xrp != 0u && xrp_type_enabled(*env.config, 0x91u)) ||
+                                  (WC_FC_APTOS_ED && (*env.config).aptos != 0u) ||
+                                  (WC_FC_SUI_ED && (*env.config).sui != 0u && sui_type_enabled(*env.config, 0x71u)) ||
+                                  (WC_FC_IOTA_ED && (*env.config).iota != 0u && iota_type_enabled(*env.config, 0x51u)) ||
+                                  (WC_FC_ICP_ED && (*env.config).icp != 0u && icp_type_enabled(*env.config, 0x52u)) ||
+                                  (WC_FC_XTZ_ED && (*env.config).xtz != 0u && xtz_type_enabled(*env.config, 0x93u));
+    uchar prv[32] = { 0 };
+    worker_copy_thread_uchar(prv, key32, 32u);
+    if (round > 0ul) {
+        bump_key_256(prv, round, false);
+    }
+
+    for (ulong s = 0ul; s <= 2ul * round; ++s) {
+        const long current_round = long(s) - long(round);
+        uchar publ[32] = { 0 };
+        uint hash160[8] = { 0 };
+        if (needs_common_pub) {
+            priv_ed25519_key_to_pub_batch_config(prv, publ, 1, *env.config);
+        }
+
+        if (WC_FC_DOT && (*env.config).dot != 0u) {
+            adadot_emit_dot_ed25519_public(env.isResult, env.buffResult, toHash, len, prv, publ,
+                                           c_path, current_round, starter_pass, passStart, passSize,
+                                           buff_index, store_seed, seed_value, iter_value, store_iter,
+                                           *env.config, *env.filters, *env.filterStorage, env.bloomStorage,
+                                           env.xorStorage, env.xorUnStorage, env.xorUcStorage, env.xorHcStorage,
+                                           env.found);
+            adadot_emit_dot_sr25519_seed(env.isResult, env.buffResult, toHash, len, prv,
+                                         c_path, current_round, starter_pass, passStart, passSize,
+                                         buff_index, store_seed, seed_value, iter_value, store_iter,
+                                         *env.config, *env.filters, *env.filterStorage, env.bloomStorage,
+                                         env.xorStorage, env.xorUnStorage, env.xorUcStorage, env.xorHcStorage,
+                                         env.found);
+            adadot_emit_dot_substrate_from_seed(env.isResult, env.buffResult, toHash, len, prv,
+                                                current_round, starter_pass, passStart, passSize, buff_index,
+                                                store_seed, seed_value, iter_value, store_iter, *env.config,
+                                                env.substratePaths, *env.filters, *env.filterStorage,
+                                                env.bloomStorage, env.xorStorage, env.xorUnStorage,
+                                                env.xorUcStorage, env.xorHcStorage, env.found);
+        }
+        if (emit_ada_raw && WC_FC_ADA && (*env.config).ada != 0u) {
+            adadot_emit_ada_direct_keyset(env.isResult, env.buffResult, toHash, len, prv, next_key,
+                                          c_path, current_round, starter_pass, passStart, passSize,
+                                          buff_index, store_seed, seed_value, iter_value, store_iter,
+                                          invert_scalar_for_ada, *env.config, *env.filters, *env.filterStorage,
+                                          env.bloomStorage, env.xorStorage, env.xorUnStorage, env.xorUcStorage,
+                                          env.xorHcStorage, env.found);
+        }
+        if (WC_FC_SOLANA && (*env.config).solana != 0u) {
+            worker_check_and_store_bytes(env, toHash, len, prv, publ, 32u, publ, 32u,
+                                         0x60u, c_path, c_path2, current_round, starter_pass,
+                                         passStart, passSize, buff_index, store_seed, seed_value,
+                                         iter_value, store_iter);
+        }
+        if (WC_FC_TON && (*env.config).ton != 0u) {
+            worker_emit_ton_type(env, toHash, len, prv, publ, "v3r1", 0x85u, c_path, c_path2,
+                                 current_round, starter_pass, passStart, passSize, buff_index,
+                                 store_seed, seed_value, iter_value, store_iter);
+            worker_emit_ton_type(env, toHash, len, prv, publ, "v3r2", 0x86u, c_path, c_path2,
+                                 current_round, starter_pass, passStart, passSize, buff_index,
+                                 store_seed, seed_value, iter_value, store_iter);
+            worker_emit_ton_type(env, toHash, len, prv, publ, "v4r2", 0x88u, c_path, c_path2,
+                                 current_round, starter_pass, passStart, passSize, buff_index,
+                                 store_seed, seed_value, iter_value, store_iter);
+            worker_emit_ton_type(env, toHash, len, prv, publ, "v5r1", 0x89u, c_path, c_path2,
+                                 current_round, starter_pass, passStart, passSize, buff_index,
+                                 store_seed, seed_value, iter_value, store_iter);
+            worker_emit_ton_type(env, toHash, len, prv, publ, "hv3", 0x8cu, c_path, c_path2,
+                                 current_round, starter_pass, passStart, passSize, buff_index,
+                                 store_seed, seed_value, iter_value, store_iter);
+        }
+        if (WC_FC_TON_ALL && (*env.config).tonAll != 0u) {
+            worker_emit_ton_type(env, toHash, len, prv, publ, "v1r1", 0x80u, c_path, c_path2,
+                                 current_round, starter_pass, passStart, passSize, buff_index,
+                                 store_seed, seed_value, iter_value, store_iter);
+            worker_emit_ton_type(env, toHash, len, prv, publ, "v1r2", 0x81u, c_path, c_path2,
+                                 current_round, starter_pass, passStart, passSize, buff_index,
+                                 store_seed, seed_value, iter_value, store_iter);
+            worker_emit_ton_type(env, toHash, len, prv, publ, "v1r3", 0x82u, c_path, c_path2,
+                                 current_round, starter_pass, passStart, passSize, buff_index,
+                                 store_seed, seed_value, iter_value, store_iter);
+            worker_emit_ton_type(env, toHash, len, prv, publ, "v2r1", 0x83u, c_path, c_path2,
+                                 current_round, starter_pass, passStart, passSize, buff_index,
+                                 store_seed, seed_value, iter_value, store_iter);
+            worker_emit_ton_type(env, toHash, len, prv, publ, "v2r2", 0x84u, c_path, c_path2,
+                                 current_round, starter_pass, passStart, passSize, buff_index,
+                                 store_seed, seed_value, iter_value, store_iter);
+            worker_emit_ton_type(env, toHash, len, prv, publ, "v3r1", 0x85u, c_path, c_path2,
+                                 current_round, starter_pass, passStart, passSize, buff_index,
+                                 store_seed, seed_value, iter_value, store_iter);
+            worker_emit_ton_type(env, toHash, len, prv, publ, "v3r2", 0x86u, c_path, c_path2,
+                                 current_round, starter_pass, passStart, passSize, buff_index,
+                                 store_seed, seed_value, iter_value, store_iter);
+            worker_emit_ton_type(env, toHash, len, prv, publ, "v4r1", 0x87u, c_path, c_path2,
+                                 current_round, starter_pass, passStart, passSize, buff_index,
+                                 store_seed, seed_value, iter_value, store_iter);
+            worker_emit_ton_type(env, toHash, len, prv, publ, "v4r2", 0x88u, c_path, c_path2,
+                                 current_round, starter_pass, passStart, passSize, buff_index,
+                                 store_seed, seed_value, iter_value, store_iter);
+            worker_emit_ton_type(env, toHash, len, prv, publ, "v5r1", 0x89u, c_path, c_path2,
+                                 current_round, starter_pass, passStart, passSize, buff_index,
+                                 store_seed, seed_value, iter_value, store_iter);
+            worker_emit_ton_type(env, toHash, len, prv, publ, "hv1", 0x8au, c_path, c_path2,
+                                 current_round, starter_pass, passStart, passSize, buff_index,
+                                 store_seed, seed_value, iter_value, store_iter);
+            worker_emit_ton_type(env, toHash, len, prv, publ, "hv2", 0x8bu, c_path, c_path2,
+                                 current_round, starter_pass, passStart, passSize, buff_index,
+                                 store_seed, seed_value, iter_value, store_iter);
+            worker_emit_ton_type(env, toHash, len, prv, publ, "hv3", 0x8cu, c_path, c_path2,
+                                 current_round, starter_pass, passStart, passSize, buff_index,
+                                 store_seed, seed_value, iter_value, store_iter);
+        }
+        if (WC_FC_XRP_ED && (*env.config).xrp != 0u && xrp_type_enabled(*env.config, 0x91u)) {
+            int keyLenSkip = 0;
+            _GetHash160ED(publ, keyLenSkip, reinterpret_cast<thread uchar*>(hash160));
+            worker_check_and_store_words(env, toHash, len, prv, reinterpret_cast<thread uchar*>(hash160), 20u,
+                                         hash160, 0x91u, c_path, c_path2, current_round, starter_pass,
+                                         passStart, passSize, buff_index, store_seed, seed_value, iter_value,
+                                         store_iter);
+        }
+        if (WC_FC_APTOS_ED && (*env.config).aptos != 0u) {
+            if (aptos_type_enabled(*env.config, 0x20u)) {
+                uchar buff[33] = { 0 };
+                worker_copy_thread_uchar(buff, publ, 32u);
+                uchar hash_addr[32] = { 0 };
+                sha3_256(reinterpret_cast<thread char*>(buff), 33, hash_addr);
+                worker_check_and_store_bytes(env, toHash, len, prv, hash_addr, 32u, hash_addr, 32u,
+                                             0x20u, c_path, c_path2, current_round, starter_pass,
+                                             passStart, passSize, buff_index, store_seed, seed_value,
+                                             iter_value, store_iter);
+            }
+            if (aptos_type_enabled(*env.config, 0x21u)) {
+                uchar buff2[34] = { 0 };
+                worker_copy_thread_uchar(buff2 + 1, publ, 32u);
+                buff2[33] = 0x02u;
+                uchar hash_addr2[32] = { 0 };
+                sha3_256(reinterpret_cast<thread char*>(buff2), 34, hash_addr2);
+                worker_check_and_store_bytes(env, toHash, len, prv, hash_addr2, 32u, hash_addr2, 32u,
+                                             0x21u, c_path, c_path2, current_round, starter_pass,
+                                             passStart, passSize, buff_index, store_seed, seed_value,
+                                             iter_value, store_iter);
+            }
+        }
+        if (WC_FC_SUI_ED && (*env.config).sui != 0u && sui_type_enabled(*env.config, 0x71u)) {
+            uchar buff[33] = { 0 };
+            worker_copy_thread_uchar(buff + 1, publ, 32u);
+            uchar hash_addr[32] = { 0 };
+            Blake2b_256(buff, 33u, hash_addr);
+            worker_check_and_store_bytes(env, toHash, len, prv, hash_addr, 32u, hash_addr, 32u,
+                                         0x71u, c_path, c_path2, current_round, starter_pass,
+                                         passStart, passSize, buff_index, store_seed, seed_value,
+                                         iter_value, store_iter);
+        }
+        if (WC_FC_IOTA_ED && (*env.config).iota != 0u && iota_type_enabled(*env.config, 0x51u)) {
+            uchar hash_addr[32] = { 0 };
+            Blake2b_256(publ, 32u, hash_addr);
+            worker_check_and_store_bytes(env, toHash, len, prv, hash_addr, 32u, hash_addr, 32u,
+                                         0x51u, c_path, c_path2, current_round, starter_pass,
+                                         passStart, passSize, buff_index, store_seed, seed_value,
+                                         iter_value, store_iter);
+        }
+        if (WC_FC_ICP_ED && (*env.config).icp != 0u && icp_type_enabled(*env.config, 0x52u)) {
+            uchar principal[29] = { 0 };
+            uchar hash_addr[32] = { 0 };
+            icp_principal_from_ed25519(publ, principal);
+            icp_account_identifier(principal, nullptr, hash_addr);
+            worker_check_and_store_bytes(env, toHash, len, prv, hash_addr, 32u, hash_addr, 32u,
+                                         0x52u, c_path, c_path2, current_round, starter_pass,
+                                         passStart, passSize, buff_index, store_seed, seed_value,
+                                         iter_value, store_iter);
+        }
+        if (WC_FC_XTZ_ED && (*env.config).xtz != 0u && xtz_type_enabled(*env.config, 0x93u)) {
+            uchar hash_addr[20] = { 0 };
+            Blake2b_160(publ, 32u, hash_addr);
+            worker_check_and_store_bytes(env, toHash, len, prv, hash_addr, 20u, hash_addr, 20u,
+                                         0x93u, c_path, c_path2, current_round, starter_pass,
+                                         passStart, passSize, buff_index, store_seed, seed_value,
+                                         iter_value, store_iter);
+        }
+
+        if (s < 2ul * round) {
+            bump_key_256(prv, 1ul, true);
+        }
+    }
+}
+
+static inline void worker_process_candidate(thread WorkerEnv& env,
+                                            thread char toHash[512],
+                                            ulong len,
+                                            const device uint* d_derivations,
+                                            const device uint* derindex,
+                                            uint der_indexes_size,
+                                            uint der_start_index,
+                                            const device char* passwd,
+                                            uint pass_size,
+                                            uint starter_pass,
+                                            ulong round,
+                                            ulong buff_index,
+                                            bool store_seed,
+                                            ulong seed_value,
+                                            uint iter_value,
+                                            bool store_iter) {
+    if (d_derivations == nullptr || derindex == nullptr || der_start_index >= der_indexes_size) {
+        return;
+    }
+
+    const bool run_bip32_paths = (WC_FC_SECP_ANY || WC_FC_ED_ANY) &&
+                                 (*env.config).secp256 != 0u &&
+                                 (*env.config).bipDerivationsEnabled != 0u &&
+                                 target_derivation_type_enabled(*env.config, WORKER_DERIVATION_TYPE_MASK_BIP32);
+    const bool run_slip0010_paths = WC_FC_ED_ANY &&
+                                    (*env.config).ed25519 != 0u &&
+                                    (*env.config).bipDerivationsEnabled != 0u &&
+                                    target_derivation_type_enabled(*env.config, WORKER_DERIVATION_TYPE_MASK_SLIP0010);
+    const bool run_bip32_ed25519_paths = WC_FC_ED_ANY &&
+                                         (*env.config).ed25519 != 0u &&
+                                         (*env.config).bipDerivationsEnabled != 0u &&
+                                         target_derivation_type_enabled(*env.config, WORKER_DERIVATION_TYPE_MASK_BIP32_ED25519);
+    if (!run_bip32_paths && !run_slip0010_paths && !run_bip32_ed25519_paths) {
+        return;
+    }
+
+    uchar salt_buf[136] = { 0 };
+    ulong salt_len = 0ul;
+    worker_make_pbkdf_salt(*env.config, passwd, pass_size, salt_buf, salt_len);
+
+    uchar seed64[64] = { 0 };
+    fastpbkdf2_hmac_sha512(reinterpret_cast<thread uchar*>(toHash),
+                           len,
+                           salt_buf,
+                           salt_len,
+                           (*env.config).pbkdf2Iterations,
+                           seed64,
+                           64ul);
+
+    extended_private_key_t master_private;
+    extended_private_key_t ed25519_master_private;
+    if (run_bip32_paths || run_bip32_ed25519_paths) {
+        worker_btc_seed64_to_extended(seed64, master_private);
+    }
+    if (run_slip0010_paths || run_bip32_ed25519_paths) {
+        worker_ed_seed64_to_extended(seed64, ed25519_master_private);
+    }
+
+    uint offset = worker_derivation_offset(derindex, der_start_index);
+    for (uint path_index = der_start_index; path_index < der_indexes_size; ++path_index) {
+        const uint path_len = derindex[path_index];
+        const uint c_path = path_index - der_start_index;
+        const device uint* path = d_derivations + offset;
+
+        if (run_bip32_paths) {
+            uchar secp_key[32] = { 0 };
+            der_get_child_key_secp256k1(env.precPtr, size_t(env.precPitch), &master_private, path, path_len, secp_key);
+            uchar next_key[32] = { 0 };
+            bool has_next = false;
+            const bool need_ed_from_bip32 = WC_FC_ED_ANY &&
+                                            ((*env.config).edTargetsAny != 0u ||
+                                             (*env.config).dot != 0u ||
+                                             (*env.config).ada != 0u);
+            if (need_ed_from_bip32) {
+                worker_get_next_secp_key(env, master_private, d_derivations, derindex, offset, path_len,
+                                         path_index, der_indexes_size, next_key, has_next);
+                worker_emit_ed_targets_from_key(env, toHash, len, secp_key,
+                                                has_next ? next_key : nullptr,
+                                                c_path, c_path, ushort(starter_pass), passwd, pass_size,
+                                                buff_index, round, store_seed, seed_value, iter_value,
+                                                store_iter, false);
+            }
+            if (WC_FC_SECP_ANY && (*env.config).secpTargetsAny != 0u) {
+                worker_emit_secp_targets_from_key(env, toHash, len, secp_key, c_path, c_path, ushort(starter_pass),
+                                                  passwd, pass_size, buff_index, round, store_seed, seed_value,
+                                                  iter_value, store_iter);
+            }
+        }
+
+        if (run_slip0010_paths) {
+            uchar ed_key32[32] = { 0 };
+            der_get_child_key_ed25519(&ed25519_master_private, path, path_len, ed_key32);
+            if (WC_FC_SECP_ANY && (*env.config).secpTargetsAny != 0u) {
+                worker_emit_secp_targets_from_key(env, toHash, len, ed_key32, c_path, c_path, ushort(starter_pass),
+                                                  passwd, pass_size, buff_index, round, store_seed, seed_value,
+                                                  iter_value, store_iter);
+            }
+            if (WC_FC_ED_ANY) {
+                worker_emit_ed_targets_from_key(env, toHash, len, ed_key32, nullptr, c_path, c_path,
+                                                ushort(starter_pass), passwd, pass_size, buff_index, round,
+                                                store_seed, seed_value, iter_value, store_iter, false);
+            }
+        }
+
+        if (run_bip32_ed25519_paths) {
+            uchar ed_bip32_key[32] = { 0 };
+            der_get_child_key_ed25519(&ed25519_master_private, path, path_len,
+                                      ed_bip32_key);
+            uchar next_key[32] = { 0 };
+            bool has_next = false;
+            worker_get_next_secp_key(env, master_private, d_derivations, derindex, offset, path_len,
+                                     path_index, der_indexes_size, next_key, has_next);
+            if (WC_FC_SECP_ANY && (*env.config).secpTargetsAny != 0u) {
+                worker_emit_secp_targets_from_key(env, toHash, len, ed_bip32_key, c_path, c_path,
+                                                  ushort(starter_pass), passwd, pass_size, buff_index, round,
+                                                  store_seed, seed_value, iter_value, store_iter);
+            }
+            if (WC_FC_ED_ANY) {
+                worker_emit_ed_targets_from_key(env, toHash, len, ed_bip32_key,
+                                                has_next ? next_key : nullptr,
+                                                c_path, c_path, ushort(starter_pass), passwd, pass_size,
+                                                buff_index, round, store_seed, seed_value, iter_value,
+                                                store_iter, true);
+            }
+        }
+
+        offset += path_len;
+    }
+}
+
+static inline bool worker_read_indexed_line(thread char toHash[512],
+                                            thread ulong& len,
+                                            const device char* lines,
+                                            const device uint* indexes,
+                                            uint indexes_size,
+                                            uint tid) {
+    if (lines == nullptr || indexes == nullptr || tid >= indexes_size) {
+        return false;
+    }
+    const uint start = (tid == 0u) ? 0u : indexes[tid - 1u];
+    const uint end = indexes[tid];
+    if (end < start) {
+        return false;
+    }
+    len = ulong(min(end - start, 512u));
+    for (uint i = 0u; i < uint(len); ++i) {
+        toHash[i] = lines[start + i];
+    }
+    return true;
+}
+
+static inline void worker_materialize_seq(thread char toHash[512],
+                                          thread ulong& len,
+                                          int mode,
+                                          const device uchar* start_point,
+                                          int min_len,
+                                          ulong starter) {
+    uint c[128] = { 0 };
+    uint r[128] = { 0 };
+    uchar toHash2[512] = { 0 };
+    loadBE4096toWords(start_point, c);
+    if (mode == 1) {
+        add64to4096_device(c, starter, r);
+    } else {
+        sub64from4096_device(c, starter, r);
+    }
+    int raw_len = sizeBE4096_device(r);
+    if (raw_len < min_len) {
+        raw_len = min_len;
+    }
+    raw_len = min(raw_len, 512);
+    storeWordsToBE4096(r, toHash2);
+    for (int j = 0; j < raw_len; ++j) {
+        toHash[j] = char(toHash2[512 - raw_len + j]);
+    }
+    len = ulong(raw_len);
+}
+
+static inline uchar worker_hexset_next_addend_generic(thread ulong& carry, uint base) {
+    const uchar add = uchar(carry % ulong(base));
+    carry /= ulong(base);
+    return add;
+}
+
+static inline uchar worker_hexset_next_addend_pow2(thread ulong& carry, uint mask, uint shift) {
+    const uchar add = uchar(carry & ulong(mask));
+    carry >>= shift;
+    return add;
+}
+
+static inline bool worker_hexset_materialize_candidate_exact(const device uchar* start_digits,
+                                                             uint digit_count,
+                                                             const device uchar* alphabet,
+                                                             uint base,
+                                                             ulong offset,
+                                                             thread uchar out[512]) {
+    if (start_digits == nullptr || alphabet == nullptr || digit_count == 0u ||
+        (digit_count & 1u) != 0u || base == 0u || digit_count > 1024u) {
+        return false;
+    }
+
+    const int exact_size = int(digit_count >> 1u);
+    if (base == 1u) {
+        if (offset != 0ul) {
+            return false;
+        }
+        const uchar packed = uchar((alphabet[0] << 4u) | alphabet[0]);
+        for (int byte_idx = 0; byte_idx < exact_size; ++byte_idx) {
+            out[byte_idx] = packed;
+        }
+        return true;
+    }
+
+    ulong carry = offset;
+    if (base == 2u || base == 4u || base == 8u || base == 16u) {
+        const uint shift = (base == 2u) ? 1u : (base == 4u) ? 2u : (base == 8u) ? 3u : 4u;
+        const uint mask = base - 1u;
+        for (int byte_idx = exact_size - 1; byte_idx >= 0; --byte_idx) {
+            const uint lo_pos = uint((byte_idx << 1) + 1);
+            const uint hi_pos = uint(byte_idx << 1);
+            uint lo_digit = uint(start_digits[lo_pos]) + uint(worker_hexset_next_addend_pow2(carry, mask, shift));
+            if (lo_digit >= base) {
+                lo_digit -= base;
+                ++carry;
+            }
+            uint hi_digit = uint(start_digits[hi_pos]) + uint(worker_hexset_next_addend_pow2(carry, mask, shift));
+            if (hi_digit >= base) {
+                hi_digit -= base;
+                ++carry;
+            }
+            out[byte_idx] = uchar((alphabet[hi_digit] << 4u) | alphabet[lo_digit]);
+        }
+    } else {
+        for (int byte_idx = exact_size - 1; byte_idx >= 0; --byte_idx) {
+            const uint lo_pos = uint((byte_idx << 1) + 1);
+            const uint hi_pos = uint(byte_idx << 1);
+            uint lo_digit = uint(start_digits[lo_pos]) + uint(worker_hexset_next_addend_generic(carry, base));
+            if (lo_digit >= base) {
+                lo_digit -= base;
+                ++carry;
+            }
+            uint hi_digit = uint(start_digits[hi_pos]) + uint(worker_hexset_next_addend_generic(carry, base));
+            if (hi_digit >= base) {
+                hi_digit -= base;
+                ++carry;
+            }
+            out[byte_idx] = uchar((alphabet[hi_digit] << 4u) | alphabet[lo_digit]);
+        }
+    }
+
+    return carry == 0ul;
+}
+
+static inline bool worker_recovery_hexset_materialize_candidate_exact(const device uchar* start_digits,
+                                                                      uint digit_count,
+                                                                      const device uchar* alphabet,
+                                                                      uint base,
+                                                                      ulong offset,
+                                                                      thread uchar out[512]) {
+    if (start_digits == nullptr || alphabet == nullptr || digit_count == 0u ||
+        (digit_count & 1u) != 0u || base == 0u || digit_count > 1024u) {
+        return false;
+    }
+
+    const device uchar* templ = start_digits;
+    const device uchar* counter = start_digits + digit_count;
+    const int exact_size = int(digit_count >> 1u);
+    ulong carry = offset;
+
+    if (base == 1u) {
+        if (offset != 0ul) {
+            return false;
+        }
+        for (int byte_idx = exact_size - 1; byte_idx >= 0; --byte_idx) {
+            const uint lo_pos = uint((byte_idx << 1) + 1);
+            const uint hi_pos = uint(byte_idx << 1);
+            const uchar lo_t = templ[lo_pos];
+            const uchar hi_t = templ[hi_pos];
+            const uchar lo = (lo_t == 0xffu) ? alphabet[0] : lo_t;
+            const uchar hi = (hi_t == 0xffu) ? alphabet[0] : hi_t;
+            out[byte_idx] = uchar((hi << 4u) | lo);
+        }
+        return true;
+    }
+
+    if (base == 2u || base == 4u || base == 8u || base == 16u) {
+        const uint shift = (base == 2u) ? 1u : (base == 4u) ? 2u : (base == 8u) ? 3u : 4u;
+        const uint mask = base - 1u;
+        for (int byte_idx = exact_size - 1; byte_idx >= 0; --byte_idx) {
+            const uint lo_pos = uint((byte_idx << 1) + 1);
+            const uint hi_pos = uint(byte_idx << 1);
+
+            uchar lo;
+            const uchar lo_t = templ[lo_pos];
+            if (lo_t == 0xffu) {
+                uint digit = uint(counter[lo_pos]) + uint(worker_hexset_next_addend_pow2(carry, mask, shift));
+                if (digit >= base) {
+                    digit -= base;
+                    ++carry;
+                }
+                lo = alphabet[digit];
+            } else {
+                lo = lo_t;
+            }
+
+            uchar hi;
+            const uchar hi_t = templ[hi_pos];
+            if (hi_t == 0xffu) {
+                uint digit = uint(counter[hi_pos]) + uint(worker_hexset_next_addend_pow2(carry, mask, shift));
+                if (digit >= base) {
+                    digit -= base;
+                    ++carry;
+                }
+                hi = alphabet[digit];
+            } else {
+                hi = hi_t;
+            }
+
+            out[byte_idx] = uchar((hi << 4u) | lo);
+        }
+    } else {
+        for (int byte_idx = exact_size - 1; byte_idx >= 0; --byte_idx) {
+            const uint lo_pos = uint((byte_idx << 1) + 1);
+            const uint hi_pos = uint(byte_idx << 1);
+
+            uchar lo;
+            const uchar lo_t = templ[lo_pos];
+            if (lo_t == 0xffu) {
+                uint digit = uint(counter[lo_pos]) + uint(worker_hexset_next_addend_generic(carry, base));
+                if (digit >= base) {
+                    digit -= base;
+                    ++carry;
+                }
+                lo = alphabet[digit];
+            } else {
+                lo = lo_t;
+            }
+
+            uchar hi;
+            const uchar hi_t = templ[hi_pos];
+            if (hi_t == 0xffu) {
+                uint digit = uint(counter[hi_pos]) + uint(worker_hexset_next_addend_generic(carry, base));
+                if (digit >= base) {
+                    digit -= base;
+                    ++carry;
+                }
+                hi = alphabet[digit];
+            } else {
+                hi = hi_t;
+            }
+
+            out[byte_idx] = uchar((hi << 4u) | lo);
+        }
+    }
+
+    return carry == 0ul;
+}
+
+static inline int worker_hexset_cmp(const thread uchar* lhs, const device uchar* rhs, uint len) {
+    if (rhs == nullptr) {
+        return 0;
+    }
+    for (uint i = 0u; i < len; ++i) {
+        const uchar a = lhs[i];
+        const uchar b = rhs[i];
+        if (a < b) return -1;
+        if (a > b) return 1;
+    }
+    return 0;
+}
+
+static inline bool worker_hexset_candidate_within_exact_bounds(const thread uchar* candidate,
+                                                               const device uchar* lower,
+                                                               const device uchar* upper,
+                                                               uint len) {
+    if (lower != nullptr && worker_hexset_cmp(candidate, lower, len) < 0) {
+        return false;
+    }
+    if (upper != nullptr && worker_hexset_cmp(candidate, upper, len) > 0) {
+        return false;
+    }
+    return true;
+}
+
+static inline ulong worker_splitmix64(thread ulong& state) {
+    state += 0x9e3779b97f4a7c15ul;
+    ulong z = state;
+    z = (z ^ (z >> 30u)) * 0xbf58476d1ce4e5b9ul;
+    z = (z ^ (z >> 27u)) * 0x94d049bb133111ebul;
+    return z ^ (z >> 31u);
+}
+
+static inline bool worker_entropy_fill_fallback(int entropy_len,
+                                                thread uchar entropy[128],
+                                                ulong seed_l,
+                                                bool is_64,
+                                                int mode,
+                                                int gen,
+                                                ulong skip64) {
+    if (entropy_len < 0 || entropy_len > 128) {
+        return false;
+    }
+    if (is_64) {
+        return prng64_entropy_fill(entropy_len, entropy, seed_l, mode, gen, skip64);
+    }
+    if (seed_l > 0xfffffffful) {
+        return false;
+    }
+    return prng32_entropy_fill(entropy_len, entropy, uint(seed_l), mode, gen, skip64);
+}
+
+#endif

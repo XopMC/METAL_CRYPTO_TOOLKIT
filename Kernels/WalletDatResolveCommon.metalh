@@ -1,0 +1,282 @@
+#ifndef METAL_CRYPTO_WALLETDAT_RESOLVE_COMMON_METALH
+#define METAL_CRYPTO_WALLETDAT_RESOLVE_COMMON_METALH
+
+#include "WalletDatKdfCommon.metalh"
+#include "../lib/secp256k1/secp256k1.metalh"
+
+static inline bool wallet_bytes_equal(const thread uchar* a,
+                                      const device uchar* b,
+                                      uint len) {
+    for (uint i = 0u; i < len; ++i) {
+        if (a[i] != b[i]) {
+            return false;
+        }
+    }
+    return true;
+}
+
+static inline bool wallet_aes256_cbc_decrypt_pkcs7(const thread uchar key32[32],
+                                                   const thread uchar iv16[16],
+                                                   const device uchar* ciphertext,
+                                                   uint ciphertext_len,
+                                                   thread uchar* plaintext,
+                                                   thread uint* plaintext_len) {
+    if (ciphertext_len == 0u || (ciphertext_len & 15u) != 0u ||
+        ciphertext_len > WALLETDAT_MAX_CRYPTED_KEY_LEN) {
+        return false;
+    }
+    uint round_keys[60];
+    provider_aes_expand_key(key32, round_keys);
+
+    const uint last_off = ciphertext_len - 16u;
+    const device uchar* last_prev = (last_off == 0u) ? nullptr : (ciphertext + last_off - 16u);
+    uchar last_plain[16];
+    wallet_aes256_decrypt_block(round_keys, ciphertext + last_off, last_plain);
+    for (int i = 0; i < 16; ++i) {
+        const uchar prev = (last_off == 0u) ? iv16[i] : last_prev[i];
+        last_plain[i] = uchar(last_plain[i] ^ prev);
+    }
+    const uchar pad = last_plain[15];
+    if (pad == 0u || pad > 16u || uint(pad) > ciphertext_len) {
+        return false;
+    }
+    for (uint i = 0u; i < uint(pad); ++i) {
+        if (last_plain[15u - i] != pad) {
+            return false;
+        }
+    }
+
+    uchar prev[16];
+    for (int i = 0; i < 16; ++i) {
+        prev[i] = iv16[i];
+    }
+    for (uint off = 0u; off < last_off; off += 16u) {
+        uchar block[16];
+        wallet_aes256_decrypt_block(round_keys, ciphertext + off, block);
+        for (int i = 0; i < 16; ++i) {
+            plaintext[off + uint(i)] = uchar(block[i] ^ prev[i]);
+            prev[i] = ciphertext[off + uint(i)];
+        }
+    }
+    for (int i = 0; i < 16; ++i) {
+        plaintext[last_off + uint(i)] = last_plain[i];
+    }
+    *plaintext_len = ciphertext_len - uint(pad);
+    return true;
+}
+
+static inline bool walletdat_pubkey_from_private(const constant secp256k1_ge_storage* precPtr,
+                                                 ulong precPitch,
+                                                 uint window_size,
+                                                 uint window_ecmult_size,
+                                                 const thread uchar priv32[32],
+                                                 thread uchar* out,
+                                                 uint out_len) {
+    if (out_len != 33u && out_len != 65u) {
+        return false;
+    }
+    secp256k1_scalar s;
+    int overflow = 0;
+    secp256k1_scalar_set_b32(&s, priv32, &overflow);
+    if (overflow || secp256k1_scalar_is_zero(&s)) {
+        return false;
+    }
+    secp256k1_gej pubj;
+    secp256k1_ecmult_big(&pubj, &s, precPtr, size_t(precPitch), int(window_size), window_ecmult_size);
+    secp256k1_ge pub;
+    secp256k1_ge_set_gej(&pub, &pubj);
+    secp256k1_fe_normalize_var(&pub.x);
+    secp256k1_fe_normalize_var(&pub.y);
+
+    uchar x32[32];
+    uchar y32[32];
+    secp256k1_fe_get_b32(x32, &pub.x);
+    secp256k1_fe_get_b32(y32, &pub.y);
+    if (out_len == 33u) {
+        out[0] = secp256k1_fe_is_odd(&pub.y) ? 0x03u : 0x02u;
+        for (int i = 0; i < 32; ++i) {
+            out[1 + i] = x32[i];
+        }
+    } else {
+        out[0] = 0x04u;
+        for (int i = 0; i < 32; ++i) {
+            out[1 + i] = x32[i];
+            out[33 + i] = y32[i];
+        }
+    }
+    return true;
+}
+
+static inline void wallet_zero_result(device WalletModeResult& out) {
+    out.mode = 0u;
+    out.type = 0u;
+    out.password_len = 0u;
+    out.target_index = 0u;
+    for (int i = 0; i < int(WALLET_PASS_STRIDE); ++i) {
+        out.password[i] = 0u;
+    }
+    for (int i = 0; i < 32; ++i) {
+        out.priv[i] = 0u;
+    }
+    for (int i = 0; i < int(WALLETDAT_MAX_PUBKEY_LEN); ++i) {
+        out.payload[i] = 0u;
+    }
+    out.payload_len = 0u;
+    for (int i = 0; i < 6; ++i) {
+        out.reserved[i] = 0u;
+    }
+}
+
+static inline ulong wallet_atomic_add_count(device atomic_uint* wallet_count, uint value) {
+    const uint low = atomic_fetch_add_explicit(wallet_count, value, memory_order_relaxed);
+    if (low + value < low) {
+        atomic_fetch_add_explicit(wallet_count + 1, 1u, memory_order_relaxed);
+    }
+    const uint high = atomic_load_explicit(wallet_count + 1, memory_order_relaxed);
+    return (ulong(high) << 32) | ulong(low);
+}
+
+static inline void wallet_emit_walletdat_result(device bool* isResult,
+                                                device bool* buffResult,
+                                                const thread uchar* pass,
+                                                uint pass_len,
+                                                uint target_index,
+                                                const thread uchar priv32[32],
+                                                const device uchar* pubkey,
+                                                uint pubkey_len,
+                                                device WalletModeResult* wallet_results,
+                                                device atomic_uint* wallet_count,
+                                                uint max_founds) {
+    if (buffResult != nullptr) {
+        buffResult[0] = true;
+    }
+    if (isResult != nullptr) {
+        isResult[0] = true;
+    }
+    if (wallet_results == nullptr || wallet_count == nullptr) {
+        return;
+    }
+    const ulong ridx = wallet_atomic_add_count(wallet_count, 1u);
+    if (ridx >= ulong(max_founds)) {
+        return;
+    }
+    device WalletModeResult& out = wallet_results[ridx];
+    wallet_zero_result(out);
+    out.mode = WALLET_MODE_WALLETDAT;
+    out.type = WALLET_DAT_RESULT_PRIV;
+    out.target_index = target_index;
+    const uint n = (pass_len > WALLET_MAX_PASSWORD_LEN) ? WALLET_MAX_PASSWORD_LEN : pass_len;
+    out.password_len = ushort(n);
+    for (uint i = 0u; i < n; ++i) {
+        out.password[i] = pass[i];
+    }
+    for (int i = 0; i < 32; ++i) {
+        out.priv[i] = priv32[i];
+    }
+    const uint p = (pubkey_len > WALLETDAT_MAX_PUBKEY_LEN) ? WALLETDAT_MAX_PUBKEY_LEN : pubkey_len;
+    for (uint i = 0u; i < p; ++i) {
+        out.payload[i] = pubkey[i];
+    }
+    out.payload_len = uchar(p);
+}
+
+static inline void wallet_emit_walletdat_mkey_result(device bool* isResult,
+                                                     device bool* buffResult,
+                                                     const thread uchar* pass,
+                                                     uint pass_len,
+                                                     uint target_index,
+                                                     const device uchar* crypted_master,
+                                                     uint crypted_master_len,
+                                                     device WalletModeResult* wallet_results,
+                                                     device atomic_uint* wallet_count,
+                                                     uint max_founds) {
+    if (buffResult != nullptr) {
+        buffResult[0] = true;
+    }
+    if (isResult != nullptr) {
+        isResult[0] = true;
+    }
+    if (wallet_results == nullptr || wallet_count == nullptr) {
+        return;
+    }
+    const ulong ridx = wallet_atomic_add_count(wallet_count, 1u);
+    if (ridx >= ulong(max_founds)) {
+        return;
+    }
+    device WalletModeResult& out = wallet_results[ridx];
+    wallet_zero_result(out);
+    out.mode = WALLET_MODE_WALLETDAT;
+    out.type = WALLET_DAT_RESULT_MKEY_ONLY;
+    out.target_index = target_index;
+    const uint n = (pass_len > WALLET_MAX_PASSWORD_LEN) ? WALLET_MAX_PASSWORD_LEN : pass_len;
+    out.password_len = ushort(n);
+    for (uint i = 0u; i < n; ++i) {
+        out.password[i] = pass[i];
+    }
+    const uint p = (crypted_master_len > 32u) ? 32u : crypted_master_len;
+    for (uint i = 0u; i < p; ++i) {
+        out.payload[i] = crypted_master[i];
+    }
+    out.payload_len = uchar(p);
+}
+
+static inline void walletdat_verify_and_emit_slow(device bool* isResult,
+                                                  device bool* buffResult,
+                                                  const constant secp256k1_ge_storage* precPtr,
+                                                  ulong precPitch,
+                                                  uint window_size,
+                                                  uint window_ecmult_size,
+                                                  const device WalletDatTarget& target,
+                                                  const thread uchar* pass,
+                                                  uint pass_len,
+                                                  const thread uchar key32[32],
+                                                  const thread uchar iv16[16],
+                                                  device WalletModeResult* wallet_results,
+                                                  device atomic_uint* wallet_count,
+                                                  uint max_founds) {
+    uchar master_plain[WALLETDAT_MAX_CRYPTED_KEY_LEN];
+    uint master_len = 0u;
+    if (!wallet_aes256_cbc_decrypt_pkcs7(key32, iv16, target.crypted_master,
+                                         target.crypted_master_len, master_plain, &master_len)) {
+        return;
+    }
+    if (master_len < 32u) {
+        return;
+    }
+    for (uint slot = 0u; slot < target.ckey_count; ++slot) {
+        const uint crypted_key_len = target.crypted_key_len[slot];
+        const uint pubkey_len = target.pubkey_len[slot];
+        if (crypted_key_len == 0u || crypted_key_len > WALLETDAT_MAX_CRYPTED_KEY_LEN ||
+            (crypted_key_len & 15u) != 0u ||
+            (pubkey_len != 33u && pubkey_len != 65u)) {
+            continue;
+        }
+        uchar ckey_iv16[16];
+        for (int i = 0; i < 16; ++i) {
+            ckey_iv16[i] = target.ckey_iv[slot][i];
+        }
+        uchar priv_plain[WALLETDAT_MAX_CRYPTED_KEY_LEN];
+        uint priv_len = 0u;
+        if (!wallet_aes256_cbc_decrypt_pkcs7(master_plain, ckey_iv16, target.crypted_key[slot],
+                                             crypted_key_len, priv_plain, &priv_len)) {
+            continue;
+        }
+        if (priv_len != 32u) {
+            continue;
+        }
+        uchar pub[65];
+        if (!walletdat_pubkey_from_private(precPtr, precPitch, window_size, window_ecmult_size,
+                                           priv_plain, pub, pubkey_len)) {
+            continue;
+        }
+        if (!wallet_bytes_equal(pub, target.pubkey[slot], pubkey_len)) {
+            continue;
+        }
+        wallet_emit_walletdat_result(isResult, buffResult, pass, pass_len, target.target_index,
+                                     priv_plain, target.pubkey[slot], pubkey_len,
+                                     wallet_results, wallet_count, max_founds);
+        return;
+    }
+}
+
+#endif

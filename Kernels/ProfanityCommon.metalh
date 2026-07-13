@@ -1,0 +1,275 @@
+#ifndef METAL_CRYPTO_PROFANITY_COMMON_METALH
+#define METAL_CRYPTO_PROFANITY_COMMON_METALH
+
+#include <metal_stdlib>
+
+using namespace metal;
+
+constant ulong PROFANITY_BASEPOINT_X_TAG64 = 0x50524f46414e5831ul;
+constant ulong PROFANITY_FNV64_OFFSET = 0xcbf29ce484222325ul;
+constant ulong PROFANITY_FNV64_PRIME = 0x100000001b3ul;
+
+#ifndef METAL_CRYPTO_PROFANITY_TYPES_DEFINED
+#define METAL_CRYPTO_PROFANITY_TYPES_DEFINED
+
+struct ProfanityUint128 {
+    ulong m_lo;
+    ulong m_hi;
+};
+
+struct ProfanitySeedWords {
+    ulong s[4];
+};
+
+struct ProfanityXKeys {
+    ulong key64;
+    ProfanityUint128 key128;
+};
+
+struct ProfanityRecoveryHit {
+    uchar x32[32];
+    ulong offset;
+    ulong lane_id;
+    uchar filter_type;
+    uchar reserved[7];
+};
+
+struct ProfanityVerifiedResult {
+    uchar priv[32];
+    uchar x32[32];
+    uchar payload[32];
+    ulong lane_id;
+    ulong round;
+    uint seed32;
+    uchar type;
+    uchar payload_len;
+    uchar reserved[2];
+};
+
+typedef ProfanityVerifiedResult ProfanityRecoveryVerifiedResult;
+
+struct ProfanityWalkState {
+    ulong x[4];
+    ulong y[4];
+};
+
+#endif
+
+static inline ProfanityUint128 profanity_uint128_make(ulong hi, ulong lo) {
+    ProfanityUint128 out;
+    out.m_lo = lo;
+    out.m_hi = hi;
+    return out;
+}
+
+static inline ulong profanity_rotl64(ulong v, uint r) {
+    return (v << (r & 63u)) | (v >> ((64u - r) & 63u));
+}
+
+static inline ulong profanity_mix64(ulong h) {
+    h ^= h >> 33u;
+    h *= 0xff51afd7ed558ccdul;
+    h ^= h >> 33u;
+    h *= 0xc4ceb9fe1a85ec53ul;
+    h ^= h >> 33u;
+    return h;
+}
+
+static inline ulong profanity_load_be64(const thread uchar* p) {
+    ulong v = 0ul;
+    for (int i = 0; i < 8; ++i) {
+        v = (v << 8u) | ulong(p[i]);
+    }
+    return v;
+}
+
+static inline void profanity_store_be64(thread uchar* p, ulong v) {
+    for (int i = 7; i >= 0; --i) {
+        p[i] = uchar(v & 0xffu);
+        v >>= 8u;
+    }
+}
+
+static inline void profanity_store_x32_from_u64x4(const thread ulong x[4],
+                                                  thread uchar out32[32]) {
+    profanity_store_be64(out32 + 0, x[3]);
+    profanity_store_be64(out32 + 8, x[2]);
+    profanity_store_be64(out32 + 16, x[1]);
+    profanity_store_be64(out32 + 24, x[0]);
+}
+
+static inline ulong profanity_load_le64(const thread uchar* p) {
+    ulong v = 0ul;
+    for (int i = 7; i >= 0; --i) {
+        v = (v << 8u) | ulong(p[i]);
+    }
+    return v;
+}
+
+static inline ulong profanity_load_le64(const device uchar* p) {
+    ulong v = 0ul;
+    for (int i = 7; i >= 0; --i) {
+        v = (v << 8u) | ulong(p[i]);
+    }
+    return v;
+}
+
+static inline void profanity_store_le64(thread uchar* p, ulong v) {
+    for (int i = 0; i < 8; ++i) {
+        p[i] = uchar(v & 0xffu);
+        v >>= 8u;
+    }
+}
+
+static inline ulong profanity_fnv1a_64_20(const thread uchar input20[20]) {
+    ulong h = PROFANITY_FNV64_OFFSET;
+    for (int i = 0; i < 20; ++i) {
+        h ^= ulong(input20[i]);
+        h *= PROFANITY_FNV64_PRIME;
+    }
+    return h;
+}
+
+static inline void profanity_x_filter_value20_from_x32(const thread uchar x32[32],
+                                                       thread uchar out20[20]) {
+    for (int i = 0; i < 20; ++i) {
+        out20[i] = x32[i];
+    }
+}
+
+static inline ProfanityXKeys profanity_x_key_from_x32(const thread uchar x32[32]) {
+    uchar raw20[20];
+    profanity_x_filter_value20_from_x32(x32, raw20);
+
+    uchar masked20[20];
+    for (int i = 0; i < 20; ++i) {
+        masked20[i] = raw20[i];
+    }
+    masked20[3] &= masked20[16];
+    masked20[7] &= masked20[17];
+    masked20[11] &= masked20[18];
+    masked20[15] &= masked20[19];
+
+    ProfanityXKeys out;
+    out.key64 = profanity_fnv1a_64_20(raw20);
+    out.key128 = profanity_uint128_make(profanity_load_le64(masked20 + 8),
+                                        profanity_load_le64(masked20 + 0));
+    return out;
+}
+
+struct ProfanityMT19937_64 {
+    ulong mt[312];
+    int mti;
+};
+
+static inline ProfanityMT19937_64 profanity_mt19937_64_init(ulong seed) {
+    ProfanityMT19937_64 out;
+    out.mt[0] = seed;
+    for (out.mti = 1; out.mti < 312; ++out.mti) {
+        out.mt[out.mti] = 6364136223846793005ul *
+            (out.mt[out.mti - 1] ^ (out.mt[out.mti - 1] >> 62u)) + ulong(out.mti);
+    }
+    return out;
+}
+
+static inline ulong profanity_mt19937_64_next(thread ProfanityMT19937_64& rng) {
+    const int NN = 312;
+    const int MM = 156;
+    const ulong MATRIX_A = 0xB5026F5AA96619E9ul;
+    const ulong UM = 0xFFFFFFFF80000000ul;
+    const ulong LM = 0x7FFFFFFFul;
+
+    ulong x;
+    if (rng.mti >= NN) {
+        int i;
+        for (i = 0; i < NN - MM; ++i) {
+            x = (rng.mt[i] & UM) | (rng.mt[i + 1] & LM);
+            rng.mt[i] = rng.mt[i + MM] ^ (x >> 1u) ^ ((x & 1ul) ? MATRIX_A : 0ul);
+        }
+        for (; i < NN - 1; ++i) {
+            x = (rng.mt[i] & UM) | (rng.mt[i + 1] & LM);
+            rng.mt[i] = rng.mt[i + (MM - NN)] ^ (x >> 1u) ^ ((x & 1ul) ? MATRIX_A : 0ul);
+        }
+        x = (rng.mt[NN - 1] & UM) | (rng.mt[0] & LM);
+        rng.mt[NN - 1] = rng.mt[MM - 1] ^ (x >> 1u) ^ ((x & 1ul) ? MATRIX_A : 0ul);
+        rng.mti = 0;
+    }
+    x = rng.mt[rng.mti++];
+    x ^= (x >> 29u) & 0x5555555555555555ul;
+    x ^= (x << 17u) & 0x71D67FFFEDA60000ul;
+    x ^= (x << 37u) & 0xFFF7EEE000000000ul;
+    x ^= (x >> 43u);
+    return x;
+}
+
+static inline ProfanitySeedWords profanity_seed_words(uint seed32) {
+    ProfanityMT19937_64 mt = profanity_mt19937_64_init(ulong(seed32));
+    ProfanitySeedWords out;
+    out.s[0] = profanity_mt19937_64_next(mt);
+    out.s[1] = profanity_mt19937_64_next(mt);
+    out.s[2] = profanity_mt19937_64_next(mt);
+    out.s[3] = profanity_mt19937_64_next(mt);
+    return out;
+}
+
+static inline void profanity_words_add_offset64(thread ProfanitySeedWords& w,
+                                                ulong offset) {
+    const ulong old0 = w.s[0];
+    w.s[0] += offset;
+    ulong carry = (w.s[0] < old0) ? 1ul : 0ul;
+    for (int i = 1; i < 4 && carry; ++i) {
+        const ulong old = w.s[i];
+        w.s[i] += carry;
+        carry = (w.s[i] < old) ? 1ul : 0ul;
+    }
+}
+
+static inline void profanity_words_add_lane_round(thread ProfanitySeedWords& w,
+                                                  ulong lane_id,
+                                                  ulong round) {
+    w.s[0] += round;
+    ulong carry = (w.s[0] < round) ? 1ul : 0ul;
+    w.s[1] += carry;
+    carry = (w.s[1] == 0ul) ? 1ul : 0ul;
+    w.s[2] += carry;
+    carry = (w.s[2] == 0ul) ? 1ul : 0ul;
+    w.s[3] += carry + lane_id;
+}
+
+static inline void profanity_words_to_private_bytes(const thread ProfanitySeedWords& base,
+                                                    ulong offset,
+                                                    thread uchar out32[32]) {
+    ProfanitySeedWords w = base;
+    profanity_words_add_offset64(w, offset);
+    profanity_store_be64(out32 + 0, w.s[3]);
+    profanity_store_be64(out32 + 8, w.s[2]);
+    profanity_store_be64(out32 + 16, w.s[1]);
+    profanity_store_be64(out32 + 24, w.s[0]);
+}
+
+static inline void profanity_words_to_private_bytes_lane_round(const thread ProfanitySeedWords& base,
+                                                               ulong lane_id,
+                                                               ulong round,
+                                                               thread uchar out32[32]) {
+    ProfanitySeedWords w = base;
+    profanity_words_add_lane_round(w, lane_id, round);
+    profanity_store_be64(out32 + 0, w.s[3]);
+    profanity_store_be64(out32 + 8, w.s[2]);
+    profanity_store_be64(out32 + 16, w.s[1]);
+    profanity_store_be64(out32 + 24, w.s[0]);
+}
+
+static inline void profanity_private_bytes(uint seed32, ulong offset, thread uchar out32[32]) {
+    ProfanitySeedWords w = profanity_seed_words(seed32);
+    profanity_words_to_private_bytes(w, offset, out32);
+}
+
+static inline void profanity_private_bytes_lane_round(uint seed32,
+                                                      ulong lane_id,
+                                                      ulong round,
+                                                      thread uchar out32[32]) {
+    ProfanitySeedWords w = profanity_seed_words(seed32);
+    profanity_words_to_private_bytes_lane_round(w, lane_id, round, out32);
+}
+
+#endif

@@ -1,0 +1,6 @@
+#ifndef METAL_CRYPTO_WORKER_WALLETJS_COMMON_METALH
+#define METAL_CRYPTO_WORKER_WALLETJS_COMMON_METALH
+
+#include "WorkerKeystoreCommon.metalh"
+
+#endif

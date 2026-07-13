@@ -1,0 +1,343 @@
+#ifndef METAL_CRYPTO_ADA_FUNC_METALH
+#define METAL_CRYPTO_ADA_FUNC_METALH
+
+#include "GPUHash.metalh"
+#include "Pbkdf2Func.metalh"
+
+#ifdef memcpy
+#undef memcpy
+#endif
+#ifdef memset
+#undef memset
+#endif
+#ifdef CBOR_MT_UINT
+#undef CBOR_MT_UINT
+#endif
+#ifdef CBOR_MT_BYTES
+#undef CBOR_MT_BYTES
+#endif
+#ifdef CBOR_MT_ARRAY
+#undef CBOR_MT_ARRAY
+#endif
+#ifdef CBOR_MT_MAP
+#undef CBOR_MT_MAP
+#endif
+#ifdef CBOR_MT_TAG
+#undef CBOR_MT_TAG
+#endif
+#ifdef CBOR_ARRAY
+#undef CBOR_ARRAY
+#endif
+#ifdef CBOR_MAP
+#undef CBOR_MAP
+#endif
+
+static inline void ada_memcpy(thread uchar* dst, const thread uchar* src, const ulong len) {
+    for (ulong i = 0; i < len; ++i) {
+        dst[i] = src[i];
+    }
+}
+
+static inline void ada_memcpy(thread uchar* dst, const constant uchar* src, const ulong len) {
+    for (ulong i = 0; i < len; ++i) {
+        dst[i] = src[i];
+    }
+}
+
+static inline void ada_memset(thread uchar* dst, const uchar value, const ulong len) {
+    for (ulong i = 0; i < len; ++i) {
+        dst[i] = value;
+    }
+}
+
+#define memcpy(DST, SRC, LEN) ada_memcpy(reinterpret_cast<thread uchar*>(DST), SRC, ulong(LEN))
+#define memset(DST, VALUE, LEN) ada_memset(reinterpret_cast<thread uchar*>(DST), uchar(VALUE), ulong(LEN))
+
+
+//Byron Icarus Cardano helper func.
+#define CBOR_MT_UINT  0x00
+#define CBOR_MT_BYTES 0x40
+#define CBOR_MT_ARRAY 0x80
+#define CBOR_MT_MAP   0xA0
+#define CBOR_MT_TAG   0xC0
+#define CBOR_ARRAY(n) (uchar)(CBOR_MT_ARRAY | ((n) & 0x1F))
+#define CBOR_MAP(n)   (uchar)(CBOR_MT_MAP   | ((n) & 0x1F))
+
+
+// Appends one byte to a CBOR buffer and advances offset.
+static inline void w1(thread uchar* out, thread ulong* off, const uchar b) { out[(*off)++] = b; }
+
+// Encodes a small unsigned integer in CBOR format.
+static inline void cbor_uint_small(thread uchar* out, thread ulong* off, const uint v) {
+    if (v <= 23) {
+        w1(out, off, (uchar)(CBOR_MT_UINT | (v & 0x1F)));
+    }
+    else if (v <= 0xFFu) {
+        w1(out, off, (uchar)(CBOR_MT_UINT | 24));
+        w1(out, off, (uchar)v);
+    }
+    else if (v <= 0xFFFFu) {
+        w1(out, off, (uchar)(CBOR_MT_UINT | 25));
+        w1(out, off, (uchar)(v >> 8));
+        w1(out, off, (uchar)(v));
+    }
+    else {
+        w1(out, off, (uchar)(CBOR_MT_UINT | 26));
+        w1(out, off, (uchar)(v >> 24));
+        w1(out, off, (uchar)(v >> 16));
+        w1(out, off, (uchar)(v >> 8));
+        w1(out, off, (uchar)(v));
+    }
+}
+
+// Encodes a byte string in CBOR format.
+static inline void cbor_bytes(thread uchar* out, thread ulong* off, const thread uchar* bytes, const ulong len) {
+    if (len <= 23) {
+        w1(out, off, (uchar)(CBOR_MT_BYTES | (uchar)len));
+    }
+    else if (len <= 0xFF) {
+        w1(out, off, (uchar)(CBOR_MT_BYTES | 24));
+        w1(out, off, (uchar)len);
+    }
+    else {
+        w1(out, off, (uchar)(CBOR_MT_BYTES | 25));
+        w1(out, off, (uchar)(len >> 8));
+        w1(out, off, (uchar)(len));
+    }
+    for (ulong i = 0; i < len; ++i) out[(*off)++] = bytes[i];
+}
+
+// Emits CBOR tag #24 marker.
+static inline void cbor_tag_24(thread uchar* out, thread ulong* off) {
+    w1(out, off, (uchar)(CBOR_MT_TAG | 24));
+    w1(out, off, 24);
+}
+
+// Builds Byron-Icarus inner payload from a 32-byte public key.
+static inline ulong build_inner_for_root_from_pubkey_mainnet(const thread uchar publ[32], thread uchar* out_inner) {
+    ulong off = 0;
+    w1(out_inner, &off, CBOR_ARRAY(3));
+    cbor_uint_small(out_inner, &off, 0);
+    w1(out_inner, &off, CBOR_ARRAY(2));
+    cbor_uint_small(out_inner, &off, 0);
+    cbor_bytes(out_inner, &off, publ, 32);
+    w1(out_inner, &off, CBOR_MAP(0));
+    return off;
+}
+
+// Computes Byron-Icarus address root (Blake2b-224 over SHA3-256).
+static inline void compute_address_root_from_pubkey_mainnet(const thread uchar publ[32], thread uchar out_root28[28]) {
+    uchar inner[64];
+    ulong inner_len = build_inner_for_root_from_pubkey_mainnet(publ, inner);
+    uchar h_sha3[32];
+    sha3_256(reinterpret_cast<thread char*>(inner), inner_len, h_sha3);
+    Blake2b_224(h_sha3, 32, out_root28);
+}
+
+// Builds Byron-Icarus address payload from root hash.
+static inline ulong build_payload_mainnet(const thread uchar addressRoot28[28], thread uchar* out_payload) {
+    ulong off = 0;
+    w1(out_payload, &off, CBOR_ARRAY(3));
+    cbor_bytes(out_payload, &off, addressRoot28, 28);
+    w1(out_payload, &off, CBOR_MAP(0));
+    cbor_uint_small(out_payload, &off, 0);
+    return off;
+}
+
+// Wraps payload into outer CBOR structure with CRC32 and tag #24.
+static inline ulong build_outer_with_crc_and_tag24(const thread uchar* payload, const ulong payload_len, thread uchar* out_outer) {
+    ulong off = 0;
+    w1(out_outer, &off, CBOR_ARRAY(2));
+    cbor_tag_24(out_outer, &off);
+    cbor_bytes(out_outer, &off, payload, payload_len);
+    uint crc = crc32_ieee(payload, payload_len);
+    cbor_uint_small(out_outer, &off, crc);
+    return off;
+}
+
+// Builds a Byron-Icarus full outer payload directly from public key.
+static inline void byron_from_pubkey(const thread uchar* publ, thread uchar* out) {
+    uchar root28[28];
+    compute_address_root_from_pubkey_mainnet(publ, root28);
+    uchar payload[64];
+    ulong payload_len = build_payload_mainnet(root28, payload);
+    ulong out_len = build_outer_with_crc_and_tag24(payload, payload_len, out);
+    (void)out_len;
+
+}
+
+
+//Byron Daedalus Cardano
+
+
+// ChaCha20-Poly1305
+#define BYRON_HD_NONCE_LEN 12
+constant uchar BYRON_HD_NONCE[BYRON_HD_NONCE_LEN] =
+{ 's','e','r','o','k','e','l','l','f','o','r','e' }; // "serokellfore"
+
+#define BYRON_HD_PBKDF2_ITERS 500
+#define BYRON_HD_PBKDF2_DKLEN 32
+constant char BYRON_HD_SALT[] = "address-hashing";
+
+// Derives Byron HD passphrase key from root xpub public key + chain code.
+static inline void byron_hd_passphrase_from_xpub(
+    const thread uchar xpub_pub[32],
+    const thread uchar xpub_cc[32],
+    thread uchar out32[32])
+{
+    uchar pwd[64];
+    memcpy(pwd, xpub_pub, 32);
+    memcpy(pwd + 32, xpub_cc, 32);
+
+    fastpbkdf2_hmac_sha512(
+        pwd, 64,
+        reinterpret_cast<const constant uchar*>(BYRON_HD_SALT), sizeof(BYRON_HD_SALT) - 1,
+        BYRON_HD_PBKDF2_ITERS,
+        out32, BYRON_HD_PBKDF2_DKLEN);
+}
+
+// Encodes [accountIndex, addressIndex] derivation path as the legacy
+// Daedalus indefinite CBOR array used before ChaCha20-Poly1305 encryption.
+static inline ulong cbor_derivation_path_2_u32_indef(
+    thread uchar* out, const uint accIx, const uint addrIx)
+{
+    ulong off = 0;
+    w1(out, &off, 0x9f);
+    cbor_uint_small(out, &off, accIx);
+    cbor_uint_small(out, &off, addrIx);
+    w1(out, &off, 0xff);
+    return off;
+}
+
+
+// Encrypts derivation path using Byron HD passphrase (ChaCha20-Poly1305).
+static inline ulong encrypt_derivation_path_daedalus(
+    const thread uchar xpub_pub[32],
+    const thread uchar xpub_cc[32],
+    const uint accIx, const uint addrIx,
+    thread uchar* out_encrypted)
+{
+    uchar path_cbor[32];
+    ulong path_len = cbor_derivation_path_2_u32_indef(path_cbor, accIx, addrIx);
+
+    uchar key[32];
+    byron_hd_passphrase_from_xpub(xpub_pub, xpub_cc, key);
+
+    uchar encrypted[64];
+    uchar tag[16];
+    uchar nonce[BYRON_HD_NONCE_LEN];
+    memcpy(nonce, BYRON_HD_NONCE, BYRON_HD_NONCE_LEN);
+    chacha20poly1305_encrypt(
+        key,
+        nonce,
+        path_cbor, path_len,
+        encrypted,
+        tag);
+
+    memcpy(encrypted + path_len, tag, 16);
+
+    ulong out_off = 0;
+    cbor_bytes(out_encrypted, &out_off, encrypted, path_len + 16);
+    return out_off;
+}
+
+// Builds Byron-Daedalus inner payload from child xpub and encrypted derivation path.
+static inline ulong build_inner_for_root_daedalus_mainnet(
+    const thread uchar publ[32],
+    const thread uchar pub_cc[32],
+    const thread uchar* enc_deriv, const ulong enc_len,
+    thread uchar* out_inner)
+{
+    ulong off = 0;
+    w1(out_inner, &off, CBOR_ARRAY(3));
+
+    cbor_uint_small(out_inner, &off, 0);
+
+    w1(out_inner, &off, CBOR_ARRAY(2));
+    cbor_uint_small(out_inner, &off, 0);
+
+    uchar xpub[64];
+    memcpy(xpub, publ, 32);
+    memcpy(xpub + 32, pub_cc, 32);
+    cbor_bytes(out_inner, &off, xpub, 64);
+
+    w1(out_inner, &off, CBOR_MAP(1));
+    cbor_uint_small(out_inner, &off, 1);
+    cbor_bytes(out_inner, &off, enc_deriv, enc_len);
+
+    return off;
+}
+
+// Computes Byron-Daedalus address root (Blake2b-224 over SHA3-256).
+static inline void compute_address_root_daedalus_mainnet(
+    const thread uchar publ[32],
+    const thread uchar pub_cc[32],
+    const thread uchar* enc_deriv, const ulong enc_len,
+    thread uchar out_root28[28])
+{
+    uchar inner[128];
+    ulong inner_len = build_inner_for_root_daedalus_mainnet(publ, pub_cc, enc_deriv, enc_len, inner);
+
+    uchar h_sha3[32];
+    sha3_256(reinterpret_cast<thread char*>(inner), inner_len, h_sha3);
+    Blake2b_224(h_sha3, 32, out_root28);
+}
+
+// Builds Byron-Daedalus payload with encrypted derivation path map entry.
+static inline ulong build_payload_daedalus_mainnet(
+    const thread uchar addressRoot28[28],
+    const thread uchar* enc_deriv, const ulong enc_len,
+    thread uchar* out_payload)
+{
+    ulong off = 0;
+    // [ addressRoot(28B), { 1: enc_deriv }, AddrType=0 ]
+    w1(out_payload, &off, CBOR_ARRAY(3));
+    cbor_bytes(out_payload, &off, addressRoot28, 28);
+
+    w1(out_payload, &off, CBOR_MAP(1));
+    cbor_uint_small(out_payload, &off, 1);
+    cbor_bytes(out_payload, &off, enc_deriv, enc_len);
+
+    cbor_uint_small(out_payload, &off, 0);
+    return off;
+}
+
+// Builds full Byron-Daedalus outer payload for a child address from root xpub.
+static inline ulong byron_daedalus_from_root_xpub(
+    const thread uchar root_xpub_pub[32],
+    const thread uchar root_xpub_cc[32],
+    const thread uchar child_pub[32],
+    const thread uchar child_cc[32],
+    const uint accIx,
+    const uint addrIx,
+    thread uchar* out_outer)
+{
+    uchar enc_dp[80];
+    ulong enc_len = encrypt_derivation_path_daedalus(
+        root_xpub_pub, root_xpub_cc,
+        accIx, addrIx,
+        enc_dp);
+    if (enc_len == 0) return 0;
+
+    uchar root28[28];
+    compute_address_root_daedalus_mainnet(child_pub, child_cc, enc_dp, enc_len, root28);
+
+    uchar payload[128];
+    ulong payload_len = build_payload_daedalus_mainnet(root28, enc_dp, enc_len, payload);
+    if (payload_len > sizeof(payload)) return 0;
+
+    ulong off = 0;
+    w1(out_outer, &off, CBOR_ARRAY(2));
+    cbor_tag_24(out_outer, &off);
+    cbor_bytes(out_outer, &off, payload, payload_len);
+    uint crc = crc32_ieee(payload, payload_len);
+    cbor_uint_small(out_outer, &off, crc);
+    return off;
+}
+
+
+
+#undef memcpy
+#undef memset
+
+#endif

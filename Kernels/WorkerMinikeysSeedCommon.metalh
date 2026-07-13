@@ -1,0 +1,332 @@
+#ifndef METAL_CRYPTO_WORKER_MINIKEYS_SEED_COMMON_METALH
+#define METAL_CRYPTO_WORKER_MINIKEYS_SEED_COMMON_METALH
+
+#include "../KernelState.metalh"
+#include "GPUHash.metalh"
+
+#define MINIKEY_STAGE_STRIDE 31u
+
+static inline constant char* minikey_seed_base58_alphabet() {
+    return "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
+}
+
+static inline bool minikey_seed_is_supported_len(const uchar total_len) {
+    return (total_len == 22u) || (total_len == 26u) || (total_len == 30u);
+}
+
+template <int MSG_LEN>
+static inline bool minikey_seed_sha256_first_byte_zero_fixed(const thread uchar* msg) {
+    if (msg == nullptr) {
+        return false;
+    }
+
+    uint s[8];
+    uint w[16];
+
+    SHA256Initialize(s);
+
+    for (int i = 0; i < 16; ++i) {
+        w[i] = 0u;
+    }
+
+    for (int i = 0; i < MSG_LEN; ++i) {
+        const uint wi = uint(i >> 2);
+        const uint sh = uint((3 - (i & 3)) * 8);
+        w[wi] |= uint(msg[i]) << sh;
+    }
+
+    {
+        const uint pad_word = uint(MSG_LEN >> 2);
+        const uint pad_shift = uint((3 - (MSG_LEN & 3)) * 8);
+        w[pad_word] |= (0x80u << pad_shift);
+    }
+    w[15] = uint(MSG_LEN * 8);
+
+    SHA256Transform(s, w);
+    return uchar(s[0] >> 24) == 0u;
+}
+
+static inline bool minikey_seed_check_with_q_fast(const thread uchar* msg_with_q,
+                                                  const uchar target_total_len) {
+    if (msg_with_q == nullptr) {
+        return false;
+    }
+
+    if (target_total_len == 22u) {
+        return minikey_seed_sha256_first_byte_zero_fixed<23>(msg_with_q);
+    }
+    if (target_total_len == 26u) {
+        return minikey_seed_sha256_first_byte_zero_fixed<27>(msg_with_q);
+    }
+    if (target_total_len == 30u) {
+        return minikey_seed_sha256_first_byte_zero_fixed<31>(msg_with_q);
+    }
+
+    uchar check_hash[32];
+    SHA256(msg_with_q, size_t(target_total_len) + 1u, check_hash);
+    return check_hash[0] == 0u;
+}
+
+static inline void minikey_seed_copy_used_bytes(thread uchar* dst,
+                                                const thread uchar* src,
+                                                const uchar len) {
+    if (dst == nullptr || src == nullptr || len == 0u) {
+        return;
+    }
+
+    switch (len) {
+    case 22u:
+        for (int i = 0; i < 22; ++i) dst[i] = src[i];
+        return;
+    case 26u:
+        for (int i = 0; i < 26; ++i) dst[i] = src[i];
+        return;
+    case 30u:
+        for (int i = 0; i < 30; ++i) dst[i] = src[i];
+        return;
+    default:
+        for (int i = 0; i < int(len); ++i) dst[i] = src[i];
+        return;
+    }
+}
+
+static inline void minikey_seed_copy_used_bytes(device uchar* dst,
+                                                const thread uchar* src,
+                                                const uchar len) {
+    if (dst == nullptr || src == nullptr || len == 0u) {
+        return;
+    }
+
+    switch (len) {
+    case 22u:
+        for (int i = 0; i < 22; ++i) dst[i] = src[i];
+        return;
+    case 26u:
+        for (int i = 0; i < 26; ++i) dst[i] = src[i];
+        return;
+    case 30u:
+        for (int i = 0; i < 30; ++i) dst[i] = src[i];
+        return;
+    default:
+        for (int i = 0; i < int(len); ++i) dst[i] = src[i];
+        return;
+    }
+}
+
+static inline int minikey_seed_base58_encode_37(const thread uchar in37[37],
+                                                thread char* out,
+                                                const int out_cap) {
+    if (out == nullptr || out_cap <= 1) {
+        return -1;
+    }
+
+    int zeros = 0;
+    while (zeros < 37 && in37[zeros] == 0u) {
+        ++zeros;
+    }
+
+    uchar digits[64];
+    digits[0] = 0u;
+    int digits_len = 1;
+    for (int i = zeros; i < 37; ++i) {
+        uint carry = uint(in37[i]);
+        for (int j = 0; j < digits_len; ++j) {
+            carry += uint(digits[j]) << 8u;
+            digits[j] = uchar(carry % 58u);
+            carry /= 58u;
+        }
+        while (carry != 0u) {
+            if (digits_len >= 64) {
+                return -1;
+            }
+            digits[digits_len++] = uchar(carry % 58u);
+            carry /= 58u;
+        }
+    }
+
+    constant char* alphabet = minikey_seed_base58_alphabet();
+    int out_len = 0;
+    for (int i = 0; i < zeros; ++i) {
+        if (out_len >= out_cap - 1) {
+            return -1;
+        }
+        out[out_len++] = '1';
+    }
+    for (int i = digits_len - 1; i >= 0; --i) {
+        if (out_len >= out_cap - 1) {
+            return -1;
+        }
+        out[out_len++] = alphabet[digits[i]];
+    }
+    if (out_len == 0) {
+        if (out_cap <= 1) {
+            return -1;
+        }
+        out[out_len++] = '1';
+    }
+    out[out_len] = '\0';
+    return out_len;
+}
+
+static inline bool minikey_seed_next_char(thread uchar& c, thread bool& carry) {
+    carry = false;
+    if (c == uchar('9')) {
+        c = uchar('A');
+        return true;
+    }
+    if (c == uchar('H')) {
+        c = uchar('J');
+        return true;
+    }
+    if (c == uchar('N')) {
+        c = uchar('P');
+        return true;
+    }
+    if (c == uchar('Z')) {
+        c = uchar('a');
+        return true;
+    }
+    if (c == uchar('k')) {
+        c = uchar('m');
+        return true;
+    }
+    if (c == uchar('z')) {
+        c = uchar('2');
+        carry = true;
+        return true;
+    }
+    c = uchar(c + 1u);
+    return true;
+}
+
+static inline bool minikey_seed_private_from_seed(const thread uchar* seed,
+                                                  const uint seed_len,
+                                                  const uchar target_total_len,
+                                                  thread uchar* out_priv,
+                                                  thread uchar out_minikey[31],
+                                                  thread uchar* out_minikey_len) {
+    if (seed == nullptr || !minikey_seed_is_supported_len(target_total_len)) {
+        return false;
+    }
+
+    uchar seed_hash[32];
+    SHA256(seed, seed_len, seed_hash);
+
+    uchar payload[33];
+    payload[0] = 0x80u;
+    for (int i = 0; i < 32; ++i) {
+        payload[i + 1] = seed_hash[i];
+    }
+
+    uchar checksum_step1[32];
+    uchar checksum_step2[32];
+    SHA256(payload, 33u, checksum_step1);
+    SHA256(checksum_step1, 32u, checksum_step2);
+
+    uchar payload37[37];
+    for (int i = 0; i < 33; ++i) {
+        payload37[i] = payload[i];
+    }
+    for (int i = 0; i < 4; ++i) {
+        payload37[33 + i] = checksum_step2[i];
+    }
+
+    char as_base58[64];
+    const int base58_len = minikey_seed_base58_encode_37(payload37, as_base58, 64);
+    if (base58_len <= 0) {
+        return false;
+    }
+
+    const uchar suffix_len = uchar(target_total_len - 1u);
+    const int start_pos = 4;
+    uchar minikey[31];
+    minikey[0] = uchar('S');
+
+    int compact_index = 0;
+    int copied = 0;
+    for (int i = 0; i < base58_len; ++i) {
+        const char c = as_base58[i];
+        if (c == '1') {
+            continue;
+        }
+        if (compact_index >= start_pos && copied < int(suffix_len)) {
+            minikey[copied + 1] = uchar(c);
+            ++copied;
+            if (copied == int(suffix_len)) {
+                break;
+            }
+        }
+        ++compact_index;
+    }
+    if (copied != int(suffix_len)) {
+        return false;
+    }
+
+    uchar check_input[31];
+    minikey_seed_copy_used_bytes(check_input, minikey, target_total_len);
+    check_input[target_total_len] = uchar('?');
+
+    int watchdog = 0;
+    while (true) {
+        if (minikey_seed_check_with_q_fast(check_input, target_total_len)) {
+            break;
+        }
+
+        bool advanced = false;
+        for (int pos = int(target_total_len) - 1; pos >= 1; --pos) {
+            bool carry = false;
+            uchar c = minikey[pos];
+            minikey_seed_next_char(c, carry);
+            minikey[pos] = c;
+            check_input[pos] = c;
+            if (!carry) {
+                advanced = true;
+                break;
+            }
+        }
+
+        if (!advanced) {
+            return false;
+        }
+        ++watchdog;
+        if (watchdog > 2000000) {
+            return false;
+        }
+    }
+
+    if (out_minikey != nullptr) {
+        minikey_seed_copy_used_bytes(out_minikey, minikey, target_total_len);
+    }
+    if (out_minikey_len != nullptr) {
+        *out_minikey_len = target_total_len;
+    }
+
+    if (out_priv != nullptr) {
+        SHA256(minikey, target_total_len, out_priv);
+    }
+    return true;
+}
+
+static inline int minikey_seed_hex_nibble(const char c) {
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+}
+
+static inline uint minikey_stage_reserve(device atomic_uint* out_count,
+                                         bool produced,
+                                         ushort simd_lane) {
+    (void)simd_lane;
+    const uint local_count = produced ? 1u : 0u;
+    const uint prior = simd_prefix_exclusive_sum(local_count);
+    const uint total = simd_sum(local_count);
+    uint base = 0u;
+    if (simd_is_first() && total != 0u) {
+        base = atomic_fetch_add_explicit(out_count, total, memory_order_relaxed);
+    }
+    base = simd_broadcast_first(base);
+    return produced ? (base + prior) : 0xffffffffu;
+}
+
+#endif

@@ -1,0 +1,940 @@
+#ifndef METAL_CRYPTO_WORKER_OLD_COMMON_METALH
+#define METAL_CRYPTO_WORKER_OLD_COMMON_METALH
+
+#include "GPUHash.metalh"
+
+static inline void _GetHash160ED(const thread unsigned char* pubkey, thread int& keyLen, thread uint8_t* hash) {
+    _GetHash160ED(const_cast<thread unsigned char*>(pubkey), keyLen, hash);
+}
+
+#include "WorkerPrivCommon.metalh"
+#include "HexsetSeqCommon.metalh"
+#include "PrngCommon.metalh"
+
+using namespace metal;
+
+constant uint WORKER_OLD_THREAD_STEPS = 32u;
+constant uchar WORKER_OLD_HEX_CHARS[16] = {
+    '0', '1', '2', '3', '4', '5', '6', '7',
+    '8', '9', 'a', 'b', 'c', 'd', 'e', 'f'
+};
+
+constant uchar WORKER_OLD_SECP_G65[65] = {
+    0x04u,
+    0x79u,0xbeu,0x66u,0x7eu,0xf9u,0xdcu,0xbbu,0xacu,0x55u,0xa0u,0x62u,0x95u,0xceu,0x87u,0x0bu,0x07u,
+    0x02u,0x9bu,0xfcu,0xdbu,0x2du,0xceu,0x28u,0xd9u,0x59u,0xf2u,0x81u,0x5bu,0x16u,0xf8u,0x17u,0x98u,
+    0x48u,0x3au,0xdau,0x77u,0x26u,0xa3u,0xc4u,0x65u,0x5du,0xa4u,0xfbu,0xfcu,0x0eu,0x11u,0x08u,0xa8u,
+    0xfdu,0x17u,0xb4u,0x48u,0xa6u,0x85u,0x54u,0x19u,0x9cu,0x47u,0xd0u,0x8fu,0xfbu,0x10u,0xd4u,0xb8u
+};
+
+constant uint WORKER_OLD_MAX_PRIV[8] = {
+    0xffffffffu, 0xffffffffu, 0xffffffffu, 0xfffffffeu,
+    0xbaaedce6u, 0xaf48a03bu, 0xbfd25e8cu, 0xd0364141u
+};
+
+constant uint WORKER_OLD_MAX_PRIV_NEG[8] = {
+    0x00000000u, 0x00000000u, 0x00000000u, 0x00000001u,
+    0x45512319u, 0x50b75fc4u, 0x402da173u, 0x2fc9bebfu
+};
+
+static inline void worker_old_init_found(thread FoundBuffers& found,
+                                         device RuntimeConfig& config,
+                                         device char* foundStrings,
+                                         device uchar* foundPrvKeys,
+                                         device uint* foundHash160,
+                                         device uint* foundLen,
+                                         device uchar* foundType,
+                                         device uint* foundDerivations,
+                                         device uint* foundDerivations2,
+                                         device long* foundRound,
+                                         device ulong* foundSeed,
+                                         device atomic_uint* resultsCount) {
+    found.foundStrings = foundStrings;
+    found.foundPrvKeys = foundPrvKeys;
+    found.foundHash160 = foundHash160;
+    found.len = foundLen;
+    found.iter = nullptr;
+    found.type = foundType;
+    found.foundDerivations = foundDerivations;
+    found.foundDerivations2 = foundDerivations2;
+    found.pass = nullptr;
+    found.passSize = nullptr;
+    found.round = foundRound;
+    found.seed = foundSeed;
+    found.resultsCount = resultsCount;
+    found.maxFounds = config.maxFounds;
+}
+
+static inline void worker_old_copy_thread_uchar(thread uchar* dst, const thread uchar* src, uint len) {
+    for (uint i = 0u; i < len; ++i) {
+        dst[i] = src[i];
+    }
+}
+
+static inline void worker_old_copy_device_char(thread char* dst, const device char* src, uint len) {
+    for (uint i = 0u; i < len; ++i) {
+        dst[i] = src[i];
+    }
+}
+
+static inline void worker_old_hexing(thread uchar* buf, uint buf_sz, thread uchar* hexed, uint hexed_sz) {
+    const uint n = (buf_sz < (hexed_sz / 2u)) ? buf_sz : (hexed_sz / 2u);
+    for (uint i = 0u; i < n; ++i) {
+        hexed[2u * i] = WORKER_OLD_HEX_CHARS[(buf[i] >> 4u) & 0x0fu];
+        hexed[2u * i + 1u] = WORKER_OLD_HEX_CHARS[buf[i] & 0x0fu];
+    }
+    if ((2u * n) < hexed_sz) {
+        hexed[2u * n] = 0u;
+    }
+}
+
+static inline void worker_old_entropy_to_hex(const thread uchar* in, uint len, thread uchar* out) {
+    uchar hexed_seed[512];
+    for (uint i = 0u; i < len && (2u * i + 1u) < 512u; ++i) {
+        hexed_seed[i * 2u] = WORKER_OLD_HEX_CHARS[in[i] >> 4u];
+        hexed_seed[i * 2u + 1u] = WORKER_OLD_HEX_CHARS[in[i] & 0x0fu];
+    }
+    for (uint i = 0u; i < len * 2u && i < 512u; ++i) {
+        out[i] = hexed_seed[i];
+    }
+}
+
+static inline uint worker_old_add_256b(thread uint* r, const thread uint* a) {
+    ulong sum;
+    uint carry = 0u;
+    sum = ulong(r[7]) + ulong(a[7]) + ulong(carry); r[7] = uint(sum); carry = uint(sum >> 32u);
+    sum = ulong(r[6]) + ulong(a[6]) + ulong(carry); r[6] = uint(sum); carry = uint(sum >> 32u);
+    sum = ulong(r[5]) + ulong(a[5]) + ulong(carry); r[5] = uint(sum); carry = uint(sum >> 32u);
+    sum = ulong(r[4]) + ulong(a[4]) + ulong(carry); r[4] = uint(sum); carry = uint(sum >> 32u);
+    sum = ulong(r[3]) + ulong(a[3]) + ulong(carry); r[3] = uint(sum); carry = uint(sum >> 32u);
+    sum = ulong(r[2]) + ulong(a[2]) + ulong(carry); r[2] = uint(sum); carry = uint(sum >> 32u);
+    sum = ulong(r[1]) + ulong(a[1]) + ulong(carry); r[1] = uint(sum); carry = uint(sum >> 32u);
+    sum = ulong(r[0]) + ulong(a[0]) + ulong(carry); r[0] = uint(sum); carry = uint(sum >> 32u);
+    return carry;
+}
+
+static inline uint worker_old_add_256b_const(thread uint* r, const constant uint* a) {
+    ulong sum;
+    uint carry = 0u;
+    sum = ulong(r[7]) + ulong(a[7]) + ulong(carry); r[7] = uint(sum); carry = uint(sum >> 32u);
+    sum = ulong(r[6]) + ulong(a[6]) + ulong(carry); r[6] = uint(sum); carry = uint(sum >> 32u);
+    sum = ulong(r[5]) + ulong(a[5]) + ulong(carry); r[5] = uint(sum); carry = uint(sum >> 32u);
+    sum = ulong(r[4]) + ulong(a[4]) + ulong(carry); r[4] = uint(sum); carry = uint(sum >> 32u);
+    sum = ulong(r[3]) + ulong(a[3]) + ulong(carry); r[3] = uint(sum); carry = uint(sum >> 32u);
+    sum = ulong(r[2]) + ulong(a[2]) + ulong(carry); r[2] = uint(sum); carry = uint(sum >> 32u);
+    sum = ulong(r[1]) + ulong(a[1]) + ulong(carry); r[1] = uint(sum); carry = uint(sum >> 32u);
+    sum = ulong(r[0]) + ulong(a[0]) + ulong(carry); r[0] = uint(sum); carry = uint(sum >> 32u);
+    return carry;
+}
+
+static inline int worker_old_cmp_256_const(const thread uint* a, const constant uint* b) {
+    for (int i = 0; i < 8; ++i) {
+        if (a[i] < b[i]) {
+            return -1;
+        }
+        if (a[i] > b[i]) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static inline void worker_old_add_privkeys(thread uint* r_le, const thread uint* a_le) {
+    uint r_be[8];
+    uint a_be[8];
+    for (int i = 0; i < 8; ++i) {
+        r_be[i] = SWAP256(r_le[i]);
+        a_be[i] = SWAP256(a_le[i]);
+    }
+
+    const uint carry = worker_old_add_256b(r_be, a_be);
+    if (carry != 0u || worker_old_cmp_256_const(r_be, WORKER_OLD_MAX_PRIV) >= 0) {
+        worker_old_add_256b_const(r_be, WORKER_OLD_MAX_PRIV_NEG);
+    }
+
+    for (int i = 0; i < 8; ++i) {
+        r_le[i] = SWAP256(r_be[i]);
+    }
+}
+
+static inline void worker_old_sha256_100k(thread uint* hash, int len, thread uint* out) {
+    const int pass_len = len;
+    int plen = pass_len / 4;
+    if ((pass_len % 4) != 0) {
+        ++plen;
+    }
+    const int extra_words = plen - 8;
+    uint constant_words[256];
+    uint prepared_data[256];
+
+    for (int i = 0; i < 8; ++i) {
+        prepared_data[i] = SWAP256(hash[i]);
+    }
+    for (int i = 0; i < extra_words && i < 256; ++i) {
+        constant_words[i] = SWAP256(hash[8 + i]);
+    }
+
+    const int iterations = 99999;
+    const int r = (pass_len + 4) - (((pass_len + 4) / 4) * 4);
+    const uint padding = 0x80u << uint(r * 8);
+    const int v = pass_len % 64;
+    const uint padding_s = SWAP256(padding);
+
+    for (int iter = 0; iter < iterations; ++iter) {
+        int loops = plen;
+        int curloop = 0;
+        uint W[16];
+        uint State[8] = {
+            0x6a09e667u, 0xbb67ae85u, 0x3c6ef372u, 0xa54ff53au,
+            0x510e527fu, 0x9b05688cu, 0x1f83d9abu, 0x5be0cd19u
+        };
+        while (loops > 0) {
+            for (int m = 0; m < 16; ++m) {
+                W[m] = 0u;
+            }
+            for (int m = 0; m < 16 && loops > 0; ++m) {
+                const int index = m + (curloop << 4);
+                const uint word = (index < 8) ? prepared_data[index] : constant_words[index - 8];
+                W[m] ^= word;
+                --loops;
+            }
+            if (loops == 0 && (pass_len % 64) != 0) {
+                W[v / 4] |= padding_s;
+                if ((pass_len & 0x3b) != 0x3b) {
+                    W[15] = uint(pass_len * 8);
+                }
+            }
+            sha256_process2(W, State);
+            ++curloop;
+        }
+        if ((plen % 16) == 0) {
+            uint W[16];
+            for (int m = 0; m < 16; ++m) {
+                W[m] = 0u;
+            }
+            if ((pass_len & 0x3b) != 0x3b) {
+                W[0] |= padding_s;
+            }
+            W[15] = uint(pass_len * 8);
+            sha256_process2(W, State);
+        }
+        for (int i = 0; i < 8; ++i) {
+            prepared_data[i] = State[i];
+        }
+    }
+
+    for (int i = 0; i < 8; ++i) {
+        out[i] = SWAP256(prepared_data[i]);
+    }
+}
+
+static inline void worker_old_sha256(const thread uchar* data, uint len, thread uchar* hash) {
+    uchar prepared_input[2048];
+    const uint copy_len = min(len, 992u);
+    for (uint i = 0u; i < copy_len; ++i) {
+        prepared_input[i] = data[i];
+        prepared_input[copy_len + i] = data[i];
+    }
+    SHA256(prepared_input, size_t(copy_len + copy_len), hash);
+    for (uint i = 0u; i < copy_len && (32u + i) < 2048u; ++i) {
+        hash[32u + i] = prepared_input[i];
+    }
+    worker_old_sha256_100k(reinterpret_cast<thread uint*>(hash), int(32u + copy_len),
+                           reinterpret_cast<thread uint*>(hash));
+}
+
+static inline void worker_old_entropy_to_master_key(const thread uchar* in, uint len, thread uchar* out) {
+    uchar hexed_seed[1024];
+    const uint safe_len = min(len, 496u);
+    for (uint i = 0u; i < safe_len; ++i) {
+        hexed_seed[i * 2u] = WORKER_OLD_HEX_CHARS[in[i] >> 4u];
+        hexed_seed[i * 2u + 1u] = WORKER_OLD_HEX_CHARS[in[i] & 0x0fu];
+    }
+    worker_old_sha256(hexed_seed, safe_len * 2u, hexed_seed);
+    for (uint i = 0u; i < 64u; ++i) {
+        out[i] = hexed_seed[i];
+    }
+}
+
+static inline void worker_old_seed_to_master_key(const thread uchar* in, uint len, thread uchar* out) {
+    uchar hexed_seed[1024];
+    worker_old_sha256(in, min(len, 992u), hexed_seed);
+    for (uint i = 0u; i < 64u; ++i) {
+        out[i] = hexed_seed[i];
+    }
+}
+
+static inline uint worker_old_total_slots(uint deep_per_chain) {
+    return deep_per_chain * 2u;
+}
+
+static inline void worker_old_slot_to_branch_index(uint slot, uint deep_per_chain, thread uint* branch, thread uint* index) {
+    if (slot < deep_per_chain) {
+        *branch = 0u;
+        *index = slot;
+        return;
+    }
+    *branch = 1u;
+    *index = slot - deep_per_chain;
+}
+
+static inline uint worker_old_make_child_seed(uint branch,
+                                              uint index,
+                                              const thread uchar* master_public_key,
+                                              thread uchar* out) {
+    uchar digits[16];
+    uint digits_count = 0u;
+    uint value = index;
+    do {
+        digits[digits_count++] = uchar('0' + (value % 10u));
+        value /= 10u;
+    } while (value > 0u);
+
+    for (uint n = 0u; n < digits_count; ++n) {
+        out[n] = digits[digits_count - 1u - n];
+    }
+    out[digits_count] = ':';
+    out[digits_count + 1u] = uchar('0' + branch);
+    out[digits_count + 2u] = ':';
+    for (uint i = 0u; i < 64u; ++i) {
+        out[digits_count + 3u + i] = master_public_key[i];
+    }
+    return digits_count + 3u + 64u;
+}
+
+static inline void worker_old_derive_child_priv(const thread uchar* master_public_key,
+                                                const thread uchar* master_private_key,
+                                                uint slot,
+                                                uint deep,
+                                                thread uchar* priv_out) {
+    uint branch = 0u;
+    uint index = 0u;
+    worker_old_slot_to_branch_index(slot, deep, &branch, &index);
+
+    uchar child_seed[80];
+    const uint child_seed_len = worker_old_make_child_seed(branch, index, master_public_key, child_seed);
+    SHA256(child_seed, size_t(child_seed_len), priv_out);
+    SHA256(priv_out, 32ul, priv_out);
+    worker_old_add_privkeys(reinterpret_cast<thread uint*>(priv_out),
+                            reinterpret_cast<const thread uint*>(master_private_key));
+}
+
+static inline uint worker_old_fill_child_keys(const thread uchar* master_public_key,
+                                              const thread uchar* master_private_key,
+                                              uint tile_start,
+                                              uint deep,
+                                              thread uchar* prv_keys) {
+    const uint total_slots = worker_old_total_slots(deep);
+    if (tile_start >= total_slots) {
+        return 0u;
+    }
+    uint tile_count = total_slots - tile_start;
+    if (tile_count > WORKER_OLD_THREAD_STEPS) {
+        tile_count = WORKER_OLD_THREAD_STEPS;
+    }
+    for (uint n = 0u; n < tile_count; ++n) {
+        worker_old_derive_child_priv(master_public_key, master_private_key, tile_start + n, deep,
+                                     prv_keys + n * 32u);
+    }
+    return tile_count;
+}
+
+static inline void worker_old_store_checked(device bool* isResult,
+                                            device bool* buffResult,
+                                            const thread char* toHash,
+                                            uint len,
+                                            const thread uchar* private_key,
+                                            const thread void* payload,
+                                            uint payload_len,
+                                            const thread uint* check_words,
+                                            uchar type_value,
+                                            uint c_path,
+                                            uint c_path2,
+                                            long current_round,
+                                            bool store_seed,
+                                            ulong seed_value,
+                                            device RuntimeConfig& config,
+                                            device XorFilterState& filters,
+                                            device FilterStorageState& filter_storage,
+                                            const device uchar* bloom_storage,
+                                            const device uchar* xor_storage,
+                                            const device uchar* xor_un_storage,
+                                            const device uchar* xor_uc_storage,
+                                            const device uchar* xor_hc_storage,
+                                            FoundBuffers found) {
+    if (filter_check_hash(config, filters, filter_storage, bloom_storage, xor_storage,
+                          xor_un_storage, xor_uc_storage, xor_hc_storage, check_words)) {
+        adadot_store_result(isResult, buffResult, toHash, ulong(len), private_key, nullptr,
+                            reinterpret_cast<const thread uchar*>(payload), payload_len, type_value,
+                            c_path, c_path2, current_round, 0u, nullptr, 0u, 0ul, store_seed,
+                            seed_value, 0u, false, config, found);
+    }
+}
+
+static inline void worker_old_emit_ada_direct_keyset_paths(device bool* isResult,
+                                                           device bool* buffResult,
+                                                           const thread char* toHash,
+                                                           ulong len,
+                                                           const thread uchar* payment_key,
+                                                           const thread uchar* next_key,
+                                                           uint c_path,
+                                                           uint next_path,
+                                                           long current_round,
+                                                           bool store_seed,
+                                                           ulong seed_value,
+                                                           device RuntimeConfig& config,
+                                                           device XorFilterState& filters,
+                                                           device FilterStorageState& storage,
+                                                           const device uchar* bloom_storage,
+                                                           const device uchar* xor_storage,
+                                                           const device uchar* xor_un_storage,
+                                                           const device uchar* xor_uc_storage,
+                                                           const device uchar* xor_hc_storage,
+                                                           FoundBuffers found) {
+    const bool direct_shelley = ada_type_enabled(config, 0x11u) ||
+                                ada_type_enabled(config, 0x12u) ||
+                                ada_type_enabled(config, 0x14u) ||
+                                ada_type_enabled(config, 0x15u);
+    uchar payment_pub[32] = { 0 };
+    uchar pk_pay[28] = { 0 };
+    if (direct_shelley) {
+        adadot_ada_direct_private_pubkey_hash(payment_key, payment_pub, pk_pay, true, config);
+        adadot_emit_ada_single_key_addresses_from_hash(isResult, buffResult, toHash, len,
+                                                       payment_key, pk_pay, true, c_path,
+                                                       current_round, 0u, nullptr, 0u, 0ul,
+                                                       store_seed, seed_value, 0u, false,
+                                                       config, filters, storage, bloom_storage,
+                                                       xor_storage, xor_un_storage, xor_uc_storage,
+                                                       xor_hc_storage, found);
+    }
+    if (direct_shelley && ada_type_enabled(config, 0x11u) && next_key != nullptr &&
+        !adadot_key32_equal(payment_key, next_key)) {
+        uchar next_pub[32] = { 0 };
+        uchar pk_next[28] = { 0 };
+        adadot_ada_direct_private_pubkey_hash(next_key, next_pub, pk_next, true, config);
+        adadot_emit_ada_base_pair_from_hashes(isResult, buffResult, toHash, len,
+                                              payment_key, next_key, pk_pay, pk_next,
+                                              c_path, next_path, current_round, 0u, nullptr,
+                                              0u, 0ul, store_seed, seed_value, 0u, false,
+                                              0x11u, config, filters, storage, bloom_storage,
+                                              xor_storage, xor_un_storage, xor_uc_storage,
+                                              xor_hc_storage, found);
+        adadot_emit_ada_base_pair_from_hashes(isResult, buffResult, toHash, len,
+                                              next_key, payment_key, pk_next, pk_pay,
+                                              next_path, c_path, current_round, 0u, nullptr,
+                                              0u, 0ul, store_seed, seed_value, 0u, false,
+                                              0x11u, config, filters, storage, bloom_storage,
+                                              xor_storage, xor_un_storage, xor_uc_storage,
+                                              xor_hc_storage, found);
+    }
+    adadot_emit_ada_byron_ledger_from_bip32_key(isResult, buffResult, toHash, len,
+                                                payment_key, c_path, current_round, 0u,
+                                                nullptr, 0u, 0ul, store_seed, seed_value,
+                                                0u, false, config, filters, storage,
+                                                bloom_storage, xor_storage, xor_un_storage,
+                                                xor_uc_storage, xor_hc_storage, found);
+}
+
+static inline void worker_old_emit_secp(device bool* isResult,
+                                        device bool* buffResult,
+                                        const thread char* source,
+                                        uint len,
+                                        thread uchar* prvKeys,
+                                        thread uchar* pubKeys,
+                                        thread uchar* tap_hash,
+                                        uint pkField,
+                                        uint old_path,
+                                        long current_round,
+                                        bool store_seed,
+                                        ulong seed_value,
+                                        device RuntimeConfig& config,
+                                        device XorFilterState& filters,
+                                        device FilterStorageState& filter_storage,
+                                        const device uchar* bloom_storage,
+                                        const device uchar* xor_storage,
+                                        const device uchar* xor_un_storage,
+                                        const device uchar* xor_uc_storage,
+                                        const device uchar* xor_hc_storage,
+                                        FoundBuffers found) {
+    uint hash160[8] = { 0 };
+    thread uchar* private_key = prvKeys + pkField * 32u;
+    thread uchar* pubkey = pubKeys + pkField * 65u;
+    int keyLenSkip = int(65u * pkField);
+
+    if (config.uncompressed != 0u) {
+        _GetHash160(pubKeys, keyLenSkip, reinterpret_cast<thread uchar*>(hash160));
+        worker_old_store_checked(isResult, buffResult, source, len, private_key, hash160, 32u,
+                                 hash160, 0x01u, old_path, old_path, current_round, store_seed,
+                                 seed_value, config, filters, filter_storage, bloom_storage,
+                                 xor_storage, xor_un_storage, xor_uc_storage, xor_hc_storage, found);
+    }
+    if (config.compressed != 0u) {
+        keyLenSkip = int(65u * pkField);
+        _GetHash160Comp(pubKeys, keyLenSkip, reinterpret_cast<thread uchar*>(hash160));
+        worker_old_store_checked(isResult, buffResult, source, len, private_key, hash160, 32u,
+                                 hash160, 0x02u, old_path, old_path, current_round, store_seed,
+                                 seed_value, config, filters, filter_storage, bloom_storage,
+                                 xor_storage, xor_un_storage, xor_uc_storage, xor_hc_storage, found);
+    }
+    if (config.segwit != 0u) {
+        keyLenSkip = int(65u * pkField);
+        if (config.compressed == 0u) {
+            _GetHash160Comp(pubKeys, keyLenSkip, reinterpret_cast<thread uchar*>(hash160));
+        }
+        _GetHash160P2SHCompFromHash(hash160, hash160);
+        worker_old_store_checked(isResult, buffResult, source, len, private_key, hash160, 32u,
+                                 hash160, 0x03u, old_path, old_path, current_round, store_seed,
+                                 seed_value, config, filters, filter_storage, bloom_storage,
+                                 xor_storage, xor_un_storage, xor_uc_storage, xor_hc_storage, found);
+    }
+    if (config.p2wsh != 0u) {
+        uchar p2wsh_hash[32];
+        uint p2wsh_rmd[8] = { 0 };
+        _GetP2WSHComp(pubkey, p2wsh_hash, p2wsh_rmd);
+        worker_old_store_checked(isResult, buffResult, source, len, private_key, p2wsh_hash, 32u,
+                                 p2wsh_rmd, 0x07u, old_path, old_path, current_round, store_seed,
+                                 seed_value, config, filters, filter_storage, bloom_storage,
+                                 xor_storage, xor_un_storage, xor_uc_storage, xor_hc_storage, found);
+    }
+    if (config.taproot != 0u) {
+        thread uchar* taproot_hash = tap_hash + pkField * 32u;
+        _GetRMD160(reinterpret_cast<thread uint*>(taproot_hash), hash160);
+        worker_old_store_checked(isResult, buffResult, source, len, private_key, taproot_hash, 32u,
+                                 hash160, 0x04u, old_path, old_path, current_round, store_seed,
+                                 seed_value, config, filters, filter_storage, bloom_storage,
+                                 xor_storage, xor_un_storage, xor_uc_storage, xor_hc_storage, found);
+    }
+    if (config.ethereum != 0u) {
+        uchar keccak_hash[32];
+        thread char* eth_source = reinterpret_cast<thread char*>(pubkey + 1);
+        keccak(eth_source, 64, keccak_hash, 32);
+        for (uint h = 12u, i = 0u; i < 5u; ++i) {
+            hash160[i] = uint(keccak_hash[h]) |
+                         ((uint(keccak_hash[h + 1u]) << 8u) & 0x0000ff00u) |
+                         ((uint(keccak_hash[h + 2u]) << 16u) & 0x00ff0000u) |
+                         ((uint(keccak_hash[h + 3u]) << 24u) & 0xff000000u);
+            h += 4u;
+        }
+        worker_old_store_checked(isResult, buffResult, eth_source, len, private_key, hash160, 32u,
+                                 hash160, 0x06u, old_path, old_path, current_round, store_seed,
+                                 seed_value, config, filters, filter_storage, bloom_storage,
+                                 xor_storage, xor_un_storage, xor_uc_storage, xor_hc_storage, found);
+    }
+    if (config.xpoint != 0u) {
+        uint xpoint_hash[8] = { 0 };
+        thread uchar* xbytes = reinterpret_cast<thread uchar*>(xpoint_hash);
+        worker_old_copy_thread_uchar(xbytes, pubkey + 1, 32u);
+        worker_old_store_checked(isResult, buffResult, source, len, private_key, xpoint_hash, 32u,
+                                 xpoint_hash, 0x05u, old_path, old_path, current_round, store_seed,
+                                 seed_value, config, filters, filter_storage, bloom_storage,
+                                 xor_storage, xor_un_storage, xor_uc_storage, xor_hc_storage, found);
+    }
+}
+
+static inline void worker_old_emit_ed(device bool* isResult,
+                                      device bool* buffResult,
+                                      const thread char* source,
+                                      uint len,
+                                      thread uchar* prvKeys,
+                                      thread uchar* pubKeysED,
+                                      int privKeyIx,
+                                      uint pkField,
+                                      uint old_path,
+                                      long current_round,
+                                      bool store_seed,
+                                      ulong seed_value,
+                                      device RuntimeConfig& config,
+                                      device XorFilterState& filters,
+                                      device FilterStorageState& filter_storage,
+                                      const device uchar* bloom_storage,
+                                      const device uchar* xor_storage,
+                                      const device uchar* xor_un_storage,
+                                      const device uchar* xor_uc_storage,
+                                      const device uchar* xor_hc_storage,
+                                      FoundBuffers found) {
+    const uint pk4 = pkField * 32u;
+    thread uchar* publ = pubKeysED + pk4;
+    thread uchar* pkey = prvKeys + pk4;
+    const thread uchar* next_key = nullptr;
+    if (pkField < uint(privKeyIx - 1)) {
+        next_key = prvKeys + pk4 + 32u;
+    }
+
+    if (config.solana != 0u) {
+        uint hash_words[8] = { 0 };
+        thread uchar* hash_bytes = reinterpret_cast<thread uchar*>(hash_words);
+        worker_old_copy_thread_uchar(hash_bytes, publ, 32u);
+        worker_old_store_checked(isResult, buffResult, source, len, pkey, publ, 32u,
+                                 hash_words, 0x60u, old_path, old_path, current_round,
+                                 store_seed, seed_value, config, filters, filter_storage,
+                                 bloom_storage, xor_storage, xor_un_storage, xor_uc_storage,
+                                 xor_hc_storage, found);
+    }
+    if (config.dot != 0u) {
+        adadot_emit_dot_ed25519_public(isResult, buffResult, source, ulong(len), pkey, publ,
+                                       old_path, current_round, 0u, nullptr, 0u, 0ul,
+                                       store_seed, seed_value, 0u, false, config, filters,
+                                       filter_storage, bloom_storage, xor_storage, xor_un_storage,
+                                       xor_uc_storage, xor_hc_storage, found);
+        adadot_emit_dot_sr25519_seed(isResult, buffResult, source, ulong(len), pkey,
+                                     old_path, current_round, 0u, nullptr, 0u, 0ul,
+                                     store_seed, seed_value, 0u, false, config, filters,
+                                     filter_storage, bloom_storage, xor_storage, xor_un_storage,
+                                     xor_uc_storage, xor_hc_storage, found);
+    }
+    if (config.ada != 0u) {
+        worker_old_emit_ada_direct_keyset_paths(isResult, buffResult, source, ulong(len), pkey,
+                                                next_key, old_path, old_path + 1u,
+                                                current_round, store_seed, seed_value, config,
+                                                filters, filter_storage, bloom_storage,
+                                                xor_storage, xor_un_storage, xor_uc_storage,
+                                                xor_hc_storage, found);
+    }
+}
+
+static inline void worker_old_process_master(device bool* isResult,
+                                             device bool* buffResult,
+                                             const thread char* source,
+                                             uint len,
+                                             thread uchar out[64],
+                                             constant secp256k1_ge_storage* precPtr,
+                                             ulong precPitch,
+                                             ulong round,
+                                             bool store_seed,
+                                             ulong seed_value,
+                                             device RuntimeConfig& config,
+                                             device XorFilterState& filters,
+                                             device FilterStorageState& filter_storage,
+                                             const device uchar* bloom_storage,
+                                             const device uchar* xor_storage,
+                                             const device uchar* xor_un_storage,
+                                             const device uchar* xor_uc_storage,
+                                             const device uchar* xor_hc_storage,
+                                             FoundBuffers found) {
+    uchar pubKeys[WORKER_OLD_THREAD_STEPS * 65u];
+    uchar prvKeys[WORKER_OLD_THREAD_STEPS * 32u];
+    uchar pubKeysED[WORKER_OLD_THREAD_STEPS * 32u];
+    uchar master_public[128];
+
+    thread extended_private_key_t* master_private = reinterpret_cast<thread extended_private_key_t*>(out);
+    secp256k1_ec_pubkey_create(reinterpret_cast<thread secp256k1_pubkey*>(master_public + 5u),
+                               master_private->key, precPtr, size_t(precPitch));
+    const thread uchar* master_public_key = master_public + 5u;
+
+    const uint total_slots = worker_old_total_slots(config.deep);
+    for (uint tileStart = 0u; tileStart < total_slots; tileStart += WORKER_OLD_THREAD_STEPS) {
+        const int privKeyIx = int(worker_old_fill_child_keys(master_public_key, out, tileStart,
+                                                             config.deep, prvKeys));
+        if (privKeyIx == 0) {
+            break;
+        }
+
+        if (round > 0ul) {
+            bump_all_keys(prvKeys, privKeyIx, round, false, nullptr);
+        }
+
+        for (ulong i = 0ul; i <= 2ul * round; ++i) {
+            const long current_round = long(i) - long(round);
+
+            if (config.secp256 != 0u) {
+                if (i == 0ul) {
+                    secp256k1_ec_pubkey_create_serialized_batch_myunsafe(pubKeys, prvKeys, privKeyIx,
+                                                                         precPtr, size_t(precPitch));
+                }
+                uchar tap_hash[32u * WORKER_OLD_THREAD_STEPS];
+                if (config.taproot != 0u) {
+                    TweakTaproot_batch(tap_hash, pubKeys, privKeyIx, precPtr, size_t(precPitch));
+                }
+                for (uint pkField = 0u; pkField < WORKER_OLD_THREAD_STEPS && pkField < uint(privKeyIx); ++pkField) {
+                    worker_old_emit_secp(isResult, buffResult, source, len, prvKeys, pubKeys, tap_hash,
+                                         pkField, tileStart + pkField, current_round, store_seed,
+                                         seed_value, config, filters, filter_storage, bloom_storage,
+                                         xor_storage, xor_un_storage, xor_uc_storage, xor_hc_storage, found);
+                }
+            }
+
+            if (config.ed25519 != 0u) {
+                priv_ed25519_key_to_pub_batch_config(prvKeys, pubKeysED, privKeyIx, config);
+                for (uint pkField = 0u; pkField < WORKER_OLD_THREAD_STEPS && pkField < uint(privKeyIx); ++pkField) {
+                    worker_old_emit_ed(isResult, buffResult, source, len, prvKeys, pubKeysED, privKeyIx,
+                                       pkField, tileStart + pkField, current_round, store_seed,
+                                       seed_value, config, filters, filter_storage, bloom_storage,
+                                       xor_storage, xor_un_storage, xor_uc_storage, xor_hc_storage, found);
+                }
+            }
+
+            if (i < 2ul * round) {
+                int zeroz[32] = { 0 };
+                const int wrapped = bump_all_keys(prvKeys, privKeyIx, 1ul, true, zeroz);
+                if (config.secp256 != 0u) {
+                    if (wrapped != 0) {
+                        for (int n = 0; n < privKeyIx; ++n) {
+                            if (zeroz[n] != 0) {
+                                thread uchar* dst = pubKeys + uint(zeroz[n] - 1) * 65u;
+                                for (uint k = 0u; k < 65u; ++k) {
+                                    dst[k] = WORKER_OLD_SECP_G65[k];
+                                }
+                            }
+                        }
+                    }
+                    priv_pub_add_basepoint_batch(pubKeys, privKeyIx, +1, precPtr);
+                }
+            }
+        }
+    }
+}
+
+static inline void worker_old_process_entropy_candidate(device bool* isResult,
+                                                        device bool* buffResult,
+                                                        const thread char* source,
+                                                        uint len,
+                                                        constant secp256k1_ge_storage* precPtr,
+                                                        ulong precPitch,
+                                                        ulong round,
+                                                        bool store_seed,
+                                                        ulong seed_value,
+                                                        device RuntimeConfig& config,
+                                                        device XorFilterState& filters,
+                                                        device FilterStorageState& filter_storage,
+                                                        const device uchar* bloom_storage,
+                                                        const device uchar* xor_storage,
+                                                        const device uchar* xor_un_storage,
+                                                        const device uchar* xor_uc_storage,
+                                                        const device uchar* xor_hc_storage,
+                                                        FoundBuffers found) {
+    uchar out[64];
+    worker_old_entropy_to_master_key(reinterpret_cast<const thread uchar*>(source), len, out);
+    worker_old_process_master(isResult, buffResult, source, len, out, precPtr, precPitch, round,
+                              store_seed, seed_value, config, filters, filter_storage, bloom_storage,
+                              xor_storage, xor_un_storage, xor_uc_storage, xor_hc_storage, found);
+}
+
+static inline void worker_old_process_seed_candidate(device bool* isResult,
+                                                     device bool* buffResult,
+                                                     const thread char* source,
+                                                     uint len,
+                                                     constant secp256k1_ge_storage* precPtr,
+                                                     ulong precPitch,
+                                                     ulong round,
+                                                     bool store_seed,
+                                                     ulong seed_value,
+                                                     device RuntimeConfig& config,
+                                                     device XorFilterState& filters,
+                                                     device FilterStorageState& filter_storage,
+                                                     const device uchar* bloom_storage,
+                                                     const device uchar* xor_storage,
+                                                     const device uchar* xor_un_storage,
+                                                     const device uchar* xor_uc_storage,
+                                                     const device uchar* xor_hc_storage,
+                                                     FoundBuffers found) {
+    uchar out[64];
+    worker_old_seed_to_master_key(reinterpret_cast<const thread uchar*>(source), len, out);
+    worker_old_process_master(isResult, buffResult, source, len, out, precPtr, precPitch, round,
+                              store_seed, seed_value, config, filters, filter_storage, bloom_storage,
+                              xor_storage, xor_un_storage, xor_uc_storage, xor_hc_storage, found);
+}
+
+static inline bool worker_old_read_indexed_line(const device char* lines,
+                                                const device uint* indexes,
+                                                uint indexes_size,
+                                                uint starter,
+                                                thread char out[512],
+                                                thread uint& len) {
+    if (lines == nullptr || indexes == nullptr || starter >= indexes_size) {
+        return false;
+    }
+    const uint begin = (starter == 0u) ? 0u : indexes[starter - 1u];
+    const uint end = indexes[starter];
+    len = (end >= begin) ? (end - begin) : 0u;
+    const uint copy_len = min(len, 512u);
+    worker_old_copy_device_char(out, lines + begin, copy_len);
+    len = copy_len;
+    return true;
+}
+
+static inline void worker_old_build_seq_candidate(const device uchar* start_point,
+                                                  int min_len,
+                                                  int mode,
+                                                  ulong starter,
+                                                  bool align_len_4,
+                                                  thread char out[512],
+                                                  thread uint& len) {
+    uint c[128];
+    uint r[128];
+    uchar toHash2[512];
+    loadBE4096toWords(start_point, c);
+    if (mode == 1) {
+        add64to4096_device(c, starter, r);
+    } else {
+        sub64from4096_device(c, starter, r);
+    }
+    len = sizeBE4096_device(r);
+    if (len < uint(min_len)) {
+        len = uint(min_len);
+    }
+    if (align_len_4) {
+        while ((len % 4u) != 0u) {
+            ++len;
+        }
+    }
+    storeWordsToBE4096(r, toHash2);
+    const uint copy_len = min(len, 512u);
+    for (uint j = 0u; j < copy_len; ++j) {
+        out[j] = char(toHash2[512u - copy_len + j]);
+    }
+    len = copy_len;
+}
+
+static inline bool worker_old_entropy_fill(int entropy_len,
+                                           thread uchar entropy[512],
+                                           ulong seed_l,
+                                           bool is_64,
+                                           int mode,
+                                           int gen,
+                                           ulong skip64) {
+    if (entropy_len < 0 || entropy_len > 512) {
+        return false;
+    }
+    if (is_64) {
+        return prng64_entropy_fill(entropy_len, entropy, seed_l, mode, gen, skip64);
+    }
+    if (seed_l > 0xfffffffful) {
+        return false;
+    }
+    return prng32_entropy_fill(entropy_len, entropy, uint(seed_l), mode, gen, skip64);
+}
+
+static inline void worker_old_apply_seed_entropy_mode(thread char toHash[512],
+                                                      thread uint& len,
+                                                      uchar entropy_mode,
+                                                      uint iter,
+                                                      device RuntimeConfig& config) {
+    const bool utf8_local = config.utf8 != 0u;
+    switch (entropy_mode) {
+    case 0x00u:
+        break;
+    case 0x01u:
+        if (config.isHex != 0u) {
+            priv_unhex(reinterpret_cast<thread uchar*>(toHash), len,
+                       reinterpret_cast<thread uchar*>(toHash), len / 2u);
+            len = len / 2u;
+        }
+        SHA256(reinterpret_cast<thread uchar*>(toHash), size_t(len), reinterpret_cast<thread uchar*>(toHash));
+        for (uint i = 1u; i < iter; ++i) {
+            uint hash_len = 32u;
+            if (utf8_local) {
+                hash_len = 64u;
+                uchar hash_local[64] = { 0 };
+                worker_old_hexing(reinterpret_cast<thread uchar*>(toHash), 32u, hash_local, 64u);
+                for (uint k = 0u; k < 64u; ++k) {
+                    toHash[k] = char(hash_local[k]);
+                }
+            }
+            SHA256(reinterpret_cast<thread uchar*>(toHash), size_t(hash_len), reinterpret_cast<thread uchar*>(toHash));
+        }
+        len = 32u;
+        worker_old_entropy_to_hex(reinterpret_cast<thread uchar*>(toHash), len, reinterpret_cast<thread uchar*>(toHash));
+        len = 64u;
+        break;
+    case 0x02u:
+        if (config.isHex != 0u) {
+            priv_unhex(reinterpret_cast<thread uchar*>(toHash), len,
+                       reinterpret_cast<thread uchar*>(toHash), len / 2u);
+            len = len / 2u;
+        }
+        SHA512(reinterpret_cast<thread uchar*>(toHash), ulong(len), reinterpret_cast<thread uchar*>(toHash));
+        for (uint i = 1u; i < iter; ++i) {
+            uint hash_len = 64u;
+            if (utf8_local) {
+                hash_len = 128u;
+                uchar hash_local[128] = { 0 };
+                worker_old_hexing(reinterpret_cast<thread uchar*>(toHash), 64u, hash_local, 128u);
+                for (uint k = 0u; k < 128u; ++k) {
+                    toHash[k] = char(hash_local[k]);
+                }
+            }
+            SHA512(reinterpret_cast<thread uchar*>(toHash), ulong(hash_len), reinterpret_cast<thread uchar*>(toHash));
+        }
+        len = 64u;
+        worker_old_entropy_to_hex(reinterpret_cast<thread uchar*>(toHash), len, reinterpret_cast<thread uchar*>(toHash));
+        len = 128u;
+        break;
+    case 0x03u:
+        if (config.isHex != 0u) {
+            priv_unhex(reinterpret_cast<thread uchar*>(toHash), len,
+                       reinterpret_cast<thread uchar*>(toHash), len / 2u);
+            len = len / 2u;
+        }
+        keccak(toHash, int(len), reinterpret_cast<thread uchar*>(toHash), 32);
+        for (uint i = 1u; i < iter; ++i) {
+            uint hash_len = 32u;
+            if (utf8_local) {
+                hash_len = 64u;
+                uchar hash_local[64] = { 0 };
+                worker_old_hexing(reinterpret_cast<thread uchar*>(toHash), 32u, hash_local, 64u);
+                for (uint k = 0u; k < 64u; ++k) {
+                    toHash[k] = char(hash_local[k]);
+                }
+            }
+            keccak(toHash, int(hash_len), reinterpret_cast<thread uchar*>(toHash), 32);
+        }
+        len = 32u;
+        worker_old_entropy_to_hex(reinterpret_cast<thread uchar*>(toHash), len, reinterpret_cast<thread uchar*>(toHash));
+        len = 64u;
+        break;
+    case 0x04u:
+        if (config.isHex != 0u) {
+            priv_unhex(reinterpret_cast<thread uchar*>(toHash), len,
+                       reinterpret_cast<thread uchar*>(toHash), len / 2u);
+            len = len / 2u;
+        }
+        sha3_256(toHash, int(len), reinterpret_cast<thread uchar*>(toHash));
+        for (uint i = 1u; i < iter; ++i) {
+            uint hash_len = 32u;
+            if (utf8_local) {
+                hash_len = 64u;
+                uchar hash_local[64] = { 0 };
+                worker_old_hexing(reinterpret_cast<thread uchar*>(toHash), 32u, hash_local, 64u);
+                for (uint k = 0u; k < 64u; ++k) {
+                    toHash[k] = char(hash_local[k]);
+                }
+            }
+            sha3_256(toHash, int(hash_len), reinterpret_cast<thread uchar*>(toHash));
+        }
+        len = 32u;
+        worker_old_entropy_to_hex(reinterpret_cast<thread uchar*>(toHash), len, reinterpret_cast<thread uchar*>(toHash));
+        len = 64u;
+        break;
+    case 0x05u:
+        if (config.isHex != 0u) {
+            priv_unhex(reinterpret_cast<thread uchar*>(toHash), len,
+                       reinterpret_cast<thread uchar*>(toHash), len / 2u);
+            len = len / 2u;
+        }
+        MD5(reinterpret_cast<thread uchar*>(toHash), size_t(len), reinterpret_cast<thread uchar*>(toHash));
+        for (uint i = 1u; i < iter; ++i) {
+            uint hash_len = 16u;
+            if (utf8_local) {
+                hash_len = 32u;
+                uchar hash_local[32] = { 0 };
+                worker_old_hexing(reinterpret_cast<thread uchar*>(toHash), 16u, hash_local, 32u);
+                for (uint k = 0u; k < 32u; ++k) {
+                    toHash[k] = char(hash_local[k]);
+                }
+            }
+            MD5(reinterpret_cast<thread uchar*>(toHash), size_t(hash_len), reinterpret_cast<thread uchar*>(toHash));
+        }
+        len = 16u;
+        worker_old_entropy_to_hex(reinterpret_cast<thread uchar*>(toHash), len, reinterpret_cast<thread uchar*>(toHash));
+        len = 32u;
+        break;
+    case 0x06u:
+        worker_old_entropy_to_hex(reinterpret_cast<thread uchar*>(toHash), len, reinterpret_cast<thread uchar*>(toHash));
+        len *= 2u;
+        break;
+    default:
+        break;
+    }
+}
+
+#endif

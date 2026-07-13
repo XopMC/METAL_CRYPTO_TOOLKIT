@@ -1,0 +1,172 @@
+#ifndef METAL_CRYPTO_WORKER_RECOVERY_SEED_COMMON_METALH
+#define METAL_CRYPTO_WORKER_RECOVERY_SEED_COMMON_METALH
+
+#include "Pbkdf2Func.metalh"
+#include "HashFunc.metalh"
+#include "Words.metalh"
+
+using namespace metal;
+
+constant uint RECOVERY_MASTER_WORDS_METAL = 16u;
+
+REC_DEVICE uchar recovery_key_swap_byte(int idx) {
+    return recovery_key_swap[idx];
+}
+
+REC_DEVICE uint recovery_key_swap_word(int word_idx) {
+    const int base = word_idx * 4;
+    return uint(recovery_key_swap_byte(base)) |
+           (uint(recovery_key_swap_byte(base + 1)) << 8) |
+           (uint(recovery_key_swap_byte(base + 2)) << 16) |
+           (uint(recovery_key_swap_byte(base + 3)) << 24);
+}
+
+REC_DEVICE char recovery_word_char_from_builtin(uint dict_lang, ushort id, int char_idx) {
+    switch (dict_lang) {
+    default:
+    case 0u: return wordsEN[id][char_idx];
+    case 1u: return wordsSP[id][char_idx];
+    case 2u: return wordsJA[id][char_idx];
+    case 3u: return wordsIT[id][char_idx];
+    case 4u: return wordsFR[id][char_idx];
+    case 5u: return wordsCZ[id][char_idx];
+    case 6u: return wordsPO[id][char_idx];
+    case 7u: return wordsKO[id][char_idx];
+    case 8u: return wordsCHS[id][char_idx];
+    case 9u: return wordsCHT[id][char_idx];
+    }
+}
+
+REC_DEVICE char recovery_word_char(const device RuntimeConfig& config,
+                                   const device char* customDict,
+                                   ushort id,
+                                   int char_idx) {
+    if (config.useCustomDict != 0u && customDict != nullptr) {
+        return customDict[uint(id) * kMnemonicWordStride + uint(char_idx)];
+    }
+    return recovery_word_char_from_builtin(config.dictLang, id, char_idx);
+}
+
+REC_DEVICE uint recovery_build_phrase_from_ids_metal(const thread ushort* ids,
+                                                     int words_count,
+                                                     const device RuntimeConfig& config,
+	                                                     const device char* customDict,
+	                                                     thread char* out,
+	                                                     uint out_capacity) {
+	    if (words_count <= 0 || words_count > 48 || out_capacity < 2u) {
+	        return 0u;
+	    }
+
+    uint off = 0u;
+    const uint limit = out_capacity - 1u;
+
+    for (int i = 0; i < words_count; ++i) {
+        const ushort id = ids[i] & 0x7ffu;
+        for (int j = 0; j < 33; ++j) {
+            const char c = recovery_word_char(config, customDict, id, j);
+            if (c == '\0') {
+                break;
+            }
+            if (off >= limit) {
+                out[0] = '\0';
+                return 0u;
+            }
+            out[off++] = c;
+        }
+
+        if (i + 1 < words_count) {
+            if (off >= limit) {
+                out[0] = '\0';
+                return 0u;
+            }
+            out[off++] = ' ';
+        }
+    }
+
+    out[off] = '\0';
+    return off;
+}
+
+REC_DEVICE bool recovery_build_master_words_from_phrase_metal(const thread char* phrase,
+                                                              uint phrase_len,
+                                                              const device char* passwd,
+                                                              uint pass_size,
+                                                              const device uint* iterations,
+                                                              uint iterations_size,
+	                                                              const device RuntimeConfig& config,
+	                                                              thread uint* out_master_words) {
+	    if (out_master_words == nullptr || phrase_len == 0u || iterations == nullptr || iterations_size == 0u ||
+	        pass_size > 128u) {
+	        return false;
+	    }
+
+    bool has_work = false;
+    for (uint num = 0u; num < iterations_size; ++num) {
+        if (iterations[num] != 0u) {
+            has_work = true;
+            break;
+        }
+    }
+    if (!has_work) {
+        return false;
+    }
+
+    thread uchar pbkdfSaltMainBuf[128 + 8];
+    const bool electrum = config.electrum != 0u;
+    for (uint i = 0u; i < 8u; i++) {
+        pbkdfSaltMainBuf[i] = electrum ? recovery_electrum_salt[i] : recovery_salt[i];
+    }
+    uint pbkdfSaltMainLen = 8u;
+    if (pass_size > 0u && passwd != nullptr) {
+        for (uint i = 0u; i < pass_size; i++) {
+            pbkdfSaltMainBuf[8u + i] = uchar(passwd[i]);
+        }
+        pbkdfSaltMainLen = 8u + pass_size;
+    }
+
+    thread uint ipad[256 / 4];
+    thread uint opad[256 / 4];
+    thread uint seed[64 / 4];
+
+    fastpbkdf2_hmac_sha512(reinterpret_cast<const thread uchar*>(phrase),
+                           ulong(phrase_len),
+                           pbkdfSaltMainBuf,
+                           ulong(pbkdfSaltMainLen),
+                           config.pbkdf2Iterations,
+                           reinterpret_cast<thread uchar*>(seed),
+                           64ul);
+
+    thread ulong* seed64 = reinterpret_cast<thread ulong*>(seed);
+    for (int x = 0; x < 8; x++) {
+        seed64[x] = SWAP512(seed64[x]);
+    }
+
+    for (int x = 0; x < 16 / 4; x++) {
+        ipad[x] = 0x36363636u ^ recovery_key_swap_word(x);
+    }
+    for (int x = 0; x < 16 / 4; x++) {
+        opad[x] = 0x5c5c5c5cu ^ recovery_key_swap_word(x);
+    }
+    for (int x = 16 / 4; x < 128 / 4; x++) {
+        ipad[x] = 0x36363636u;
+        opad[x] = 0x5c5c5c5cu;
+    }
+    for (int x = 0; x < 64 / 4; x++) {
+        ipad[x + 128 / 4] = seed[x];
+    }
+
+    sha512_swap(reinterpret_cast<thread ulong*>(ipad), 192u, reinterpret_cast<thread ulong*>(&opad[128 / 4]));
+    sha512_swap(reinterpret_cast<thread ulong*>(opad), 192u, reinterpret_cast<thread ulong*>(&ipad[128 / 4]));
+
+    thread ulong* master64 = reinterpret_cast<thread ulong*>(&ipad[128 / 4]);
+    for (int x = 0; x < 128 / 8; x++) {
+        master64[x] = SWAP512(master64[x]);
+    }
+
+    for (int x = 0; x < int(RECOVERY_MASTER_WORDS_METAL); x++) {
+        out_master_words[x] = ipad[128 / 4 + x];
+    }
+    return true;
+}
+
+#endif

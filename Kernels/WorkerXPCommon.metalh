@@ -1,0 +1,4102 @@
+#ifndef METAL_CRYPTO_WORKER_XP_COMMON_METALH
+#define METAL_CRYPTO_WORKER_XP_COMMON_METALH
+
+#include <metal_stdlib>
+#include "ProfanityCommon.metalh"
+#include "FilterCommon.metalh"
+#include "GPUHash.metalh"
+#include "../lib/secp256k1/secp256k1.metalh"
+
+#ifdef memcpy
+#undef memcpy
+#endif
+#ifdef memset
+#undef memset
+#endif
+
+using namespace metal;
+
+#ifndef METAL_CRYPTO_TARGET_FC_DECLARED
+#define METAL_CRYPTO_TARGET_FC_DECLARED
+constant bool TFC_COMPRESSED [[function_constant(0)]];
+constant bool TFC_UNCOMPRESSED [[function_constant(1)]];
+constant bool TFC_SEGWIT [[function_constant(2)]];
+constant bool TFC_P2WSH [[function_constant(3)]];
+constant bool TFC_TAPROOT [[function_constant(4)]];
+constant bool TFC_ETHEREUM [[function_constant(5)]];
+constant bool TFC_XPOINT [[function_constant(6)]];
+constant bool TFC_XRP_SECP [[function_constant(7)]];
+constant bool TFC_SUI_SECP [[function_constant(8)]];
+constant bool TFC_IOTA_SECP [[function_constant(9)]];
+constant bool TFC_APTOS_SECP [[function_constant(10)]];
+constant bool TFC_ICP_SECP [[function_constant(11)]];
+constant bool TFC_FIL_SECP [[function_constant(12)]];
+constant bool TFC_XTZ_SECP [[function_constant(13)]];
+constant bool TFC_SECP_ANY [[function_constant(14)]];
+constant bool TFC_ED_ANY [[function_constant(15)]];
+constant bool TFC_SOLANA [[function_constant(16)]];
+constant bool TFC_DOT [[function_constant(17)]];
+constant bool TFC_ADA [[function_constant(18)]];
+constant bool TFC_TON [[function_constant(19)]];
+constant bool TFC_TON_ALL [[function_constant(20)]];
+constant bool TFC_XRP_ED [[function_constant(21)]];
+constant bool TFC_APTOS_ED [[function_constant(22)]];
+constant bool TFC_SUI_ED [[function_constant(23)]];
+constant bool TFC_IOTA_ED [[function_constant(24)]];
+constant bool TFC_ICP_ED [[function_constant(25)]];
+constant bool TFC_XTZ_ED [[function_constant(26)]];
+#endif
+
+#define XP_FC_COMPRESSED TFC_COMPRESSED
+#define XP_FC_UNCOMPRESSED TFC_UNCOMPRESSED
+#define XP_FC_SEGWIT TFC_SEGWIT
+#define XP_FC_P2WSH TFC_P2WSH
+#define XP_FC_TAPROOT TFC_TAPROOT
+#define XP_FC_ETHEREUM TFC_ETHEREUM
+#define XP_FC_XPOINT TFC_XPOINT
+
+constant bool XP_FC_PROFILE_SPECIALIZED [[function_constant(64)]];
+constant uint XP_FC_PROFILE_KIND [[function_constant(65)]];
+
+#define XP_PROFILE_MATCH(kind) (XP_FC_PROFILE_SPECIALIZED ? (XP_FC_PROFILE_KIND == uint(kind)) : (profile_kind == kind))
+
+constant uint XP_CGR_LABEL_MAX_METAL = 32u;
+constant uint XP_CGR_CHAIN_MAX_METAL = 4u;
+constant uint XP_SSLEAY_ITERATIONS_METAL = 4u;
+constant uint XP_SSLEAY_SLICE_LEN_METAL = 10u;
+constant uint XP_REPLAY_PAYLOAD_MAX_METAL = 80u;
+constant uchar XP_TAG_TAPTWEAK_METAL[32] = {
+    0xe8u,0x0fu,0xe1u,0x63u,0x9cu,0x9cu,0xa0u,0x50u,0xe3u,0xafu,0x1bu,0x39u,0xc1u,0x43u,0xc6u,0x3eu,
+    0x42u,0x9cu,0xbcu,0xebu,0x15u,0xd9u,0x40u,0xfbu,0xb5u,0xc5u,0xa1u,0xf4u,0xafu,0x57u,0xc5u,0xe9u
+};
+
+constant uchar XP_PROFILE_OPENSSL_METAL = 1u;
+constant uchar XP_PROFILE_CGR_STATE_METAL = 2u;
+constant uchar XP_PROFILE_CGR_BRIDGE_METAL = 3u;
+constant uchar XP_PROFILE_SSLEAY_STIR_METAL = 4u;
+constant uchar XP_PROFILE_CGR_XOR_METAL = 5u;
+constant uchar XP_PROFILE_CGR_CHAIN_METAL = 6u;
+constant uchar XP_PROFILE_CGR_CHAIN_BRIDGE_METAL = 7u;
+constant uchar XP_PROFILE_RAW32_METAL = 8u;
+constant uchar XP_PROFILE_RANDSTORM_JSBN_METAL = 9u;
+constant uchar XP_PROFILE_RANDSTORM_PYMT_METAL = 10u;
+constant uchar XP_PROFILE_RANDSTORM_MWC32_METAL = 11u;
+constant uchar XP_PROFILE_RANDSTORM_V8INIT_METAL = 12u;
+constant uchar XP_PROFILE_RANDSTORM_BYTES_METAL = 13u;
+constant uchar XP_PROFILE_RANDSTORM_V8INIT_BYTES_METAL = 14u;
+constant uchar XP_PROFILE_RANDSTORM_V8INIT_POOL32_METAL = 15u;
+constant uchar XP_PROFILE_PHPCOINADDRESS_METAL = 16u;
+constant uchar XP_PROFILE_RANDSTORM_CRYPTO1_JSBN_METAL = 17u;
+constant uchar XP_PROFILE_BLUEWALLET_ISAAC_METAL = 18u;
+constant uchar XP_PROFILE_TIME_LCG_DIRECT_METAL = 19u;
+constant uchar XP_PROFILE_JAVA_LCG_DIRECT_METAL = 20u;
+constant uchar XP_PROFILE_SHA256_DIRECT_METAL = 21u;
+constant uchar XP_PROFILE_PID_HASH_DIRECT_METAL = 22u;
+constant uchar XP_PROFILE_LOWBITS_DIRECT_METAL = 23u;
+constant uchar XP_PROFILE_TIME_MT_METAL = 24u;
+constant uchar XP_PROFILE_ELLIPTIC_PHP_RAND_HMACDRBG_METAL = 25u;
+constant uchar XP_PROFILE_PYBTC_MT_METAL = 26u;
+constant uchar XP_PROFILE_NANO_JAVA_RANDOM_METAL = 27u;
+constant uchar XP_PROFILE_PYWALLET_TS_WEAK_METAL = 28u;
+
+constant uint XP_OPENSSL_PATH_COUNT_METAL = 54u;
+constant ulong XP_OPENSSL_ALL_PATH_MASK_METAL = (1ul << XP_OPENSSL_PATH_COUNT_METAL) - 1ul;
+constant uchar XP_OPENSSL_ARCH_LE32_METAL = 0u;
+constant uchar XP_OPENSSL_ARCH_LE64_METAL = 1u;
+constant uchar XP_OPENSSL_ARCH_COUNT_METAL = 2u;
+constant uchar XP_OPENSSL_ARCH_NONE_METAL = 0xffu;
+constant int XP_OPENSSL_STATE_SIZE_METAL = 1023;
+constant int XP_OPENSSL_MD_DIGEST_LENGTH_METAL = 20;
+constant int XP_OPENSSL_DUMMY_SEED_LEN_METAL = 20;
+constant uint XP_RANDSTORM_SEED_EVENTS_REPEAT_FLAG_METAL = 0x80000000u;
+constant uint XP_RANDSTORM_SEED_EVENTS_SCREEN_ZERO_FLAG_METAL = 0x40000000u;
+constant uint XP_RANDSTORM_SEED_EVENTS_COUNT_MASK_METAL = 0x3fffffffu;
+constant uint XP_RANDSTORM_LOCAL_ENGINE_COUNT_METAL = 8u;
+constant uint XP_RANDSTORM_LOCAL_PROFILE_COUNT_METAL = XP_RANDSTORM_LOCAL_ENGINE_COUNT_METAL * 8u;
+constant uint XP_RANDSTORM_MWC32_ENGINE_COUNT_METAL = 4u;
+constant uint XP_RANDSTORM_MWC32_PROFILE_COUNT_METAL = XP_RANDSTORM_MWC32_ENGINE_COUNT_METAL * 10u;
+constant uint XP_PHPCOINADDRESS_VARIANT_PHP521_METAL = 0u;
+constant uint XP_PHPCOINADDRESS_VARIANT_PHP710_METAL = 1u;
+constant uint XP_PHPCOINADDRESS_VARIANT_PHPLegacy_METAL = 2u;
+constant uint XP_PHPCOINADDRESS_VARIANT_COUNT_METAL = 3u;
+constant uint XP_ELLIPTIC_PHP_VARIANT_PHP5_RANDOM_METAL = 0u;
+constant uint XP_ELLIPTIC_PHP_VARIANT_PHP5_LRAND48_METAL = 1u;
+constant uint XP_ELLIPTIC_PHP_VARIANT_PHP5_RAND15_METAL = 2u;
+constant uint XP_ELLIPTIC_PHP_VARIANT_PHP5_ZTS_RAND_R31_METAL = 3u;
+constant uint XP_ELLIPTIC_PHP_VARIANT_PHP5_ZTS_RAND_R15_METAL = 4u;
+constant uint XP_ELLIPTIC_PHP_VARIANT_COUNT_METAL = 5u;
+constant uint XP_ELLIPTIC_PHP_ENTROPY_LEN_METAL = 192u;
+constant uint XP_ELLIPTIC_PHP_NONCE_LEN_METAL = 32u;
+constant uint XP_ELLIPTIC_PHP_SEED_LEN_METAL = XP_ELLIPTIC_PHP_ENTROPY_LEN_METAL + XP_ELLIPTIC_PHP_NONCE_LEN_METAL;
+constant uint XP_ELLIPTIC_PHP_HMAC_MSG_MAX_METAL = 32u + 1u + XP_ELLIPTIC_PHP_SEED_LEN_METAL;
+constant uint XP_BLUEWALLET_ISAAC_VARIANT_CAP255_METAL = 0u;
+constant uint XP_BLUEWALLET_ISAAC_VARIANT_CAP256_METAL = 1u;
+constant uint XP_BLUEWALLET_ISAAC_VARIANT_COUNT_METAL = 2u;
+constant uint XP_TIME_LCG_DIRECT_VARIANT_GLIBC_METAL = 0u;
+constant uint XP_TIME_LCG_DIRECT_VARIANT_MSVC_METAL = 1u;
+constant uint XP_TIME_LCG_DIRECT_VARIANT_BORLAND_METAL = 2u;
+constant uint XP_TIME_LCG_DIRECT_VARIANT_DUAL_XOR_METAL = 3u;
+constant uint XP_TIME_LCG_DIRECT_VARIANT_GLIBC_XOR_PID_METAL = 4u;
+constant uint XP_TIME_LCG_DIRECT_VARIANT_COUNT_METAL = 5u;
+constant uint XP_TIME_LCG_DIRECT_XOR_PID_COUNT_METAL = 32768u;
+constant uint XP_JAVA_LCG_DIRECT_VARIANT_COUNT_METAL = 1u;
+constant uint XP_SHA256_DIRECT_VARIANT_DECIMAL_METAL = 0u;
+constant uint XP_SHA256_DIRECT_VARIANT_HEX_METAL = 1u;
+constant uint XP_SHA256_DIRECT_VARIANT_PHONE10_METAL = 2u;
+constant uint XP_SHA256_DIRECT_VARIANT_SHORT_ASCII_METAL = 3u;
+constant uint XP_SHA256_DIRECT_VARIANT_BE64_METAL = 4u;
+constant uint XP_SHA256_DIRECT_VARIANT_BE64D_METAL = 5u;
+constant uint XP_SHA256_DIRECT_VARIANT_COUNT_METAL = 6u;
+constant ulong XP_SHA256_DIRECT_PHONE10_MAX_METAL = 9999999999ul;
+constant uint XP_PID_HASH_DIRECT_VARIANT_COUNT_METAL = 1u;
+constant uint XP_LOWBITS_DIRECT_VARIANT_BE64_METAL = 0u;
+constant uint XP_TIME_MT_VARIANT_MT19937_U32_LE_LIMBS_METAL = 0u;
+constant uint XP_PYBTC_MT_VARIANT_RANDOM_KEY_METAL = 0u;
+constant uint XP_PYBTC_MT_VARIANT_ELECTRUM_SEED_METAL = 1u;
+constant uint XP_PYBTC_MT_VARIANT_COUNT_METAL = 2u;
+constant uint XP_NANO_JAVA_RANDOM_VARIANT_HEX64_METAL = 0u;
+constant uint XP_PYWALLET_TS_WEAK_VARIANT_SHA256_METAL = 0u;
+
+struct XpCgrStateInput {
+    uchar state20[20];
+    uchar aux20[20];
+    uchar outbuf_prefix20[20];
+    uchar chain_aux20[XP_CGR_CHAIN_MAX_METAL][20];
+    uchar chain_prefix20[XP_CGR_CHAIN_MAX_METAL][20];
+    uchar label[XP_CGR_LABEL_MAX_METAL];
+    uchar label_len;
+    uchar transition_count;
+    uchar xor_mask;
+    uchar reserved[1];
+};
+
+struct XpSsleayInput {
+    uchar local_md[XP_SSLEAY_ITERATIONS_METAL][20];
+    uchar md_c[XP_SSLEAY_ITERATIONS_METAL][8];
+    uchar input_buf[XP_SSLEAY_ITERATIONS_METAL][XP_SSLEAY_SLICE_LEN_METAL];
+    uchar state_slice[XP_SSLEAY_ITERATIONS_METAL][XP_SSLEAY_SLICE_LEN_METAL];
+    uchar input_len[XP_SSLEAY_ITERATIONS_METAL];
+    uchar label[XP_CGR_LABEL_MAX_METAL];
+    uchar iter_count;
+    uchar out_len;
+    uchar label_len;
+    uchar reserved[4];
+};
+
+struct XpReplayResult {
+    uchar priv[32];
+    uchar payload[XP_REPLAY_PAYLOAD_MAX_METAL];
+    uchar profile_kind;
+    uchar path_id;
+    uchar type;
+    uchar payload_len;
+    uint pid;
+    uint key_index;
+    uint line_index;
+    ulong source_state;
+    uint seed_time0;
+    uint seed_time1;
+    uchar reserved[4];
+};
+
+struct XpRuntimeBuffers {
+    device RuntimeConfig* config;
+    device XorFilterState* filters;
+    device FilterStorageState* filterStorage;
+    const device uchar* bloomStorage;
+    const device uchar* xorStorage;
+    const device uchar* xorUnStorage;
+    const device uchar* xorUcStorage;
+    const device uchar* xorHcStorage;
+    device XpReplayResult* xpResults;
+    device atomic_uint* xpCount;
+    uint randstormSeedEvents;
+    uint randstormScreenSeedX;
+    uint randstormScreenSeedY;
+    uint randstormTimeMode;
+    uint randstormMileageStart;
+    uint _pad0;
+    ulong randstormMileageCount;
+};
+
+struct XpRuntimeParams {
+    uint randstormSeedEvents;
+    uint randstormScreenSeedX;
+    uint randstormScreenSeedY;
+    uint randstormTimeMode;
+    uint randstormMileageStart;
+    uint _pad0;
+    ulong randstormMileageCount;
+};
+
+static inline uint xp_be32_tap_thread(const thread uchar* p) {
+    return (uint(p[0]) << 24u) | (uint(p[1]) << 16u) | (uint(p[2]) << 8u) | uint(p[3]);
+}
+
+static inline uint xp_be32_tap_constant(const constant uchar* p) {
+    return (uint(p[0]) << 24u) | (uint(p[1]) << 16u) | (uint(p[2]) << 8u) | uint(p[3]);
+}
+
+static inline void xp_sha256_taptweak_px_metal(const thread uchar px32[32],
+                                               thread uchar out32[32]) {
+    thread uint h[8];
+    SHA256Initialize(h);
+
+    thread uint w0[16];
+    for (int i = 0; i < 8; ++i) {
+        w0[i] = xp_be32_tap_constant(XP_TAG_TAPTWEAK_METAL + i * 4);
+        w0[i + 8] = w0[i];
+    }
+    SHA256Transform(h, w0);
+
+    thread uint w1[16];
+    for (int i = 0; i < 8; ++i) {
+        w1[i] = xp_be32_tap_thread(px32 + i * 4);
+    }
+    w1[8] = 0x80000000u;
+    for (int i = 9; i < 15; ++i) {
+        w1[i] = 0u;
+    }
+    w1[15] = 0x00000300u;
+    SHA256Transform(h, w1);
+
+    for (int i = 0; i < 8; ++i) {
+        out32[i * 4 + 0] = uchar(h[i] >> 24u);
+        out32[i * 4 + 1] = uchar(h[i] >> 16u);
+        out32[i * 4 + 2] = uchar(h[i] >> 8u);
+        out32[i * 4 + 3] = uchar(h[i]);
+    }
+}
+
+static inline void xp_tweak_taproot_metal(thread uchar* out32,
+                                          const thread uchar* pub_uncomp,
+                                          const constant secp256k1_ge_storage* precPtr,
+                                          size_t precPitch) {
+    const thread uchar* p = pub_uncomp;
+    if (p[0] != 0x04u) {
+        for (int k = 0; k < 32; ++k) {
+            out32[k] = 0u;
+        }
+        return;
+    }
+
+    secp256k1_fe x;
+    secp256k1_fe y;
+    secp256k1_fe_set_b32(&x, p + 1);
+    secp256k1_fe_set_b32(&y, p + 33);
+
+    secp256k1_ge point;
+    secp256k1_ge_set_xy(&point, &x, &y);
+    secp256k1_fe_normalize_var(&point.y);
+    if (secp256k1_fe_is_odd(&point.y)) {
+        secp256k1_ge neg = point;
+        secp256k1_fe_negate(&neg.y, &neg.y, 1);
+        point = neg;
+    }
+
+    thread uchar px32[32];
+    thread uchar tweak32[32];
+    secp256k1_fe_normalize_var(&point.x);
+    secp256k1_fe_get_b32(px32, &point.x);
+    xp_sha256_taptweak_px_metal(px32, tweak32);
+
+    secp256k1_scalar tweak_scalar;
+    secp256k1_scalar_set_b32(&tweak_scalar, tweak32, nullptr);
+
+    secp256k1_gej tweak_j;
+    secp256k1_ecmult_big(&tweak_j, &tweak_scalar, precPtr, precPitch);
+    secp256k1_gej out_j;
+    secp256k1_gej_add_ge_var(&out_j, &tweak_j, &point, nullptr);
+    if (out_j.infinity != 0) {
+        for (int k = 0; k < 32; ++k) {
+            out32[k] = 0u;
+        }
+        return;
+    }
+
+    secp256k1_fe z_inv;
+    secp256k1_fe_inv_all_var(1, &z_inv, &out_j.z);
+    secp256k1_ge out_ge;
+    secp256k1_ge_set_gej_zinv(&out_ge, &out_j, &z_inv);
+    secp256k1_fe_normalize_var(&out_ge.y);
+    if (secp256k1_fe_is_odd(&out_ge.y)) {
+        secp256k1_ge_neg(&out_ge, &out_ge);
+    }
+    secp256k1_fe_normalize_var(&out_ge.x);
+    secp256k1_fe_get_b32(out32, &out_ge.x);
+}
+
+static inline ulong xp_atomic_add_count(device atomic_uint* counter, uint value) {
+    const uint low = atomic_fetch_add_explicit(counter, value, memory_order_relaxed);
+    if (low + value < low) {
+        atomic_fetch_add_explicit(counter + 1, 1u, memory_order_relaxed);
+    }
+    const uint high = atomic_load_explicit(counter + 1, memory_order_relaxed);
+    return (ulong(high) << 32u) | ulong(low);
+}
+
+static inline bool xp_check_hash_words(device RuntimeConfig& config,
+                                       device XorFilterState& filters,
+                                       device FilterStorageState& storage,
+                                       const device uchar* bloom_storage,
+                                       const device uchar* xor_storage,
+                                       const device uchar* xor_un_storage,
+                                       const device uchar* xor_uc_storage,
+                                       const device uchar* xor_hc_storage,
+                                       const thread uint* hash_words,
+                                       uint payload_len) {
+    return filter_check_hash_payload(config, filters, storage, bloom_storage, xor_storage,
+                                     xor_un_storage, xor_uc_storage, xor_hc_storage,
+                                     hash_words, payload_len);
+}
+
+static inline void xp_emit_result(device bool* isResult,
+                                  device bool* buffResult,
+                                  uchar profile_kind,
+                                  uchar path_id,
+                                  uint pid,
+                                  uint key_index,
+                                  uint line_index,
+                                  const thread uchar priv32[32],
+                                  uchar type_value,
+                                  const thread void* payload,
+                                  uint payload_len,
+                                  uchar arch_id,
+                                  ulong source_state,
+                                  uint seed_time0,
+                                  uint seed_time1,
+                                  uchar variant_id,
+                                  device XpReplayResult* xp_results,
+                                  device atomic_uint* xp_count,
+                                  uint max_founds) {
+    if (buffResult != nullptr) {
+        buffResult[0] = true;
+    }
+    if (isResult != nullptr) {
+        isResult[0] = true;
+    }
+    if (xp_results == nullptr || xp_count == nullptr) {
+        return;
+    }
+    const ulong ridx = xp_atomic_add_count(xp_count, 1u);
+    if (ridx >= ulong(max_founds)) {
+        return;
+    }
+    device XpReplayResult& out = xp_results[ridx];
+    for (int i = 0; i < 32; ++i) {
+        out.priv[i] = priv32[i];
+    }
+    for (uint i = 0u; i < XP_REPLAY_PAYLOAD_MAX_METAL; ++i) {
+        out.payload[i] = 0u;
+    }
+    uint n = min(payload_len, XP_REPLAY_PAYLOAD_MAX_METAL);
+    if (payload != nullptr) {
+        const thread uchar* p = reinterpret_cast<const thread uchar*>(payload);
+        for (uint i = 0u; i < n; ++i) {
+            out.payload[i] = p[i];
+        }
+    }
+    out.profile_kind = profile_kind;
+    out.path_id = path_id;
+    out.type = type_value;
+    out.payload_len = uchar(n);
+    out.pid = pid;
+    out.key_index = key_index;
+    out.line_index = line_index;
+    out.source_state = source_state;
+    out.seed_time0 = seed_time0;
+    out.seed_time1 = seed_time1;
+    out.reserved[0] = arch_id;
+    out.reserved[1] = variant_id;
+    out.reserved[2] = 0u;
+    out.reserved[3] = 0u;
+}
+
+static inline bool xp_priv_to_xy(const constant secp256k1_ge_storage* precPtr,
+                                 size_t precPitch,
+                                 const thread uchar priv32[32],
+                                 thread uchar pubkey65[65],
+                                 thread ulong px[4],
+                                 thread ulong py[4]) {
+    pubkey65[0] = 0x04u;
+    const int ok = secp256k1_ec_pubkey_create(reinterpret_cast<thread secp256k1_pubkey*>(pubkey65 + 1),
+                                              priv32,
+                                              precPtr,
+                                              precPitch);
+    if (ok == 0) {
+        return false;
+    }
+    for (int w = 0; w < 4; ++w) {
+        const int off = (3 - w) * 8;
+        px[w] = profanity_load_be64(pubkey65 + 1 + off);
+        py[w] = profanity_load_be64(pubkey65 + 33 + off);
+    }
+    return true;
+}
+
+static inline void xp_check_emit_targets(device bool* isResult,
+                                         device bool* buffResult,
+                                         const constant secp256k1_ge_storage* precPtr,
+                                         ulong precPitch,
+                                         uchar profile_kind,
+                                         uchar path_id,
+                                         uint pid,
+                                         uint key_index,
+                                         uint line_index,
+                                         const thread uchar priv32[32],
+                                         uchar arch_id,
+                                         ulong source_state,
+                                         uint seed_time0,
+                                         uint seed_time1,
+                                         uchar variant_id,
+                                         bool do_c,
+                                         bool do_u,
+                                         bool do_s,
+                                         bool do_r,
+                                         bool do_x,
+                                         bool do_e,
+                                         device RuntimeConfig& config,
+                                         device XorFilterState& filters,
+                                         device FilterStorageState& storage,
+                                         const device uchar* bloom_storage,
+                                         const device uchar* xor_storage,
+                                         const device uchar* xor_un_storage,
+                                         const device uchar* xor_uc_storage,
+                                         const device uchar* xor_hc_storage,
+                                         device XpReplayResult* xp_results,
+                                         device atomic_uint* xp_count) {
+    thread uchar pubkey65[65];
+    thread ulong px[4];
+    thread ulong py[4];
+    if (!xp_priv_to_xy(precPtr, size_t(precPitch), priv32, pubkey65, px, py)) {
+        return;
+    }
+
+    thread uint h[8] = { 0u };
+    thread uint comp_hash[8] = { 0u };
+    const uchar odd_py = uchar(py[0] & 1ul);
+    const bool need_comp = do_c || do_s || (XP_FC_P2WSH && config.p2wsh != 0u);
+
+    if (need_comp) {
+        _GetHash160Comp_fast(px, odd_py, reinterpret_cast<thread uchar*>(comp_hash));
+    }
+    if (do_c) {
+        if (xp_check_hash_words(config, filters, storage, bloom_storage, xor_storage, xor_un_storage, xor_uc_storage, xor_hc_storage, comp_hash, 20u)) {
+            xp_emit_result(isResult, buffResult, profile_kind, path_id, pid, key_index, line_index,
+                           priv32, 0x02u, comp_hash, 20u, arch_id, source_state, seed_time0,
+                           seed_time1, variant_id, xp_results, xp_count, config.maxFounds);
+        }
+    }
+    if (do_u) {
+        _GetHash160Uncomp_fast(px, py, reinterpret_cast<thread uchar*>(h));
+        if (xp_check_hash_words(config, filters, storage, bloom_storage, xor_storage, xor_un_storage, xor_uc_storage, xor_hc_storage, h, 20u)) {
+            xp_emit_result(isResult, buffResult, profile_kind, path_id, pid, key_index, line_index,
+                           priv32, 0x01u, h, 20u, arch_id, source_state, seed_time0,
+                           seed_time1, variant_id, xp_results, xp_count, config.maxFounds);
+        }
+    }
+    if (do_s) {
+        for (int i = 0; i < 8; ++i) {
+            h[i] = comp_hash[i];
+        }
+        _GetHash160P2SHCompFromHash(h, h);
+        if (xp_check_hash_words(config, filters, storage, bloom_storage, xor_storage, xor_un_storage, xor_uc_storage, xor_hc_storage, h, 20u)) {
+            xp_emit_result(isResult, buffResult, profile_kind, path_id, pid, key_index, line_index,
+                           priv32, 0x03u, h, 20u, arch_id, source_state, seed_time0,
+                           seed_time1, variant_id, xp_results, xp_count, config.maxFounds);
+        }
+    }
+    if (XP_FC_P2WSH && config.p2wsh != 0u) {
+        thread uchar p2wsh_hash[32];
+        thread uint p2wsh_rmd[8] = { 0u };
+        _GetP2WSHComp_fast(px, odd_py, p2wsh_hash, p2wsh_rmd);
+        if (xp_check_hash_words(config, filters, storage, bloom_storage, xor_storage, xor_un_storage, xor_uc_storage, xor_hc_storage, p2wsh_rmd, 20u)) {
+            xp_emit_result(isResult, buffResult, profile_kind, path_id, pid, key_index, line_index,
+                           priv32, 0x07u, p2wsh_hash, 32u, arch_id, source_state, seed_time0,
+                           seed_time1, variant_id, xp_results, xp_count, config.maxFounds);
+        }
+    }
+    if (do_r) {
+        thread uchar taproot_hash[32];
+        xp_tweak_taproot_metal(taproot_hash, pubkey65, precPtr, size_t(precPitch));
+        _GetRMD160(reinterpret_cast<thread uint*>(taproot_hash), h);
+        if (xp_check_hash_words(config, filters, storage, bloom_storage, xor_storage, xor_un_storage, xor_uc_storage, xor_hc_storage, h, 20u)) {
+            xp_emit_result(isResult, buffResult, profile_kind, path_id, pid, key_index, line_index,
+                           priv32, 0x04u, taproot_hash, 32u, arch_id, source_state, seed_time0,
+                           seed_time1, variant_id, xp_results, xp_count, config.maxFounds);
+        }
+    }
+    if (do_x) {
+        thread uint xpoint[8] = { 0u };
+        u64x4_to_x32(px, reinterpret_cast<thread unsigned char*>(xpoint));
+        if (xp_check_hash_words(config, filters, storage, bloom_storage, xor_storage, xor_un_storage, xor_uc_storage, xor_hc_storage, xpoint, 32u)) {
+            xp_emit_result(isResult, buffResult, profile_kind, path_id, pid, key_index, line_index,
+                           priv32, 0x05u, xpoint, 32u, arch_id, source_state, seed_time0,
+                           seed_time1, variant_id, xp_results, xp_count, config.maxFounds);
+        }
+    }
+    if (do_e) {
+        thread uint eth_hash160[5] = { 0u };
+        keccak_eth64_tail20_from_xy(px, py, eth_hash160);
+        if (xp_check_hash_words(config, filters, storage, bloom_storage, xor_storage, xor_un_storage, xor_uc_storage, xor_hc_storage, eth_hash160, 20u)) {
+            xp_emit_result(isResult, buffResult, profile_kind, path_id, pid, key_index, line_index,
+                           priv32, 0x06u, eth_hash160, 20u, arch_id, source_state, seed_time0,
+                           seed_time1, variant_id, xp_results, xp_count, config.maxFounds);
+        }
+    }
+}
+
+static inline uint xp_mask_variant_index(ulong mask, uint ordinal, uint count) {
+    uint seen = 0u;
+    for (uint i = 0u; i < count; ++i) {
+        if ((mask & (1ul << i)) == 0ul) {
+            continue;
+        }
+        if (seen == ordinal) {
+            return i;
+        }
+        ++seen;
+    }
+    return count;
+}
+
+struct XpRandstormPosixRand48CoreMetal {
+    ulong x;
+
+    static inline void init(thread XpRandstormPosixRand48CoreMetal& r, ulong seed) {
+        r.x = (seed << 16) | 0x330eul;
+    }
+
+    inline ulong step() thread {
+        x = (x * 0x5deece66dul + 0xbul) & 0xfffffffffffful;
+        return x;
+    }
+
+    inline uint lrand31() thread {
+        return uint(step() >> 17);
+    }
+};
+
+template<int DEG, int SEP, int WARMUP>
+struct XpRandstormGlibcRandomFeedbackMetal {
+    uint state[DEG];
+    int fptr;
+    int rptr;
+
+    static inline void init(thread XpRandstormGlibcRandomFeedbackMetal& r, ulong seed) {
+        r.fptr = SEP;
+        r.rptr = 0;
+        uint s = uint(seed);
+        if (s == 0u) {
+            s = 1u;
+        }
+        r.state[0] = s;
+        for (int i = 1; i < DEG; ++i) {
+            r.state[i] = uint((16807ul * ulong(r.state[i - 1])) % 0x7ffffffful);
+        }
+        for (int i = 0; i < WARMUP; ++i) {
+            (void)r.next31();
+        }
+    }
+
+    inline uint next31() thread {
+        const uint sum = state[fptr] + state[rptr];
+        state[fptr] = sum;
+        const uint result = sum >> 1;
+        if (++fptr >= DEG) {
+            fptr = 0;
+        }
+        if (++rptr >= DEG) {
+            rptr = 0;
+        }
+        return result;
+    }
+};
+
+struct RandstormV8_2011Profile64 {
+    uint hi;
+    uint lo;
+
+    static inline void init(thread RandstormV8_2011Profile64& r, ulong seed) {
+        r.hi = uint(seed >> 32);
+        r.lo = uint(seed);
+        if (r.hi == 0u) {
+            r.hi = 1u;
+        }
+        if (r.lo == 0u) {
+            r.lo = 1u;
+        }
+    }
+
+    inline ushort next_pool_u16() thread {
+        hi = 36969u * (hi & 0xffffu) + (hi >> 16);
+        lo = 18273u * (lo & 0xffffu) + (lo >> 16);
+        const uint random_bits = (hi << 16) + (lo & 0xffffu);
+        return ushort((random_bits & 0x3fffffffu) >> 14);
+    }
+};
+
+struct RandstormV8_2015Profile64 {
+    ushort a;
+    ushort b;
+    ushort c;
+    ushort d;
+
+    static inline void init(thread RandstormV8_2015Profile64& r, ulong seed) {
+        r.a = ushort(seed & 0xfffful);
+        r.b = ushort((seed >> 16) & 0xfffful);
+        r.c = ushort((seed >> 32) & 0xfffful);
+        r.d = ushort((seed >> 48) & 0xfffful);
+        if (r.a < 2u) {
+            r.a = 1u;
+        }
+        if (r.b < 2u) {
+            r.b = 1u;
+        }
+        if (r.c < 2u) {
+            r.c = 1u;
+        }
+        if (r.d < 2u) {
+            r.d = 1u;
+        }
+    }
+
+    inline ushort next_pool_u16() thread {
+        const uint r0 = 18030u * uint(a) + uint(b);
+        const uint r1 = 36969u * uint(c) + uint(d);
+        a = ushort(r0 & 0xffffu);
+        b = ushort(r0 >> 16);
+        c = ushort(r1 & 0xffffu);
+        d = ushort(r1 >> 16);
+        return ushort((r0 ^ r1) >> 4);
+    }
+};
+
+struct RandstormSpiderMonkeyLcg48Profile64 {
+    ulong state;
+
+    static inline void init(thread RandstormSpiderMonkeyLcg48Profile64& r, ulong seed) {
+        r.state = seed & 0xfffffffffffful;
+        if (r.state == 0ul) {
+            r.state = 1ul;
+        }
+    }
+
+    inline ushort next_pool_u16() thread {
+        state = (state * 0x5deece66dul + 0xbul) & 0xfffffffffffful;
+        const ushort out = ushort((state >> 32) & 0xfffful);
+        state = (state * 0x5deece66dul + 0xbul) & 0xfffffffffffful;
+        return out;
+    }
+};
+
+struct RandstormJscWeakRandomProfile64 {
+    uint low;
+    uint high;
+
+    static inline void init(thread RandstormJscWeakRandomProfile64& r, ulong seed) {
+        r.low = uint(seed) ^ 0x49616e42u;
+        r.high = uint(seed);
+    }
+
+    inline ushort next_pool_u16() thread {
+        high = (high << 16) + (high >> 16);
+        high += low;
+        low += high;
+        return ushort(high >> 16);
+    }
+};
+
+struct RandstormLcg32Profile64 {
+    uint state;
+
+    static inline void init(thread RandstormLcg32Profile64& r, ulong seed) {
+        r.state = uint(seed);
+    }
+
+    inline ushort next_pool_u16() thread {
+        state = state * 1664525u + 1013904223u;
+        return ushort(state >> 16);
+    }
+};
+
+struct RandstormV8ClassicMwcProfile64 {
+    uint hi;
+    uint lo;
+
+    static inline void init(thread RandstormV8ClassicMwcProfile64& r, ulong seed) {
+        r.hi = uint(seed >> 32);
+        r.lo = uint(seed);
+        if (r.hi == 0u) {
+            r.hi = 1u;
+        }
+        if (r.lo == 0u) {
+            r.lo = 1u;
+        }
+    }
+
+    inline ushort next_pool_u16() thread {
+        hi = 36969u * (hi & 0xffffu) + (hi >> 16);
+        lo = 18273u * (lo & 0xffffu) + (lo >> 16);
+        const uint random_bits = (hi << 16) + (lo & 0xffffu);
+        return ushort(random_bits >> 16);
+    }
+};
+
+struct RandstormV8AltMwcProfile64 {
+    uint state0;
+    uint state1;
+
+    static inline void init(thread RandstormV8AltMwcProfile64& r, ulong seed) {
+        r.state0 = uint(seed >> 32);
+        r.state1 = uint(seed);
+        if (r.state0 == 0u) {
+            r.state0 = 1u;
+        }
+        if (r.state1 == 0u) {
+            r.state1 = 1u;
+        }
+    }
+
+    inline ushort next_pool_u16() thread {
+        state0 = 18030u * (state0 & 0xffffu) + (state0 >> 16);
+        state1 = 36969u * (state1 & 0xffffu) + (state1 >> 16);
+        const uint random_bits = (state0 << 16) + (state1 & 0xffffu);
+        return ushort(random_bits >> 16);
+    }
+};
+
+struct RandstormV8Mwc1616Profile64 {
+    uint state0;
+    uint state1;
+
+    static inline void init(thread RandstormV8Mwc1616Profile64& r, ulong seed) {
+        r.state0 = uint(seed >> 32);
+        r.state1 = uint(seed);
+        if (r.state0 == 0u) {
+            r.state0 = 1u;
+        }
+        if (r.state1 == 0u) {
+            r.state1 = 2u;
+        }
+    }
+
+    inline ushort next_pool_u16() thread {
+        state0 = 18030u * (state0 & 0xffffu) + (state0 >> 16);
+        state1 = 30903u * (state1 & 0xffffu) + (state1 >> 16);
+        const uint random_bits = (state0 << 16) + (state1 & 0xffffu);
+        return ushort(random_bits >> 16);
+    }
+};
+
+struct RandstormMsvcRandSeed64 {
+    uint state;
+
+    static inline void init(thread RandstormMsvcRandSeed64& r, ulong seed) {
+        r.state = uint(seed);
+    }
+
+    inline uint next_seed_word() thread {
+        state = state * 214013u + 2531011u;
+        return (state >> 16) & 0x7fffu;
+    }
+};
+
+struct RandstormAnsiRandSeed64 {
+    uint state;
+
+    static inline void init(thread RandstormAnsiRandSeed64& r, ulong seed) {
+        r.state = uint(seed);
+    }
+
+    inline uint next_seed_word() thread {
+        state = state * 1103515245u + 12345u;
+        return (state >> 16) & 0x7fffu;
+    }
+};
+
+struct RandstormLrand48Seed64 {
+    XpRandstormPosixRand48CoreMetal core;
+
+    static inline void init(thread RandstormLrand48Seed64& r, ulong seed) {
+        XpRandstormPosixRand48CoreMetal::init(r.core, seed);
+    }
+
+    inline uint next_seed_word() thread {
+        return core.lrand31();
+    }
+};
+
+struct RandstormGlibcRandomType3Seed64 {
+    XpRandstormGlibcRandomFeedbackMetal<31, 3, 310> core;
+
+    static inline void init(thread RandstormGlibcRandomType3Seed64& r, ulong seed) {
+        XpRandstormGlibcRandomFeedbackMetal<31, 3, 310>::init(r.core, seed);
+    }
+
+    inline uint next_seed_word() thread {
+        return core.next31();
+    }
+};
+
+template <typename SeedProfile>
+static inline ulong randstorm_v8init_math_state64(ulong seed) {
+    thread SeedProfile seed_profile;
+    SeedProfile::init(seed_profile, seed);
+    uint hi = seed_profile.next_seed_word();
+    uint lo = seed_profile.next_seed_word();
+    if (hi == 0u) {
+        hi = seed_profile.next_seed_word();
+    }
+    if (lo == 0u) {
+        lo = seed_profile.next_seed_word();
+    }
+    if (hi == 0u) {
+        hi = 1u;
+    }
+    if (lo == 0u) {
+        lo = 1u;
+    }
+    return (ulong(hi) << 32) | ulong(lo);
+}
+
+static inline void randstorm_arc4_seed_int64(thread uchar pool[256], thread int& pptr, uint x) {
+    pool[pptr++] ^= uchar(x & 255u);
+    pool[pptr++] ^= uchar((x >> 8) & 255u);
+    pool[pptr++] ^= uchar((x >> 16) & 255u);
+    pool[pptr++] ^= uchar((x >> 24) & 255u);
+    if (pptr >= 256) {
+        pptr -= 256;
+    }
+}
+
+static inline void randstorm_arc4_init64(thread uchar S[256], const thread uchar pool[256]) {
+    for (int n = 0; n < 256; ++n) {
+        S[n] = uchar(n);
+    }
+    uchar k = 0u;
+    for (int n = 0; n < 256; ++n) {
+        k = uchar(k + S[n] + pool[n]);
+        const uchar t = S[n];
+        S[n] = S[k];
+        S[k] = t;
+    }
+}
+
+static inline uchar randstorm_arc4_next_byte64(thread uchar S[256], thread uchar& i, thread uchar& j) {
+    i = uchar(i + 1u);
+    j = uchar(j + S[i]);
+    const uchar t = S[i];
+    S[i] = S[j];
+    S[j] = t;
+    return S[uchar(t + S[i])];
+}
+
+template <typename Profile>
+static inline bool randstorm_direct_bytes_fill_exact_mileage64(int entropy_len,
+                                                               thread uchar* entropy,
+                                                               uint skip_len,
+                                                               ulong math_random_state,
+                                                               uint mileage) {
+    thread Profile profile;
+    Profile::init(profile, math_random_state);
+    for (uint n = 0u; n < mileage; ++n) {
+        (void)profile.next_pool_u16();
+    }
+    for (uint n = 0u; n < skip_len; ++n) {
+        (void)profile.next_pool_u16();
+    }
+    for (int n = 0; n < entropy_len; ++n) {
+        entropy[n] = uchar(profile.next_pool_u16() >> 8);
+    }
+    return true;
+}
+
+template <typename Profile>
+static inline bool randstorm_direct_bytes_low_fill_exact_mileage64(int entropy_len,
+                                                                   thread uchar* entropy,
+                                                                   uint skip_len,
+                                                                   ulong math_random_state,
+                                                                   uint mileage) {
+    thread Profile profile;
+    Profile::init(profile, math_random_state);
+    for (uint n = 0u; n < mileage; ++n) {
+        (void)profile.next_pool_u16();
+    }
+    for (uint n = 0u; n < skip_len; ++n) {
+        (void)profile.next_pool_u16();
+    }
+    for (int n = 0; n < entropy_len; ++n) {
+        entropy[n] = uchar(profile.next_pool_u16() & 0xffu);
+    }
+    return true;
+}
+
+static inline uchar randstorm_crypto_browserify_byte1(thread RandstormV8_2011Profile64& profile) {
+    profile.hi = 36969u * (profile.hi & 0xffffu) + (profile.hi >> 16);
+    profile.lo = 18273u * (profile.lo & 0xffffu) + (profile.lo >> 16);
+    const uint random_bits = (profile.hi << 16) + (profile.lo & 0xffffu);
+    return uchar(((random_bits & 0x3fffffffu) << 2) & 0xffu);
+}
+
+static inline uchar randstorm_crypto_browserify_byte1(thread RandstormV8_2015Profile64& profile) {
+    const uint r0 = 18030u * uint(profile.a) + uint(profile.b);
+    const uint r1 = 36969u * uint(profile.c) + uint(profile.d);
+    profile.a = ushort(r0 & 0xffffu);
+    profile.b = ushort(r0 >> 16);
+    profile.c = ushort(r1 & 0xffffu);
+    profile.d = ushort(r1 >> 16);
+    return uchar((r0 ^ r1) & 0xffu);
+}
+
+static inline uchar randstorm_crypto_browserify_byte1(thread RandstormSpiderMonkeyLcg48Profile64& profile) {
+    profile.state = (profile.state * 0x5deece66dul + 0xbul) & 0xfffffffffffful;
+    const uint hi26 = uint(profile.state >> 22);
+    profile.state = (profile.state * 0x5deece66dul + 0xbul) & 0xfffffffffffful;
+    const uint lo27 = uint(profile.state >> 21);
+    return uchar(((hi26 << 6) | (lo27 >> 21)) & 0xffu);
+}
+
+static inline uchar randstorm_crypto_browserify_byte1(thread RandstormJscWeakRandomProfile64& profile) {
+    profile.high = (profile.high << 16) + (profile.high >> 16);
+    profile.high += profile.low;
+    profile.low += profile.high;
+    return uchar(profile.high & 0xffu);
+}
+
+static inline uchar randstorm_crypto_browserify_byte1(thread RandstormLcg32Profile64& profile) {
+    profile.state = profile.state * 1664525u + 1013904223u;
+    return uchar(profile.state & 0xffu);
+}
+
+static inline uchar randstorm_crypto_browserify_byte1(thread RandstormV8ClassicMwcProfile64& profile) {
+    profile.hi = 36969u * (profile.hi & 0xffffu) + (profile.hi >> 16);
+    profile.lo = 18273u * (profile.lo & 0xffffu) + (profile.lo >> 16);
+    const uint random_bits = (profile.hi << 16) + (profile.lo & 0xffffu);
+    return uchar(random_bits & 0xffu);
+}
+
+static inline uchar randstorm_crypto_browserify_byte1(thread RandstormV8AltMwcProfile64& profile) {
+    profile.state0 = 18030u * (profile.state0 & 0xffffu) + (profile.state0 >> 16);
+    profile.state1 = 36969u * (profile.state1 & 0xffffu) + (profile.state1 >> 16);
+    const uint random_bits = (profile.state0 << 16) + (profile.state1 & 0xffffu);
+    return uchar(random_bits & 0xffu);
+}
+
+static inline uchar randstorm_crypto_browserify_byte1(thread RandstormV8Mwc1616Profile64& profile) {
+    profile.state0 = 18030u * (profile.state0 & 0xffffu) + (profile.state0 >> 16);
+    profile.state1 = 30903u * (profile.state1 & 0xffffu) + (profile.state1 >> 16);
+    const uint random_bits = (profile.state0 << 16) + (profile.state1 & 0xffffu);
+    return uchar(random_bits & 0xffu);
+}
+
+template <typename Profile>
+static inline bool randstorm_crypto_browserify_bytes1_fill_exact_mileage64(int entropy_len,
+                                                                           thread uchar* entropy,
+                                                                           uint skip_len,
+                                                                           ulong math_random_state,
+                                                                           uint mileage) {
+    thread Profile profile;
+    Profile::init(profile, math_random_state);
+    for (uint n = 0u; n < mileage; ++n) {
+        (void)randstorm_crypto_browserify_byte1(profile);
+    }
+    for (uint n = 0u; n < skip_len; ++n) {
+        (void)randstorm_crypto_browserify_byte1(profile);
+    }
+    for (int n = 0; n < entropy_len; ++n) {
+        entropy[n] = randstorm_crypto_browserify_byte1(profile);
+    }
+    return true;
+}
+
+template <typename Profile, bool LowHighPoolOrder>
+static inline bool randstorm_pool_fill_exact64(int entropy_len,
+                                               thread uchar* entropy,
+                                               uint skip_len,
+                                               ulong math_random_state) {
+    thread Profile profile;
+    Profile::init(profile, math_random_state);
+    const uint skip_words = skip_len >> 1;
+    for (uint n = 0u; n < skip_words; ++n) {
+        (void)profile.next_pool_u16();
+    }
+    const bool skip_low_byte = (skip_len & 1u) != 0u;
+    int out = 0;
+    if (skip_low_byte && out < entropy_len) {
+        const ushort t = profile.next_pool_u16();
+        entropy[out++] = LowHighPoolOrder ? uchar(t >> 8) : uchar(t & 255u);
+    }
+    while (out < entropy_len) {
+        const ushort t = profile.next_pool_u16();
+        if (LowHighPoolOrder) {
+            entropy[out++] = uchar(t & 255u);
+            if (out < entropy_len) {
+                entropy[out++] = uchar(t >> 8);
+            }
+        } else {
+            entropy[out++] = uchar(t >> 8);
+            if (out < entropy_len) {
+                entropy[out++] = uchar(t & 255u);
+            }
+        }
+    }
+    return true;
+}
+
+template <typename Profile, bool LowHighPoolOrder>
+static inline bool randstorm_jsbn_arc4_fill_exact_events_mileage64(int entropy_len,
+                                                                   thread uchar* entropy,
+                                                                   uint skip_len,
+                                                                   ulong math_random_state,
+                                                                   uint seed_time0,
+                                                                   uint seed_time1,
+                                                                   uint seed_event_count,
+                                                                   uint screen_seed_x,
+                                                                   uint screen_seed_y,
+                                                                   uint mileage) {
+    thread Profile profile;
+    Profile::init(profile, math_random_state);
+    for (uint n = 0u; n < mileage; ++n) {
+        (void)profile.next_pool_u16();
+    }
+    thread uchar pool[256];
+    int pptr = 0;
+    while (pptr < 256) {
+        const ushort t = profile.next_pool_u16();
+        if (LowHighPoolOrder) {
+            pool[pptr++] = uchar(t & 255u);
+            pool[pptr++] = uchar(t >> 8);
+        } else {
+            pool[pptr++] = uchar(t >> 8);
+            pool[pptr++] = uchar(t & 255u);
+        }
+    }
+    pptr = 0;
+    randstorm_arc4_seed_int64(pool, pptr, seed_time0);
+    const bool repeat_seed_time = (seed_event_count & XP_RANDSTORM_SEED_EVENTS_REPEAT_FLAG_METAL) != 0u;
+    const uint seed_event_count_only = seed_event_count & XP_RANDSTORM_SEED_EVENTS_COUNT_MASK_METAL;
+    for (uint event_i = 0u; event_i < seed_event_count_only; ++event_i) {
+        randstorm_arc4_seed_int64(pool, pptr, repeat_seed_time ? seed_time0 : (seed_time0 + event_i + 1u));
+    }
+    if ((seed_event_count & XP_RANDSTORM_SEED_EVENTS_SCREEN_ZERO_FLAG_METAL) != 0u) {
+        randstorm_arc4_seed_int64(pool, pptr, screen_seed_x);
+        randstorm_arc4_seed_int64(pool, pptr, screen_seed_y);
+    }
+    randstorm_arc4_seed_int64(pool, pptr, seed_time1);
+
+    thread uchar S[256];
+    randstorm_arc4_init64(S, pool);
+    uchar i = 0u;
+    uchar j = 0u;
+    for (uint n = 0u; n < skip_len; ++n) {
+        (void)randstorm_arc4_next_byte64(S, i, j);
+    }
+    for (int n = 0; n < entropy_len; ++n) {
+        entropy[n] = randstorm_arc4_next_byte64(S, i, j);
+    }
+    return true;
+}
+
+template <typename SeedProfile, typename MathProfile, bool LowHighPoolOrder>
+static inline bool randstorm_v8init_jsbn_fill_exact_events_mileage64(int entropy_len,
+                                                                     thread uchar* entropy,
+                                                                     uint skip_len,
+                                                                     ulong seed,
+                                                                     uint seed_time0,
+                                                                     uint seed_time1,
+                                                                     uint seed_event_count,
+                                                                     uint screen_seed_x,
+                                                                     uint screen_seed_y,
+                                                                     uint mileage) {
+    const ulong math_state = randstorm_v8init_math_state64<SeedProfile>(seed);
+    return randstorm_jsbn_arc4_fill_exact_events_mileage64<MathProfile, LowHighPoolOrder>(
+        entropy_len, entropy, skip_len, math_state, seed_time0, seed_time1,
+        seed_event_count, screen_seed_x, screen_seed_y, mileage);
+}
+
+template <typename SeedProfile, typename MathProfile>
+static inline bool randstorm_v8init_direct_bytes_fill_exact_mileage64(int entropy_len,
+                                                                      thread uchar* entropy,
+                                                                      uint skip_len,
+                                                                      ulong seed,
+                                                                      uint mileage) {
+    const ulong math_state = randstorm_v8init_math_state64<SeedProfile>(seed);
+    return randstorm_direct_bytes_fill_exact_mileage64<MathProfile>(
+        entropy_len, entropy, skip_len, math_state, mileage);
+}
+
+template <typename SeedProfile, typename MathProfile>
+static inline bool randstorm_v8init_direct_bytes_low_fill_exact_mileage64(int entropy_len,
+                                                                          thread uchar* entropy,
+                                                                          uint skip_len,
+                                                                          ulong seed,
+                                                                          uint mileage) {
+    thread MathProfile profile;
+    MathProfile::init(profile, randstorm_v8init_math_state64<SeedProfile>(seed));
+    for (uint n = 0u; n < mileage; ++n) {
+        (void)profile.next_pool_u16();
+    }
+    for (uint n = 0u; n < skip_len; ++n) {
+        (void)profile.next_pool_u16();
+    }
+    for (int n = 0; n < entropy_len; ++n) {
+        entropy[n] = uchar(profile.next_pool_u16() & 0xffu);
+    }
+    return true;
+}
+
+template <typename SeedProfile, typename MathProfile, bool LowHighPoolOrder>
+static inline bool randstorm_v8init_pool32_fill_exact_mileage64(int entropy_len,
+                                                                thread uchar* entropy,
+                                                                uint skip_len,
+                                                                ulong seed,
+                                                                uint mileage) {
+    const ulong pool_skip64 = ulong(skip_len) + ulong(mileage) * 2ul;
+    if (pool_skip64 > 0xfffffffful) {
+        return false;
+    }
+    const ulong math_state = randstorm_v8init_math_state64<SeedProfile>(seed);
+    return randstorm_pool_fill_exact64<MathProfile, LowHighPoolOrder>(
+        entropy_len, entropy, uint(pool_skip64), math_state);
+}
+
+static inline bool RandstormJsbnArc4FillOffsetEventsMileage64(int entropy_len,
+                                                              thread uchar* entropy,
+                                                              uint skip_len,
+                                                              ulong math_random_state,
+                                                              uint seed_time0,
+                                                              uint seed_time1,
+                                                              uint seed_event_count,
+                                                              uint screen_seed_x,
+                                                              uint screen_seed_y,
+                                                              uint mileage,
+                                                              int gen) {
+    const ulong pool_skip64 = ulong(skip_len) + ulong(mileage) * 2ul;
+    if (pool_skip64 > 0xfffffffful) {
+        return false;
+    }
+    const uint pool_skip_len = uint(pool_skip64);
+    switch (gen) {
+        case 211: return randstorm_jsbn_arc4_fill_exact_events_mileage64<RandstormV8_2011Profile64, false>(entropy_len, entropy, skip_len, math_random_state, seed_time0, seed_time1, seed_event_count, screen_seed_x, screen_seed_y, mileage);
+        case 212: return randstorm_jsbn_arc4_fill_exact_events_mileage64<RandstormV8_2015Profile64, false>(entropy_len, entropy, skip_len, math_random_state, seed_time0, seed_time1, seed_event_count, screen_seed_x, screen_seed_y, mileage);
+        case 213: return randstorm_jsbn_arc4_fill_exact_events_mileage64<RandstormSpiderMonkeyLcg48Profile64, false>(entropy_len, entropy, skip_len, math_random_state, seed_time0, seed_time1, seed_event_count, screen_seed_x, screen_seed_y, mileage);
+        case 214: return randstorm_jsbn_arc4_fill_exact_events_mileage64<RandstormJscWeakRandomProfile64, false>(entropy_len, entropy, skip_len, math_random_state, seed_time0, seed_time1, seed_event_count, screen_seed_x, screen_seed_y, mileage);
+        case 219: return randstorm_jsbn_arc4_fill_exact_events_mileage64<RandstormLcg32Profile64, false>(entropy_len, entropy, skip_len, math_random_state, seed_time0, seed_time1, seed_event_count, screen_seed_x, screen_seed_y, mileage);
+        case 270: return randstorm_jsbn_arc4_fill_exact_events_mileage64<RandstormV8ClassicMwcProfile64, false>(entropy_len, entropy, skip_len, math_random_state, seed_time0, seed_time1, seed_event_count, screen_seed_x, screen_seed_y, mileage);
+        case 271: return randstorm_jsbn_arc4_fill_exact_events_mileage64<RandstormV8AltMwcProfile64, false>(entropy_len, entropy, skip_len, math_random_state, seed_time0, seed_time1, seed_event_count, screen_seed_x, screen_seed_y, mileage);
+        case 272: return randstorm_jsbn_arc4_fill_exact_events_mileage64<RandstormV8Mwc1616Profile64, false>(entropy_len, entropy, skip_len, math_random_state, seed_time0, seed_time1, seed_event_count, screen_seed_x, screen_seed_y, mileage);
+        case 311: return randstorm_jsbn_arc4_fill_exact_events_mileage64<RandstormV8_2011Profile64, true>(entropy_len, entropy, skip_len, math_random_state, seed_time0, seed_time1, seed_event_count, screen_seed_x, screen_seed_y, mileage);
+        case 312: return randstorm_jsbn_arc4_fill_exact_events_mileage64<RandstormV8_2015Profile64, true>(entropy_len, entropy, skip_len, math_random_state, seed_time0, seed_time1, seed_event_count, screen_seed_x, screen_seed_y, mileage);
+        case 313: return randstorm_jsbn_arc4_fill_exact_events_mileage64<RandstormSpiderMonkeyLcg48Profile64, true>(entropy_len, entropy, skip_len, math_random_state, seed_time0, seed_time1, seed_event_count, screen_seed_x, screen_seed_y, mileage);
+        case 314: return randstorm_jsbn_arc4_fill_exact_events_mileage64<RandstormJscWeakRandomProfile64, true>(entropy_len, entropy, skip_len, math_random_state, seed_time0, seed_time1, seed_event_count, screen_seed_x, screen_seed_y, mileage);
+        case 319: return randstorm_jsbn_arc4_fill_exact_events_mileage64<RandstormLcg32Profile64, true>(entropy_len, entropy, skip_len, math_random_state, seed_time0, seed_time1, seed_event_count, screen_seed_x, screen_seed_y, mileage);
+        case 370: return randstorm_jsbn_arc4_fill_exact_events_mileage64<RandstormV8ClassicMwcProfile64, true>(entropy_len, entropy, skip_len, math_random_state, seed_time0, seed_time1, seed_event_count, screen_seed_x, screen_seed_y, mileage);
+        case 371: return randstorm_jsbn_arc4_fill_exact_events_mileage64<RandstormV8AltMwcProfile64, true>(entropy_len, entropy, skip_len, math_random_state, seed_time0, seed_time1, seed_event_count, screen_seed_x, screen_seed_y, mileage);
+        case 372: return randstorm_jsbn_arc4_fill_exact_events_mileage64<RandstormV8Mwc1616Profile64, true>(entropy_len, entropy, skip_len, math_random_state, seed_time0, seed_time1, seed_event_count, screen_seed_x, screen_seed_y, mileage);
+        case 411: return randstorm_pool_fill_exact64<RandstormV8_2011Profile64, false>(entropy_len, entropy, pool_skip_len, math_random_state);
+        case 412: return randstorm_pool_fill_exact64<RandstormV8_2015Profile64, false>(entropy_len, entropy, pool_skip_len, math_random_state);
+        case 413: return randstorm_pool_fill_exact64<RandstormSpiderMonkeyLcg48Profile64, false>(entropy_len, entropy, pool_skip_len, math_random_state);
+        case 414: return randstorm_pool_fill_exact64<RandstormJscWeakRandomProfile64, false>(entropy_len, entropy, pool_skip_len, math_random_state);
+        case 419: return randstorm_pool_fill_exact64<RandstormLcg32Profile64, false>(entropy_len, entropy, pool_skip_len, math_random_state);
+        case 470: return randstorm_pool_fill_exact64<RandstormV8ClassicMwcProfile64, false>(entropy_len, entropy, pool_skip_len, math_random_state);
+        case 471: return randstorm_pool_fill_exact64<RandstormV8AltMwcProfile64, false>(entropy_len, entropy, pool_skip_len, math_random_state);
+        case 472: return randstorm_pool_fill_exact64<RandstormV8Mwc1616Profile64, false>(entropy_len, entropy, pool_skip_len, math_random_state);
+        case 511: return randstorm_pool_fill_exact64<RandstormV8_2011Profile64, true>(entropy_len, entropy, pool_skip_len, math_random_state);
+        case 512: return randstorm_pool_fill_exact64<RandstormV8_2015Profile64, true>(entropy_len, entropy, pool_skip_len, math_random_state);
+        case 513: return randstorm_pool_fill_exact64<RandstormSpiderMonkeyLcg48Profile64, true>(entropy_len, entropy, pool_skip_len, math_random_state);
+        case 514: return randstorm_pool_fill_exact64<RandstormJscWeakRandomProfile64, true>(entropy_len, entropy, pool_skip_len, math_random_state);
+        case 519: return randstorm_pool_fill_exact64<RandstormLcg32Profile64, true>(entropy_len, entropy, pool_skip_len, math_random_state);
+        case 570: return randstorm_pool_fill_exact64<RandstormV8ClassicMwcProfile64, true>(entropy_len, entropy, pool_skip_len, math_random_state);
+        case 571: return randstorm_pool_fill_exact64<RandstormV8AltMwcProfile64, true>(entropy_len, entropy, pool_skip_len, math_random_state);
+        case 572: return randstorm_pool_fill_exact64<RandstormV8Mwc1616Profile64, true>(entropy_len, entropy, pool_skip_len, math_random_state);
+        default: return false;
+    }
+}
+
+static inline bool RandstormDirectBytesFillOffsetMileage64(int entropy_len,
+                                                           thread uchar* entropy,
+                                                           uint skip_len,
+                                                           ulong math_random_state,
+                                                           uint mileage,
+                                                           int gen) {
+    switch (gen) {
+        case 810: return randstorm_direct_bytes_fill_exact_mileage64<RandstormV8_2011Profile64>(entropy_len, entropy, skip_len, math_random_state, mileage);
+        case 811: return randstorm_direct_bytes_fill_exact_mileage64<RandstormV8_2015Profile64>(entropy_len, entropy, skip_len, math_random_state, mileage);
+        case 812: return randstorm_direct_bytes_fill_exact_mileage64<RandstormSpiderMonkeyLcg48Profile64>(entropy_len, entropy, skip_len, math_random_state, mileage);
+        case 813: return randstorm_direct_bytes_fill_exact_mileage64<RandstormJscWeakRandomProfile64>(entropy_len, entropy, skip_len, math_random_state, mileage);
+        case 814: return randstorm_direct_bytes_fill_exact_mileage64<RandstormV8ClassicMwcProfile64>(entropy_len, entropy, skip_len, math_random_state, mileage);
+        case 815: return randstorm_direct_bytes_fill_exact_mileage64<RandstormV8AltMwcProfile64>(entropy_len, entropy, skip_len, math_random_state, mileage);
+        case 816: return randstorm_direct_bytes_fill_exact_mileage64<RandstormV8Mwc1616Profile64>(entropy_len, entropy, skip_len, math_random_state, mileage);
+        case 817: return randstorm_direct_bytes_fill_exact_mileage64<RandstormLcg32Profile64>(entropy_len, entropy, skip_len, math_random_state, mileage);
+        default: return false;
+    }
+}
+
+static inline bool RandstormDirectBytesLowFillOffsetMileage64(int entropy_len,
+                                                              thread uchar* entropy,
+                                                              uint skip_len,
+                                                              ulong math_random_state,
+                                                              uint mileage,
+                                                              int gen) {
+    switch (gen) {
+        case 810: return randstorm_direct_bytes_low_fill_exact_mileage64<RandstormV8_2011Profile64>(entropy_len, entropy, skip_len, math_random_state, mileage);
+        case 811: return randstorm_direct_bytes_low_fill_exact_mileage64<RandstormV8_2015Profile64>(entropy_len, entropy, skip_len, math_random_state, mileage);
+        case 812: return randstorm_direct_bytes_low_fill_exact_mileage64<RandstormSpiderMonkeyLcg48Profile64>(entropy_len, entropy, skip_len, math_random_state, mileage);
+        case 813: return randstorm_direct_bytes_low_fill_exact_mileage64<RandstormJscWeakRandomProfile64>(entropy_len, entropy, skip_len, math_random_state, mileage);
+        case 814: return randstorm_direct_bytes_low_fill_exact_mileage64<RandstormV8ClassicMwcProfile64>(entropy_len, entropy, skip_len, math_random_state, mileage);
+        case 815: return randstorm_direct_bytes_low_fill_exact_mileage64<RandstormV8AltMwcProfile64>(entropy_len, entropy, skip_len, math_random_state, mileage);
+        case 816: return randstorm_direct_bytes_low_fill_exact_mileage64<RandstormV8Mwc1616Profile64>(entropy_len, entropy, skip_len, math_random_state, mileage);
+        case 817: return randstorm_direct_bytes_low_fill_exact_mileage64<RandstormLcg32Profile64>(entropy_len, entropy, skip_len, math_random_state, mileage);
+        default: return false;
+    }
+}
+
+static inline bool RandstormCryptoBrowserifyBytes1FillOffsetMileage64(int entropy_len,
+                                                                      thread uchar* entropy,
+                                                                      uint skip_len,
+                                                                      ulong math_random_state,
+                                                                      uint mileage,
+                                                                      int gen) {
+    switch (gen) {
+        case 810: return randstorm_crypto_browserify_bytes1_fill_exact_mileage64<RandstormV8_2011Profile64>(entropy_len, entropy, skip_len, math_random_state, mileage);
+        case 811: return randstorm_crypto_browserify_bytes1_fill_exact_mileage64<RandstormV8_2015Profile64>(entropy_len, entropy, skip_len, math_random_state, mileage);
+        case 812: return randstorm_crypto_browserify_bytes1_fill_exact_mileage64<RandstormSpiderMonkeyLcg48Profile64>(entropy_len, entropy, skip_len, math_random_state, mileage);
+        case 813: return randstorm_crypto_browserify_bytes1_fill_exact_mileage64<RandstormJscWeakRandomProfile64>(entropy_len, entropy, skip_len, math_random_state, mileage);
+        case 814: return randstorm_crypto_browserify_bytes1_fill_exact_mileage64<RandstormV8ClassicMwcProfile64>(entropy_len, entropy, skip_len, math_random_state, mileage);
+        case 815: return randstorm_crypto_browserify_bytes1_fill_exact_mileage64<RandstormV8AltMwcProfile64>(entropy_len, entropy, skip_len, math_random_state, mileage);
+        case 816: return randstorm_crypto_browserify_bytes1_fill_exact_mileage64<RandstormV8Mwc1616Profile64>(entropy_len, entropy, skip_len, math_random_state, mileage);
+        case 817: return randstorm_crypto_browserify_bytes1_fill_exact_mileage64<RandstormLcg32Profile64>(entropy_len, entropy, skip_len, math_random_state, mileage);
+        default: return false;
+    }
+}
+
+static inline bool RandstormV8InitJsbnArc4FillOffsetEventsMileage64(int entropy_len,
+                                                                    thread uchar* entropy,
+                                                                    uint skip_len,
+                                                                    ulong seed,
+                                                                    uint seed_time0,
+                                                                    uint seed_time1,
+                                                                    uint seed_event_count,
+                                                                    uint screen_seed_x,
+                                                                    uint screen_seed_y,
+                                                                    uint mileage,
+                                                                    int gen) {
+    switch (gen) {
+        case 610: return randstorm_v8init_jsbn_fill_exact_events_mileage64<RandstormMsvcRandSeed64, RandstormV8ClassicMwcProfile64, false>(entropy_len, entropy, skip_len, seed, seed_time0, seed_time1, seed_event_count, screen_seed_x, screen_seed_y, mileage);
+        case 611: return randstorm_v8init_jsbn_fill_exact_events_mileage64<RandstormMsvcRandSeed64, RandstormV8_2011Profile64, false>(entropy_len, entropy, skip_len, seed, seed_time0, seed_time1, seed_event_count, screen_seed_x, screen_seed_y, mileage);
+        case 612: return randstorm_v8init_jsbn_fill_exact_events_mileage64<RandstormAnsiRandSeed64, RandstormV8ClassicMwcProfile64, false>(entropy_len, entropy, skip_len, seed, seed_time0, seed_time1, seed_event_count, screen_seed_x, screen_seed_y, mileage);
+        case 613: return randstorm_v8init_jsbn_fill_exact_events_mileage64<RandstormAnsiRandSeed64, RandstormV8_2011Profile64, false>(entropy_len, entropy, skip_len, seed, seed_time0, seed_time1, seed_event_count, screen_seed_x, screen_seed_y, mileage);
+        case 614: return randstorm_v8init_jsbn_fill_exact_events_mileage64<RandstormLrand48Seed64, RandstormV8ClassicMwcProfile64, false>(entropy_len, entropy, skip_len, seed, seed_time0, seed_time1, seed_event_count, screen_seed_x, screen_seed_y, mileage);
+        case 615: return randstorm_v8init_jsbn_fill_exact_events_mileage64<RandstormLrand48Seed64, RandstormV8_2011Profile64, false>(entropy_len, entropy, skip_len, seed, seed_time0, seed_time1, seed_event_count, screen_seed_x, screen_seed_y, mileage);
+        case 616: return randstorm_v8init_jsbn_fill_exact_events_mileage64<RandstormGlibcRandomType3Seed64, RandstormV8ClassicMwcProfile64, false>(entropy_len, entropy, skip_len, seed, seed_time0, seed_time1, seed_event_count, screen_seed_x, screen_seed_y, mileage);
+        case 617: return randstorm_v8init_jsbn_fill_exact_events_mileage64<RandstormGlibcRandomType3Seed64, RandstormV8_2011Profile64, false>(entropy_len, entropy, skip_len, seed, seed_time0, seed_time1, seed_event_count, screen_seed_x, screen_seed_y, mileage);
+        case 618: return randstorm_v8init_jsbn_fill_exact_events_mileage64<RandstormMsvcRandSeed64, RandstormV8_2015Profile64, false>(entropy_len, entropy, skip_len, seed, seed_time0, seed_time1, seed_event_count, screen_seed_x, screen_seed_y, mileage);
+        case 619: return randstorm_v8init_jsbn_fill_exact_events_mileage64<RandstormAnsiRandSeed64, RandstormV8_2015Profile64, false>(entropy_len, entropy, skip_len, seed, seed_time0, seed_time1, seed_event_count, screen_seed_x, screen_seed_y, mileage);
+        case 620: return randstorm_v8init_jsbn_fill_exact_events_mileage64<RandstormLrand48Seed64, RandstormV8_2015Profile64, false>(entropy_len, entropy, skip_len, seed, seed_time0, seed_time1, seed_event_count, screen_seed_x, screen_seed_y, mileage);
+        case 621: return randstorm_v8init_jsbn_fill_exact_events_mileage64<RandstormGlibcRandomType3Seed64, RandstormV8_2015Profile64, false>(entropy_len, entropy, skip_len, seed, seed_time0, seed_time1, seed_event_count, screen_seed_x, screen_seed_y, mileage);
+        case 622: return randstorm_v8init_jsbn_fill_exact_events_mileage64<RandstormMsvcRandSeed64, RandstormV8AltMwcProfile64, false>(entropy_len, entropy, skip_len, seed, seed_time0, seed_time1, seed_event_count, screen_seed_x, screen_seed_y, mileage);
+        case 623: return randstorm_v8init_jsbn_fill_exact_events_mileage64<RandstormAnsiRandSeed64, RandstormV8AltMwcProfile64, false>(entropy_len, entropy, skip_len, seed, seed_time0, seed_time1, seed_event_count, screen_seed_x, screen_seed_y, mileage);
+        case 624: return randstorm_v8init_jsbn_fill_exact_events_mileage64<RandstormLrand48Seed64, RandstormV8AltMwcProfile64, false>(entropy_len, entropy, skip_len, seed, seed_time0, seed_time1, seed_event_count, screen_seed_x, screen_seed_y, mileage);
+        case 625: return randstorm_v8init_jsbn_fill_exact_events_mileage64<RandstormGlibcRandomType3Seed64, RandstormV8AltMwcProfile64, false>(entropy_len, entropy, skip_len, seed, seed_time0, seed_time1, seed_event_count, screen_seed_x, screen_seed_y, mileage);
+        case 626: return randstorm_v8init_jsbn_fill_exact_events_mileage64<RandstormMsvcRandSeed64, RandstormV8Mwc1616Profile64, false>(entropy_len, entropy, skip_len, seed, seed_time0, seed_time1, seed_event_count, screen_seed_x, screen_seed_y, mileage);
+        case 627: return randstorm_v8init_jsbn_fill_exact_events_mileage64<RandstormAnsiRandSeed64, RandstormV8Mwc1616Profile64, false>(entropy_len, entropy, skip_len, seed, seed_time0, seed_time1, seed_event_count, screen_seed_x, screen_seed_y, mileage);
+        case 628: return randstorm_v8init_jsbn_fill_exact_events_mileage64<RandstormLrand48Seed64, RandstormV8Mwc1616Profile64, false>(entropy_len, entropy, skip_len, seed, seed_time0, seed_time1, seed_event_count, screen_seed_x, screen_seed_y, mileage);
+        case 629: return randstorm_v8init_jsbn_fill_exact_events_mileage64<RandstormGlibcRandomType3Seed64, RandstormV8Mwc1616Profile64, false>(entropy_len, entropy, skip_len, seed, seed_time0, seed_time1, seed_event_count, screen_seed_x, screen_seed_y, mileage);
+        case 710: return randstorm_v8init_jsbn_fill_exact_events_mileage64<RandstormMsvcRandSeed64, RandstormV8ClassicMwcProfile64, true>(entropy_len, entropy, skip_len, seed, seed_time0, seed_time1, seed_event_count, screen_seed_x, screen_seed_y, mileage);
+        case 711: return randstorm_v8init_jsbn_fill_exact_events_mileage64<RandstormMsvcRandSeed64, RandstormV8_2011Profile64, true>(entropy_len, entropy, skip_len, seed, seed_time0, seed_time1, seed_event_count, screen_seed_x, screen_seed_y, mileage);
+        case 712: return randstorm_v8init_jsbn_fill_exact_events_mileage64<RandstormAnsiRandSeed64, RandstormV8ClassicMwcProfile64, true>(entropy_len, entropy, skip_len, seed, seed_time0, seed_time1, seed_event_count, screen_seed_x, screen_seed_y, mileage);
+        case 713: return randstorm_v8init_jsbn_fill_exact_events_mileage64<RandstormAnsiRandSeed64, RandstormV8_2011Profile64, true>(entropy_len, entropy, skip_len, seed, seed_time0, seed_time1, seed_event_count, screen_seed_x, screen_seed_y, mileage);
+        case 714: return randstorm_v8init_jsbn_fill_exact_events_mileage64<RandstormLrand48Seed64, RandstormV8ClassicMwcProfile64, true>(entropy_len, entropy, skip_len, seed, seed_time0, seed_time1, seed_event_count, screen_seed_x, screen_seed_y, mileage);
+        case 715: return randstorm_v8init_jsbn_fill_exact_events_mileage64<RandstormLrand48Seed64, RandstormV8_2011Profile64, true>(entropy_len, entropy, skip_len, seed, seed_time0, seed_time1, seed_event_count, screen_seed_x, screen_seed_y, mileage);
+        case 716: return randstorm_v8init_jsbn_fill_exact_events_mileage64<RandstormGlibcRandomType3Seed64, RandstormV8ClassicMwcProfile64, true>(entropy_len, entropy, skip_len, seed, seed_time0, seed_time1, seed_event_count, screen_seed_x, screen_seed_y, mileage);
+        case 717: return randstorm_v8init_jsbn_fill_exact_events_mileage64<RandstormGlibcRandomType3Seed64, RandstormV8_2011Profile64, true>(entropy_len, entropy, skip_len, seed, seed_time0, seed_time1, seed_event_count, screen_seed_x, screen_seed_y, mileage);
+        case 718: return randstorm_v8init_jsbn_fill_exact_events_mileage64<RandstormMsvcRandSeed64, RandstormV8_2015Profile64, true>(entropy_len, entropy, skip_len, seed, seed_time0, seed_time1, seed_event_count, screen_seed_x, screen_seed_y, mileage);
+        case 719: return randstorm_v8init_jsbn_fill_exact_events_mileage64<RandstormAnsiRandSeed64, RandstormV8_2015Profile64, true>(entropy_len, entropy, skip_len, seed, seed_time0, seed_time1, seed_event_count, screen_seed_x, screen_seed_y, mileage);
+        case 720: return randstorm_v8init_jsbn_fill_exact_events_mileage64<RandstormLrand48Seed64, RandstormV8_2015Profile64, true>(entropy_len, entropy, skip_len, seed, seed_time0, seed_time1, seed_event_count, screen_seed_x, screen_seed_y, mileage);
+        case 721: return randstorm_v8init_jsbn_fill_exact_events_mileage64<RandstormGlibcRandomType3Seed64, RandstormV8_2015Profile64, true>(entropy_len, entropy, skip_len, seed, seed_time0, seed_time1, seed_event_count, screen_seed_x, screen_seed_y, mileage);
+        case 722: return randstorm_v8init_jsbn_fill_exact_events_mileage64<RandstormMsvcRandSeed64, RandstormV8AltMwcProfile64, true>(entropy_len, entropy, skip_len, seed, seed_time0, seed_time1, seed_event_count, screen_seed_x, screen_seed_y, mileage);
+        case 723: return randstorm_v8init_jsbn_fill_exact_events_mileage64<RandstormAnsiRandSeed64, RandstormV8AltMwcProfile64, true>(entropy_len, entropy, skip_len, seed, seed_time0, seed_time1, seed_event_count, screen_seed_x, screen_seed_y, mileage);
+        case 724: return randstorm_v8init_jsbn_fill_exact_events_mileage64<RandstormLrand48Seed64, RandstormV8AltMwcProfile64, true>(entropy_len, entropy, skip_len, seed, seed_time0, seed_time1, seed_event_count, screen_seed_x, screen_seed_y, mileage);
+        case 725: return randstorm_v8init_jsbn_fill_exact_events_mileage64<RandstormGlibcRandomType3Seed64, RandstormV8AltMwcProfile64, true>(entropy_len, entropy, skip_len, seed, seed_time0, seed_time1, seed_event_count, screen_seed_x, screen_seed_y, mileage);
+        case 726: return randstorm_v8init_jsbn_fill_exact_events_mileage64<RandstormMsvcRandSeed64, RandstormV8Mwc1616Profile64, true>(entropy_len, entropy, skip_len, seed, seed_time0, seed_time1, seed_event_count, screen_seed_x, screen_seed_y, mileage);
+        case 727: return randstorm_v8init_jsbn_fill_exact_events_mileage64<RandstormAnsiRandSeed64, RandstormV8Mwc1616Profile64, true>(entropy_len, entropy, skip_len, seed, seed_time0, seed_time1, seed_event_count, screen_seed_x, screen_seed_y, mileage);
+        case 728: return randstorm_v8init_jsbn_fill_exact_events_mileage64<RandstormLrand48Seed64, RandstormV8Mwc1616Profile64, true>(entropy_len, entropy, skip_len, seed, seed_time0, seed_time1, seed_event_count, screen_seed_x, screen_seed_y, mileage);
+        case 729: return randstorm_v8init_jsbn_fill_exact_events_mileage64<RandstormGlibcRandomType3Seed64, RandstormV8Mwc1616Profile64, true>(entropy_len, entropy, skip_len, seed, seed_time0, seed_time1, seed_event_count, screen_seed_x, screen_seed_y, mileage);
+        default: return false;
+    }
+}
+
+static inline bool RandstormV8InitDirectBytesFillOffsetMileage64(int entropy_len,
+                                                                 thread uchar* entropy,
+                                                                 uint skip_len,
+                                                                 ulong seed,
+                                                                 uint mileage,
+                                                                 int gen) {
+    switch (gen) {
+        case 830: return randstorm_v8init_direct_bytes_fill_exact_mileage64<RandstormMsvcRandSeed64, RandstormV8ClassicMwcProfile64>(entropy_len, entropy, skip_len, seed, mileage);
+        case 831: return randstorm_v8init_direct_bytes_fill_exact_mileage64<RandstormMsvcRandSeed64, RandstormV8_2011Profile64>(entropy_len, entropy, skip_len, seed, mileage);
+        case 832: return randstorm_v8init_direct_bytes_fill_exact_mileage64<RandstormAnsiRandSeed64, RandstormV8ClassicMwcProfile64>(entropy_len, entropy, skip_len, seed, mileage);
+        case 833: return randstorm_v8init_direct_bytes_fill_exact_mileage64<RandstormAnsiRandSeed64, RandstormV8_2011Profile64>(entropy_len, entropy, skip_len, seed, mileage);
+        case 834: return randstorm_v8init_direct_bytes_fill_exact_mileage64<RandstormLrand48Seed64, RandstormV8ClassicMwcProfile64>(entropy_len, entropy, skip_len, seed, mileage);
+        case 835: return randstorm_v8init_direct_bytes_fill_exact_mileage64<RandstormLrand48Seed64, RandstormV8_2011Profile64>(entropy_len, entropy, skip_len, seed, mileage);
+        case 836: return randstorm_v8init_direct_bytes_fill_exact_mileage64<RandstormGlibcRandomType3Seed64, RandstormV8ClassicMwcProfile64>(entropy_len, entropy, skip_len, seed, mileage);
+        case 837: return randstorm_v8init_direct_bytes_fill_exact_mileage64<RandstormGlibcRandomType3Seed64, RandstormV8_2011Profile64>(entropy_len, entropy, skip_len, seed, mileage);
+        case 838: return randstorm_v8init_direct_bytes_fill_exact_mileage64<RandstormMsvcRandSeed64, RandstormV8_2015Profile64>(entropy_len, entropy, skip_len, seed, mileage);
+        case 839: return randstorm_v8init_direct_bytes_fill_exact_mileage64<RandstormAnsiRandSeed64, RandstormV8_2015Profile64>(entropy_len, entropy, skip_len, seed, mileage);
+        case 840: return randstorm_v8init_direct_bytes_fill_exact_mileage64<RandstormLrand48Seed64, RandstormV8_2015Profile64>(entropy_len, entropy, skip_len, seed, mileage);
+        case 841: return randstorm_v8init_direct_bytes_fill_exact_mileage64<RandstormGlibcRandomType3Seed64, RandstormV8_2015Profile64>(entropy_len, entropy, skip_len, seed, mileage);
+        case 842: return randstorm_v8init_direct_bytes_fill_exact_mileage64<RandstormMsvcRandSeed64, RandstormV8AltMwcProfile64>(entropy_len, entropy, skip_len, seed, mileage);
+        case 843: return randstorm_v8init_direct_bytes_fill_exact_mileage64<RandstormAnsiRandSeed64, RandstormV8AltMwcProfile64>(entropy_len, entropy, skip_len, seed, mileage);
+        case 844: return randstorm_v8init_direct_bytes_fill_exact_mileage64<RandstormLrand48Seed64, RandstormV8AltMwcProfile64>(entropy_len, entropy, skip_len, seed, mileage);
+        case 845: return randstorm_v8init_direct_bytes_fill_exact_mileage64<RandstormGlibcRandomType3Seed64, RandstormV8AltMwcProfile64>(entropy_len, entropy, skip_len, seed, mileage);
+        case 846: return randstorm_v8init_direct_bytes_fill_exact_mileage64<RandstormMsvcRandSeed64, RandstormV8Mwc1616Profile64>(entropy_len, entropy, skip_len, seed, mileage);
+        case 847: return randstorm_v8init_direct_bytes_fill_exact_mileage64<RandstormAnsiRandSeed64, RandstormV8Mwc1616Profile64>(entropy_len, entropy, skip_len, seed, mileage);
+        case 848: return randstorm_v8init_direct_bytes_fill_exact_mileage64<RandstormLrand48Seed64, RandstormV8Mwc1616Profile64>(entropy_len, entropy, skip_len, seed, mileage);
+        case 849: return randstorm_v8init_direct_bytes_fill_exact_mileage64<RandstormGlibcRandomType3Seed64, RandstormV8Mwc1616Profile64>(entropy_len, entropy, skip_len, seed, mileage);
+        default: return false;
+    }
+}
+
+static inline bool RandstormV8InitDirectBytesLowFillOffsetMileage64(int entropy_len,
+                                                                    thread uchar* entropy,
+                                                                    uint skip_len,
+                                                                    ulong seed,
+                                                                    uint mileage,
+                                                                    int gen) {
+    switch (gen) {
+        case 850: return randstorm_v8init_direct_bytes_low_fill_exact_mileage64<RandstormMsvcRandSeed64, RandstormV8ClassicMwcProfile64>(entropy_len, entropy, skip_len, seed, mileage);
+        case 851: return randstorm_v8init_direct_bytes_low_fill_exact_mileage64<RandstormMsvcRandSeed64, RandstormV8_2011Profile64>(entropy_len, entropy, skip_len, seed, mileage);
+        case 852: return randstorm_v8init_direct_bytes_low_fill_exact_mileage64<RandstormAnsiRandSeed64, RandstormV8ClassicMwcProfile64>(entropy_len, entropy, skip_len, seed, mileage);
+        case 853: return randstorm_v8init_direct_bytes_low_fill_exact_mileage64<RandstormAnsiRandSeed64, RandstormV8_2011Profile64>(entropy_len, entropy, skip_len, seed, mileage);
+        case 854: return randstorm_v8init_direct_bytes_low_fill_exact_mileage64<RandstormLrand48Seed64, RandstormV8ClassicMwcProfile64>(entropy_len, entropy, skip_len, seed, mileage);
+        case 855: return randstorm_v8init_direct_bytes_low_fill_exact_mileage64<RandstormLrand48Seed64, RandstormV8_2011Profile64>(entropy_len, entropy, skip_len, seed, mileage);
+        case 856: return randstorm_v8init_direct_bytes_low_fill_exact_mileage64<RandstormGlibcRandomType3Seed64, RandstormV8ClassicMwcProfile64>(entropy_len, entropy, skip_len, seed, mileage);
+        case 857: return randstorm_v8init_direct_bytes_low_fill_exact_mileage64<RandstormGlibcRandomType3Seed64, RandstormV8_2011Profile64>(entropy_len, entropy, skip_len, seed, mileage);
+        case 858: return randstorm_v8init_direct_bytes_low_fill_exact_mileage64<RandstormMsvcRandSeed64, RandstormV8_2015Profile64>(entropy_len, entropy, skip_len, seed, mileage);
+        case 859: return randstorm_v8init_direct_bytes_low_fill_exact_mileage64<RandstormAnsiRandSeed64, RandstormV8_2015Profile64>(entropy_len, entropy, skip_len, seed, mileage);
+        case 860: return randstorm_v8init_direct_bytes_low_fill_exact_mileage64<RandstormLrand48Seed64, RandstormV8_2015Profile64>(entropy_len, entropy, skip_len, seed, mileage);
+        case 861: return randstorm_v8init_direct_bytes_low_fill_exact_mileage64<RandstormGlibcRandomType3Seed64, RandstormV8_2015Profile64>(entropy_len, entropy, skip_len, seed, mileage);
+        case 862: return randstorm_v8init_direct_bytes_low_fill_exact_mileage64<RandstormMsvcRandSeed64, RandstormV8AltMwcProfile64>(entropy_len, entropy, skip_len, seed, mileage);
+        case 863: return randstorm_v8init_direct_bytes_low_fill_exact_mileage64<RandstormAnsiRandSeed64, RandstormV8AltMwcProfile64>(entropy_len, entropy, skip_len, seed, mileage);
+        case 864: return randstorm_v8init_direct_bytes_low_fill_exact_mileage64<RandstormLrand48Seed64, RandstormV8AltMwcProfile64>(entropy_len, entropy, skip_len, seed, mileage);
+        case 865: return randstorm_v8init_direct_bytes_low_fill_exact_mileage64<RandstormGlibcRandomType3Seed64, RandstormV8AltMwcProfile64>(entropy_len, entropy, skip_len, seed, mileage);
+        case 866: return randstorm_v8init_direct_bytes_low_fill_exact_mileage64<RandstormMsvcRandSeed64, RandstormV8Mwc1616Profile64>(entropy_len, entropy, skip_len, seed, mileage);
+        case 867: return randstorm_v8init_direct_bytes_low_fill_exact_mileage64<RandstormAnsiRandSeed64, RandstormV8Mwc1616Profile64>(entropy_len, entropy, skip_len, seed, mileage);
+        case 868: return randstorm_v8init_direct_bytes_low_fill_exact_mileage64<RandstormLrand48Seed64, RandstormV8Mwc1616Profile64>(entropy_len, entropy, skip_len, seed, mileage);
+        case 869: return randstorm_v8init_direct_bytes_low_fill_exact_mileage64<RandstormGlibcRandomType3Seed64, RandstormV8Mwc1616Profile64>(entropy_len, entropy, skip_len, seed, mileage);
+        default: return false;
+    }
+}
+
+static inline bool RandstormV8InitPool32FillOffsetMileage64(int entropy_len,
+                                                            thread uchar* entropy,
+                                                            uint skip_len,
+                                                            ulong seed,
+                                                            uint mileage,
+                                                            int gen) {
+    switch (gen) {
+        case 610: return randstorm_v8init_pool32_fill_exact_mileage64<RandstormMsvcRandSeed64, RandstormV8ClassicMwcProfile64, false>(entropy_len, entropy, skip_len, seed, mileage);
+        case 611: return randstorm_v8init_pool32_fill_exact_mileage64<RandstormMsvcRandSeed64, RandstormV8_2011Profile64, false>(entropy_len, entropy, skip_len, seed, mileage);
+        case 612: return randstorm_v8init_pool32_fill_exact_mileage64<RandstormAnsiRandSeed64, RandstormV8ClassicMwcProfile64, false>(entropy_len, entropy, skip_len, seed, mileage);
+        case 613: return randstorm_v8init_pool32_fill_exact_mileage64<RandstormAnsiRandSeed64, RandstormV8_2011Profile64, false>(entropy_len, entropy, skip_len, seed, mileage);
+        case 614: return randstorm_v8init_pool32_fill_exact_mileage64<RandstormLrand48Seed64, RandstormV8ClassicMwcProfile64, false>(entropy_len, entropy, skip_len, seed, mileage);
+        case 615: return randstorm_v8init_pool32_fill_exact_mileage64<RandstormLrand48Seed64, RandstormV8_2011Profile64, false>(entropy_len, entropy, skip_len, seed, mileage);
+        case 616: return randstorm_v8init_pool32_fill_exact_mileage64<RandstormGlibcRandomType3Seed64, RandstormV8ClassicMwcProfile64, false>(entropy_len, entropy, skip_len, seed, mileage);
+        case 617: return randstorm_v8init_pool32_fill_exact_mileage64<RandstormGlibcRandomType3Seed64, RandstormV8_2011Profile64, false>(entropy_len, entropy, skip_len, seed, mileage);
+        case 618: return randstorm_v8init_pool32_fill_exact_mileage64<RandstormMsvcRandSeed64, RandstormV8_2015Profile64, false>(entropy_len, entropy, skip_len, seed, mileage);
+        case 619: return randstorm_v8init_pool32_fill_exact_mileage64<RandstormAnsiRandSeed64, RandstormV8_2015Profile64, false>(entropy_len, entropy, skip_len, seed, mileage);
+        case 620: return randstorm_v8init_pool32_fill_exact_mileage64<RandstormLrand48Seed64, RandstormV8_2015Profile64, false>(entropy_len, entropy, skip_len, seed, mileage);
+        case 621: return randstorm_v8init_pool32_fill_exact_mileage64<RandstormGlibcRandomType3Seed64, RandstormV8_2015Profile64, false>(entropy_len, entropy, skip_len, seed, mileage);
+        case 622: return randstorm_v8init_pool32_fill_exact_mileage64<RandstormMsvcRandSeed64, RandstormV8AltMwcProfile64, false>(entropy_len, entropy, skip_len, seed, mileage);
+        case 623: return randstorm_v8init_pool32_fill_exact_mileage64<RandstormAnsiRandSeed64, RandstormV8AltMwcProfile64, false>(entropy_len, entropy, skip_len, seed, mileage);
+        case 624: return randstorm_v8init_pool32_fill_exact_mileage64<RandstormLrand48Seed64, RandstormV8AltMwcProfile64, false>(entropy_len, entropy, skip_len, seed, mileage);
+        case 625: return randstorm_v8init_pool32_fill_exact_mileage64<RandstormGlibcRandomType3Seed64, RandstormV8AltMwcProfile64, false>(entropy_len, entropy, skip_len, seed, mileage);
+        case 626: return randstorm_v8init_pool32_fill_exact_mileage64<RandstormMsvcRandSeed64, RandstormV8Mwc1616Profile64, false>(entropy_len, entropy, skip_len, seed, mileage);
+        case 627: return randstorm_v8init_pool32_fill_exact_mileage64<RandstormAnsiRandSeed64, RandstormV8Mwc1616Profile64, false>(entropy_len, entropy, skip_len, seed, mileage);
+        case 628: return randstorm_v8init_pool32_fill_exact_mileage64<RandstormLrand48Seed64, RandstormV8Mwc1616Profile64, false>(entropy_len, entropy, skip_len, seed, mileage);
+        case 629: return randstorm_v8init_pool32_fill_exact_mileage64<RandstormGlibcRandomType3Seed64, RandstormV8Mwc1616Profile64, false>(entropy_len, entropy, skip_len, seed, mileage);
+        case 710: return randstorm_v8init_pool32_fill_exact_mileage64<RandstormMsvcRandSeed64, RandstormV8ClassicMwcProfile64, true>(entropy_len, entropy, skip_len, seed, mileage);
+        case 711: return randstorm_v8init_pool32_fill_exact_mileage64<RandstormMsvcRandSeed64, RandstormV8_2011Profile64, true>(entropy_len, entropy, skip_len, seed, mileage);
+        case 712: return randstorm_v8init_pool32_fill_exact_mileage64<RandstormAnsiRandSeed64, RandstormV8ClassicMwcProfile64, true>(entropy_len, entropy, skip_len, seed, mileage);
+        case 713: return randstorm_v8init_pool32_fill_exact_mileage64<RandstormAnsiRandSeed64, RandstormV8_2011Profile64, true>(entropy_len, entropy, skip_len, seed, mileage);
+        case 714: return randstorm_v8init_pool32_fill_exact_mileage64<RandstormLrand48Seed64, RandstormV8ClassicMwcProfile64, true>(entropy_len, entropy, skip_len, seed, mileage);
+        case 715: return randstorm_v8init_pool32_fill_exact_mileage64<RandstormLrand48Seed64, RandstormV8_2011Profile64, true>(entropy_len, entropy, skip_len, seed, mileage);
+        case 716: return randstorm_v8init_pool32_fill_exact_mileage64<RandstormGlibcRandomType3Seed64, RandstormV8ClassicMwcProfile64, true>(entropy_len, entropy, skip_len, seed, mileage);
+        case 717: return randstorm_v8init_pool32_fill_exact_mileage64<RandstormGlibcRandomType3Seed64, RandstormV8_2011Profile64, true>(entropy_len, entropy, skip_len, seed, mileage);
+        case 718: return randstorm_v8init_pool32_fill_exact_mileage64<RandstormMsvcRandSeed64, RandstormV8_2015Profile64, true>(entropy_len, entropy, skip_len, seed, mileage);
+        case 719: return randstorm_v8init_pool32_fill_exact_mileage64<RandstormAnsiRandSeed64, RandstormV8_2015Profile64, true>(entropy_len, entropy, skip_len, seed, mileage);
+        case 720: return randstorm_v8init_pool32_fill_exact_mileage64<RandstormLrand48Seed64, RandstormV8_2015Profile64, true>(entropy_len, entropy, skip_len, seed, mileage);
+        case 721: return randstorm_v8init_pool32_fill_exact_mileage64<RandstormGlibcRandomType3Seed64, RandstormV8_2015Profile64, true>(entropy_len, entropy, skip_len, seed, mileage);
+        case 722: return randstorm_v8init_pool32_fill_exact_mileage64<RandstormMsvcRandSeed64, RandstormV8AltMwcProfile64, true>(entropy_len, entropy, skip_len, seed, mileage);
+        case 723: return randstorm_v8init_pool32_fill_exact_mileage64<RandstormAnsiRandSeed64, RandstormV8AltMwcProfile64, true>(entropy_len, entropy, skip_len, seed, mileage);
+        case 724: return randstorm_v8init_pool32_fill_exact_mileage64<RandstormLrand48Seed64, RandstormV8AltMwcProfile64, true>(entropy_len, entropy, skip_len, seed, mileage);
+        case 725: return randstorm_v8init_pool32_fill_exact_mileage64<RandstormGlibcRandomType3Seed64, RandstormV8AltMwcProfile64, true>(entropy_len, entropy, skip_len, seed, mileage);
+        case 726: return randstorm_v8init_pool32_fill_exact_mileage64<RandstormMsvcRandSeed64, RandstormV8Mwc1616Profile64, true>(entropy_len, entropy, skip_len, seed, mileage);
+        case 727: return randstorm_v8init_pool32_fill_exact_mileage64<RandstormAnsiRandSeed64, RandstormV8Mwc1616Profile64, true>(entropy_len, entropy, skip_len, seed, mileage);
+        case 728: return randstorm_v8init_pool32_fill_exact_mileage64<RandstormLrand48Seed64, RandstormV8Mwc1616Profile64, true>(entropy_len, entropy, skip_len, seed, mileage);
+        case 729: return randstorm_v8init_pool32_fill_exact_mileage64<RandstormGlibcRandomType3Seed64, RandstormV8Mwc1616Profile64, true>(entropy_len, entropy, skip_len, seed, mileage);
+        default: return false;
+    }
+}
+
+static inline uint xp_u64_to_decimal_metal(ulong value, thread uchar out[78]) {
+    thread uchar rev[78];
+    uint len = 0u;
+    do {
+        rev[len++] = uchar('0' + (value % 10ul));
+        value /= 10ul;
+    } while (value != 0ul && len < 78u);
+    for (uint i = 0u; i < len; ++i) {
+        out[i] = rev[len - 1u - i];
+    }
+    return len;
+}
+
+static inline uint xp_u64_to_hex16_metal(ulong value, thread uchar out[20]) {
+    const uchar hex[16] = {
+        '0','1','2','3','4','5','6','7','8','9','a','b','c','d','e','f'
+    };
+    for (int i = 15; i >= 0; --i) {
+        out[i] = hex[value & 0x0ful];
+        value >>= 4;
+    }
+    return 16u;
+}
+
+static inline bool xp_u64_to_phone10_metal(ulong value, thread uchar out[20]) {
+    if (value > XP_SHA256_DIRECT_PHONE10_MAX_METAL) {
+        return false;
+    }
+    for (int i = 9; i >= 0; --i) {
+        out[i] = uchar('0' + (value % 10ul));
+        value /= 10ul;
+    }
+    return true;
+}
+
+static inline bool xp_u64_to_short_ascii_metal(ulong value, thread uchar out[20], thread uint& len) {
+    ulong span = 95ul;
+    for (uint width = 1u; width <= 6u; ++width) {
+        if (value < span) {
+            len = width;
+            ulong ordinal = value;
+            for (int i = int(width) - 1; i >= 0; --i) {
+                out[i] = uchar(0x20u + uint(ordinal % 95ul));
+                ordinal /= 95ul;
+            }
+            return true;
+        }
+        value -= span;
+        span *= 95ul;
+    }
+    return false;
+}
+
+static inline bool xp_sha256_direct_priv_metal(ulong value, uint variant, thread uchar priv32[32]) {
+    thread uchar msg[20];
+    uint len = 0u;
+    if (variant == XP_SHA256_DIRECT_VARIANT_DECIMAL_METAL) {
+        len = xp_u64_to_decimal_metal(value, msg);
+    } else if (variant == XP_SHA256_DIRECT_VARIANT_HEX_METAL) {
+        len = xp_u64_to_hex16_metal(value, msg);
+    } else if (variant == XP_SHA256_DIRECT_VARIANT_PHONE10_METAL) {
+        if (!xp_u64_to_phone10_metal(value, msg)) {
+            return false;
+        }
+        len = 10u;
+    } else if (variant == XP_SHA256_DIRECT_VARIANT_SHORT_ASCII_METAL) {
+        if (!xp_u64_to_short_ascii_metal(value, msg, len)) {
+            return false;
+        }
+    } else if (variant == XP_SHA256_DIRECT_VARIANT_BE64_METAL || variant == XP_SHA256_DIRECT_VARIANT_BE64D_METAL) {
+        for (int i = 0; i < 8; ++i) {
+            msg[i] = uchar(value >> (56 - 8 * i));
+        }
+        if (variant == XP_SHA256_DIRECT_VARIANT_BE64D_METAL) {
+            thread uchar digest[32];
+            SHA256(msg, 8u, digest);
+            SHA256(digest, 32u, priv32);
+            return true;
+        }
+        len = 8u;
+    } else {
+        return false;
+    }
+    SHA256(msg, size_t(len), priv32);
+    return true;
+}
+
+static inline bool xp_pid_hash_direct_priv_metal(ulong pid64, uint variant, thread uchar priv32[32]) {
+    if (pid64 > 0xfffful || variant >= XP_PID_HASH_DIRECT_VARIANT_COUNT_METAL) {
+        return false;
+    }
+    const uint pid = uint(pid64);
+    thread uchar msg[4] = {
+        uchar(pid >> 24u), uchar(pid >> 16u), uchar(pid >> 8u), uchar(pid)
+    };
+    thread uchar digest[32];
+    SHA256(msg, 4u, digest);
+    SHA256(digest, 32u, priv32);
+    return true;
+}
+
+static inline bool xp_lowbits_direct_priv_metal(ulong value, uint variant, thread uchar priv32[32]) {
+    if (value == 0ul || variant != XP_LOWBITS_DIRECT_VARIANT_BE64_METAL) {
+        return false;
+    }
+    for (int i = 0; i < 24; ++i) {
+        priv32[i] = 0u;
+    }
+    for (int i = 0; i < 8; ++i) {
+        priv32[24 + i] = uchar(value >> (56 - 8 * i));
+    }
+    return true;
+}
+
+struct XpPhpMtRandMetal {
+    uint mt[624];
+    int idx;
+    bool php521_twist;
+    bool php710_range;
+
+    static inline void init(thread XpPhpMtRandMetal& r, uint seed, uint variant) {
+        r.idx = 624;
+        r.php521_twist = (variant == XP_PHPCOINADDRESS_VARIANT_PHP521_METAL);
+        r.php710_range = (variant == XP_PHPCOINADDRESS_VARIANT_PHP710_METAL);
+        if (variant == XP_PHPCOINADDRESS_VARIANT_PHPLegacy_METAL) {
+            r.mt[0] = seed | 1u;
+            for (int i = 1; i < 624; ++i) {
+                r.mt[i] = r.mt[i - 1] * 69069u;
+            }
+        } else {
+            r.mt[0] = seed;
+            for (int i = 1; i < 624; ++i) {
+                r.mt[i] = 1812433253u * (r.mt[i - 1] ^ (r.mt[i - 1] >> 30)) + uint(i);
+            }
+        }
+    }
+
+    inline void twist() thread {
+        for (int i = 0; i < 624; ++i) {
+            const uint x = mt[i];
+            const uint x1 = mt[(i + 1) % 624];
+            const uint y = (x & 0x80000000u) | (x1 & 0x7fffffffu);
+            const uint twist_bit = php521_twist ? (x & 1u) : (x1 & 1u);
+            mt[i] = mt[(i + 397) % 624] ^ (y >> 1) ^ (twist_bit != 0u ? 0x9908b0dfu : 0u);
+        }
+        idx = 0;
+    }
+
+    inline uint next32() thread {
+        if (idx >= 624) {
+            twist();
+        }
+        uint y = mt[idx++];
+        y ^= (y >> 11);
+        y ^= (y << 7) & 0x9d2c5680u;
+        y ^= (y << 15) & 0xefc60000u;
+        y ^= (y >> 18);
+        return y;
+    }
+
+    inline uchar range_byte(uint cap) thread {
+        const uint x = next32();
+        const uint span = cap + 1u;
+        if (!php710_range) {
+            return uchar(((ulong(x >> 1) * ulong(span)) >> 31) & 0xfful);
+        }
+        return uchar(x % span);
+    }
+
+    inline void next_phpcoinaddress_priv(thread uchar priv32[32]) thread {
+        for (int i = 0; i < 32; ++i) {
+            priv32[i] = range_byte(i == 0 ? 0xfeu : 0xffu);
+        }
+    }
+};
+
+struct XpPhp5RandMetal {
+    uint state32;
+    ulong state48;
+    uint glibc_state[31];
+    int glibc_fptr;
+    int glibc_rptr;
+    uint variant;
+
+    static inline uchar range_byte31(uint n) {
+        return uchar((ulong(n) * 256ul) >> 31);
+    }
+
+    static inline uchar range_byte15(uint n) {
+        return uchar(((n & 0x7fffu) * 256u) >> 15);
+    }
+
+    inline uint next_glibc_random31() thread {
+        const uint sum = glibc_state[glibc_fptr] + glibc_state[glibc_rptr];
+        glibc_state[glibc_fptr] = sum;
+        const uint out = sum >> 1;
+        if (++glibc_fptr >= 31) {
+            glibc_fptr = 0;
+        }
+        if (++glibc_rptr >= 31) {
+            glibc_rptr = 0;
+        }
+        return out;
+    }
+
+    inline uint next_lrand48_31() thread {
+        state48 = (state48 * 0x5deece66dul + 0xbul) & 0xfffffffffffful;
+        return uint(state48 >> 17);
+    }
+
+    inline uint next_msvcrt_rand15() thread {
+        state32 = state32 * 214013u + 2531011u;
+        return (state32 >> 16) & 0x7fffu;
+    }
+
+    inline uint next_php_rand_r31() thread {
+        state32 = uint((ulong(state32) * 1103515245ul + 12345ul) & 0x7ffffffful);
+        return state32;
+    }
+
+    inline uint next_php_rand_r15() thread {
+        state32 = uint((ulong(state32) * 1103515245ul + 12345ul) & 0x7ffful);
+        return state32;
+    }
+
+    static inline void init(thread XpPhp5RandMetal& r, uint seed, uint v) {
+        r.state32 = seed;
+        r.state48 = (ulong(seed) << 16) | 0x330eul;
+        r.glibc_fptr = 3;
+        r.glibc_rptr = 0;
+        r.variant = v;
+        uint s = seed != 0u ? seed : 1u;
+        r.glibc_state[0] = s;
+        for (int i = 1; i < 31; ++i) {
+            r.glibc_state[i] = uint((16807ul * ulong(r.glibc_state[i - 1])) % 0x7ffffffful);
+        }
+        for (int i = 0; i < 310; ++i) {
+            (void)r.next_glibc_random31();
+        }
+    }
+
+    inline uchar rand_0_255() thread {
+        if (variant == XP_ELLIPTIC_PHP_VARIANT_PHP5_LRAND48_METAL) {
+            return range_byte31(next_lrand48_31());
+        }
+        if (variant == XP_ELLIPTIC_PHP_VARIANT_PHP5_RAND15_METAL) {
+            return range_byte15(next_msvcrt_rand15());
+        }
+        if (variant == XP_ELLIPTIC_PHP_VARIANT_PHP5_ZTS_RAND_R31_METAL) {
+            return range_byte31(next_php_rand_r31());
+        }
+        if (variant == XP_ELLIPTIC_PHP_VARIANT_PHP5_ZTS_RAND_R15_METAL) {
+            return range_byte15(next_php_rand_r15());
+        }
+        return range_byte31(next_glibc_random31());
+    }
+};
+
+static inline void xp_hmac_sha256_32key_metal(const thread uchar key32[32],
+                                              const thread uchar* msg,
+                                              uint msg_len,
+                                              thread uchar out[32]) {
+    thread uchar buf[64 + XP_ELLIPTIC_PHP_HMAC_MSG_MAX_METAL];
+    for (int i = 0; i < 64; ++i) {
+        buf[i] = (i < 32) ? uchar(key32[i] ^ 0x36u) : uchar(0x36u);
+    }
+    for (uint i = 0u; i < msg_len; ++i) {
+        buf[64u + i] = msg[i];
+    }
+    thread uchar inner[32];
+    SHA256(buf, size_t(64u + msg_len), inner);
+    for (int i = 0; i < 64; ++i) {
+        buf[i] = (i < 32) ? uchar(key32[i] ^ 0x5cu) : uchar(0x5cu);
+    }
+    for (int i = 0; i < 32; ++i) {
+        buf[64 + i] = inner[i];
+    }
+    SHA256(buf, 96u, out);
+}
+
+static inline void xp_elliptic_php_drbg_update_metal(thread uchar K[32],
+                                                     thread uchar V[32],
+                                                     const thread uchar* provided,
+                                                     uint provided_len) {
+    thread uchar msg[XP_ELLIPTIC_PHP_HMAC_MSG_MAX_METAL];
+    for (int i = 0; i < 32; ++i) {
+        msg[i] = V[i];
+    }
+    msg[32] = 0u;
+    for (uint i = 0u; i < provided_len; ++i) {
+        msg[33u + i] = provided[i];
+    }
+    xp_hmac_sha256_32key_metal(K, msg, 33u + provided_len, K);
+    xp_hmac_sha256_32key_metal(K, V, 32u, V);
+    if (provided_len == 0u) {
+        return;
+    }
+    for (int i = 0; i < 32; ++i) {
+        msg[i] = V[i];
+    }
+    msg[32] = 1u;
+    for (uint i = 0u; i < provided_len; ++i) {
+        msg[33u + i] = provided[i];
+    }
+    xp_hmac_sha256_32key_metal(K, msg, 33u + provided_len, K);
+    xp_hmac_sha256_32key_metal(K, V, 32u, V);
+}
+
+static inline bool xp_be32_gt_metal(const thread uchar a[32], const thread uchar b[32]) {
+    for (int i = 0; i < 32; ++i) {
+        if (a[i] > b[i]) {
+            return true;
+        }
+        if (a[i] < b[i]) {
+            return false;
+        }
+    }
+    return false;
+}
+
+static inline void xp_be32_add_one_metal(thread uchar v[32]) {
+    for (int i = 31; i >= 0; --i) {
+        const uchar before = v[i];
+        v[i] = uchar(before + 1u);
+        if (v[i] != 0u) {
+            break;
+        }
+    }
+}
+
+static inline void xp_elliptic_php_append_nonce_metal(thread uchar seed_material[XP_ELLIPTIC_PHP_SEED_LEN_METAL]) {
+    const uchar SECP256K1_N_BE[32] = {
+        0xffu,0xffu,0xffu,0xffu,0xffu,0xffu,0xffu,0xffu,
+        0xffu,0xffu,0xffu,0xffu,0xffu,0xffu,0xffu,0xfeu,
+        0xbau,0xaeu,0xdcu,0xe6u,0xafu,0x48u,0xa0u,0x3bu,
+        0xbfu,0xd2u,0x5eu,0x8cu,0xd0u,0x36u,0x41u,0x41u
+    };
+    for (int i = 0; i < 32; ++i) {
+        seed_material[XP_ELLIPTIC_PHP_ENTROPY_LEN_METAL + i] = SECP256K1_N_BE[i];
+    }
+}
+
+static inline void xp_elliptic_php_priv_from_seed_material_metal(const thread uchar seed_material[XP_ELLIPTIC_PHP_SEED_LEN_METAL],
+                                                                 thread uchar priv32[32]) {
+    const uchar SECP256K1_N_MINUS_2_BE[32] = {
+        0xffu,0xffu,0xffu,0xffu,0xffu,0xffu,0xffu,0xffu,
+        0xffu,0xffu,0xffu,0xffu,0xffu,0xffu,0xffu,0xfeu,
+        0xbau,0xaeu,0xdcu,0xe6u,0xafu,0x48u,0xa0u,0x3bu,
+        0xbfu,0xd2u,0x5eu,0x8cu,0xd0u,0x36u,0x41u,0x3fu
+    };
+    thread uchar K[32];
+    thread uchar V[32];
+    for (int i = 0; i < 32; ++i) {
+        K[i] = 0u;
+        V[i] = 1u;
+    }
+    xp_elliptic_php_drbg_update_metal(K, V, seed_material, XP_ELLIPTIC_PHP_SEED_LEN_METAL);
+    for (;;) {
+        xp_hmac_sha256_32key_metal(K, V, 32u, V);
+        if (!xp_be32_gt_metal(V, SECP256K1_N_MINUS_2_BE)) {
+            for (int i = 0; i < 32; ++i) {
+                priv32[i] = V[i];
+            }
+            xp_be32_add_one_metal(priv32);
+            return;
+        }
+        xp_elliptic_php_drbg_update_metal(K, V, nullptr, 0u);
+    }
+}
+
+static inline void xp_elliptic_php_next_priv_metal(thread XpPhp5RandMetal& rng, thread uchar priv32[32]) {
+    thread uchar seed_material[XP_ELLIPTIC_PHP_SEED_LEN_METAL];
+    for (uint i = 0u; i < XP_ELLIPTIC_PHP_ENTROPY_LEN_METAL; ++i) {
+        seed_material[i] = rng.rand_0_255();
+    }
+    xp_elliptic_php_append_nonce_metal(seed_material);
+    xp_elliptic_php_priv_from_seed_material_metal(seed_material, priv32);
+}
+
+struct XpBlueWalletIsaac05Metal {
+    uint m[256];
+    uint r[256];
+    uint acc;
+    uint brs;
+    uint cnt;
+    uint gnt;
+
+    static inline void seed_mix(thread uint& a, thread uint& b, thread uint& c, thread uint& d,
+                                thread uint& e, thread uint& f, thread uint& g, thread uint& h) {
+        a ^= b << 11; d += a; b += c;
+        b ^= c >> 2;  e += b; c += d;
+        c ^= d << 8;  f += c; d += e;
+        d ^= e >> 16; g += d; e += f;
+        e ^= f << 10; h += e; f += g;
+        f ^= g >> 4;  a += f; g += h;
+        g ^= h << 8;  b += g; h += a;
+        h ^= a >> 9;  c += h; a += b;
+    }
+
+    inline void reset() thread {
+        acc = 0u;
+        brs = 0u;
+        cnt = 0u;
+        gnt = 0u;
+        for (int i = 0; i < 256; ++i) {
+            m[i] = 0u;
+            r[i] = 0u;
+        }
+    }
+
+    inline void prng() thread {
+        cnt += 1u;
+        brs += cnt;
+        for (uint i = 0u; i < 256u; ++i) {
+            switch (i & 3u) {
+                case 0u: acc ^= acc << 13; break;
+                case 1u: acc ^= acc >> 6; break;
+                case 2u: acc ^= acc << 2; break;
+                default: acc ^= acc >> 16; break;
+            }
+            acc += m[(i + 128u) & 0xffu];
+            const uint x = m[i];
+            const uint y = m[(x >> 2) & 0xffu] + acc + brs;
+            m[i] = y;
+            brs = m[(y >> 10) & 0xffu] + x;
+            r[i] = brs;
+        }
+    }
+
+    inline void seed_module_load(uint seed_word, bool use_seed) thread {
+        reset();
+        uint a = 0x9e3779b9u, b = 0x9e3779b9u, c = 0x9e3779b9u, d = 0x9e3779b9u;
+        uint e = 0x9e3779b9u, f = 0x9e3779b9u, g = 0x9e3779b9u, h = 0x9e3779b9u;
+        if (use_seed) {
+            r[0] = seed_word;
+        }
+        for (int i = 0; i < 4; ++i) {
+            seed_mix(a, b, c, d, e, f, g, h);
+        }
+        for (int i = 0; i < 256; i += 8) {
+            if (use_seed) {
+                a += r[i + 0]; b += r[i + 1]; c += r[i + 2]; d += r[i + 3];
+                e += r[i + 4]; f += r[i + 5]; g += r[i + 6]; h += r[i + 7];
+            }
+            seed_mix(a, b, c, d, e, f, g, h);
+            m[i + 0] = a; m[i + 1] = b; m[i + 2] = c; m[i + 3] = d;
+            m[i + 4] = e; m[i + 5] = f; m[i + 6] = g; m[i + 7] = h;
+        }
+        if (use_seed) {
+            for (int i = 0; i < 256; i += 8) {
+                a += m[i + 0]; b += m[i + 1]; c += m[i + 2]; d += m[i + 3];
+                e += m[i + 4]; f += m[i + 5]; g += m[i + 6]; h += m[i + 7];
+                seed_mix(a, b, c, d, e, f, g, h);
+                m[i + 0] = a; m[i + 1] = b; m[i + 2] = c; m[i + 3] = d;
+                m[i + 4] = e; m[i + 5] = f; m[i + 6] = g; m[i + 7] = h;
+            }
+        }
+        prng();
+        gnt = 256u;
+    }
+
+    inline uint rand_word() thread {
+        if (gnt == 0u) {
+            prng();
+            gnt = 255u;
+            return r[gnt];
+        }
+        --gnt;
+        return r[gnt];
+    }
+
+    inline uchar next_bluewallet_byte(uint variant) thread {
+        const uint word = rand_word() ^ 0x80000000u;
+        if (variant == XP_BLUEWALLET_ISAAC_VARIANT_CAP255_METAL) {
+            return uchar((ulong(word) * 255ul) >> 32);
+        }
+        return uchar(word >> 24);
+    }
+};
+
+static inline void xp_hex32_lower_metal(const thread uchar in[32], thread uchar out[64]) {
+    const uchar hex[16] = {
+        '0','1','2','3','4','5','6','7','8','9','a','b','c','d','e','f'
+    };
+    for (int i = 0; i < 32; ++i) {
+        out[i * 2] = hex[in[i] >> 4];
+        out[i * 2 + 1] = hex[in[i] & 0x0fu];
+    }
+}
+
+static inline void xp_bluewallet_isaac_next_priv_metal(thread XpBlueWalletIsaac05Metal& rng,
+                                                       uint variant,
+                                                       thread uchar priv32[32]) {
+    const uchar prefix[7] = { 'o', 'h', ' ', 'h', 'a', 'i', '!' };
+    const uchar hex[16] = {
+        '0','1','2','3','4','5','6','7','8','9','a','b','c','d','e','f'
+    };
+    thread uchar totalhex[64];
+    for (int i = 0; i < 32; ++i) {
+        const uchar b = rng.next_bluewallet_byte(variant);
+        totalhex[i * 2] = hex[b >> 4];
+        totalhex[i * 2 + 1] = hex[b & 0x0fu];
+    }
+    thread uchar msg[71];
+    for (int i = 0; i < 7; ++i) {
+        msg[i] = prefix[i];
+    }
+    for (int i = 0; i < 64; ++i) {
+        msg[7 + i] = totalhex[i];
+    }
+    thread uchar digest[32];
+    thread uchar digest_hex[64];
+    SHA256(msg, 71u, digest);
+    xp_hex32_lower_metal(digest, digest_hex);
+    SHA256(digest_hex, 64u, priv32);
+}
+
+struct XpTimeLcgDirectMetal {
+    uint state_a;
+    uint state_b;
+    uint variant;
+
+    static inline uchar glibc_byte(thread uint& state) {
+        state = state * 1103515245u + 12345u;
+        return uchar((state >> 16) & 0xffu);
+    }
+
+    static inline uchar msvc_byte(thread uint& state) {
+        state = state * 214013u + 2531011u;
+        return uchar((state >> 16) & 0xffu);
+    }
+
+    static inline uchar borland_byte(thread uint& state) {
+        state = state * 134775813u + 1u;
+        return uchar((state >> 24) & 0xffu);
+    }
+
+    static inline void init(thread XpTimeLcgDirectMetal& r, uint seed, uint v) {
+        r.state_a = seed;
+        r.state_b = seed ^ 0xdeadbeefu;
+        r.variant = v;
+    }
+
+    inline void next_priv(thread uchar priv32[32]) thread {
+        for (int i = 0; i < 32; ++i) {
+            if (variant == XP_TIME_LCG_DIRECT_VARIANT_MSVC_METAL) {
+                priv32[i] = msvc_byte(state_a);
+            } else if (variant == XP_TIME_LCG_DIRECT_VARIANT_BORLAND_METAL) {
+                priv32[i] = borland_byte(state_a);
+            } else if (variant == XP_TIME_LCG_DIRECT_VARIANT_DUAL_XOR_METAL) {
+                priv32[i] = uchar(glibc_byte(state_a) ^ msvc_byte(state_b));
+            } else {
+                priv32[i] = glibc_byte(state_a);
+            }
+        }
+    }
+};
+
+struct XpJavaLcgDirectMetal {
+    ulong state;
+
+    static inline void init(thread XpJavaLcgDirectMetal& r, ulong seed) {
+        r.state = (seed ^ 0x5deece66dul) & 0xfffffffffffful;
+    }
+
+    inline uint next32() thread {
+        state = (state * 0x5deece66dul + 0xbul) & 0xfffffffffffful;
+        return uint(state >> 16);
+    }
+
+    inline uint next_priv_word() thread {
+        return next32();
+    }
+
+    inline void next_priv(thread uchar priv32[32]) thread {
+        for (int i = 0; i < 32; i += 4) {
+            uint rnd = next32();
+            priv32[i + 0] = uchar(rnd & 0xffu);
+            priv32[i + 1] = uchar((rnd >> 8) & 0xffu);
+            priv32[i + 2] = uchar((rnd >> 16) & 0xffu);
+            priv32[i + 3] = uchar((rnd >> 24) & 0xffu);
+        }
+    }
+};
+
+struct XpTimeMt19937Metal {
+    uint mt[624];
+    int idx;
+
+    static inline void init(thread XpTimeMt19937Metal& r, uint seed) {
+        r.idx = 624;
+        r.mt[0] = seed;
+        for (int i = 1; i < 624; ++i) {
+            r.mt[i] = 1812433253u * (r.mt[i - 1] ^ (r.mt[i - 1] >> 30)) + uint(i);
+        }
+    }
+
+    inline void twist() thread {
+        for (int i = 0; i < 624; ++i) {
+            const uint y = (mt[i] & 0x80000000u) | (mt[(i + 1) % 624] & 0x7fffffffu);
+            mt[i] = mt[(i + 397) % 624] ^ (y >> 1) ^ ((y & 1u) != 0u ? 0x9908b0dfu : 0u);
+        }
+        idx = 0;
+    }
+
+    inline uint next32() thread {
+        if (idx >= 624) {
+            twist();
+        }
+        uint y = mt[idx++];
+        y ^= (y >> 11);
+        y ^= (y << 7) & 0x9d2c5680u;
+        y ^= (y << 15) & 0xefc60000u;
+        y ^= (y >> 18);
+        return y;
+    }
+
+    inline void next_priv_le_limbs(thread uchar priv32[32]) thread {
+        for (int i = 0; i < 8; ++i) {
+            const uint word = next32();
+            const int out = 28 - (i * 4);
+            priv32[out + 0] = uchar((word >> 24) & 0xffu);
+            priv32[out + 1] = uchar((word >> 16) & 0xffu);
+            priv32[out + 2] = uchar((word >> 8) & 0xffu);
+            priv32[out + 3] = uchar(word & 0xffu);
+        }
+    }
+};
+
+struct XpPythonMtRandomMetal {
+    uint mt[624];
+    int idx;
+
+    inline void init_genrand(uint s) thread {
+        mt[0] = s;
+        for (int i = 1; i < 624; ++i) {
+            mt[i] = 1812433253u * (mt[i - 1] ^ (mt[i - 1] >> 30)) + uint(i);
+        }
+        idx = 624;
+    }
+
+    inline void init_by_array(const thread uint* key, int key_len) thread {
+        init_genrand(19650218u);
+        int i = 1;
+        int j = 0;
+        int k = (624 > key_len) ? 624 : key_len;
+        for (; k > 0; --k) {
+            mt[i] = (mt[i] ^ ((mt[i - 1] ^ (mt[i - 1] >> 30)) * 1664525u)) + key[j] + uint(j);
+            ++i;
+            ++j;
+            if (i >= 624) {
+                mt[0] = mt[623];
+                i = 1;
+            }
+            if (j >= key_len) {
+                j = 0;
+            }
+        }
+        for (k = 623; k > 0; --k) {
+            mt[i] = (mt[i] ^ ((mt[i - 1] ^ (mt[i - 1] >> 30)) * 1566083941u)) - uint(i);
+            ++i;
+            if (i >= 624) {
+                mt[0] = mt[623];
+                i = 1;
+            }
+        }
+        mt[0] = 0x80000000u;
+    }
+
+    static inline void init(thread XpPythonMtRandomMetal& r, ulong seed) {
+        r.idx = 624;
+        thread uint key[2];
+        key[0] = uint(seed);
+        key[1] = uint(seed >> 32);
+        r.init_by_array(key, key[1] == 0u ? 1 : 2);
+    }
+
+    inline void twist() thread {
+        const uint MATRIX_A = 0x9908b0dfu;
+        const uint UPPER_MASK = 0x80000000u;
+        const uint LOWER_MASK = 0x7fffffffu;
+        uint y;
+        int kk;
+        for (kk = 0; kk < 227; ++kk) {
+            y = (mt[kk] & UPPER_MASK) | (mt[kk + 1] & LOWER_MASK);
+            mt[kk] = mt[kk + 397] ^ (y >> 1) ^ ((y & 1u) != 0u ? MATRIX_A : 0u);
+        }
+        for (; kk < 623; ++kk) {
+            y = (mt[kk] & UPPER_MASK) | (mt[kk + 1] & LOWER_MASK);
+            mt[kk] = mt[kk - 227] ^ (y >> 1) ^ ((y & 1u) != 0u ? MATRIX_A : 0u);
+        }
+        y = (mt[623] & UPPER_MASK) | (mt[0] & LOWER_MASK);
+        mt[623] = mt[396] ^ (y >> 1) ^ ((y & 1u) != 0u ? MATRIX_A : 0u);
+        idx = 0;
+    }
+
+    inline uint next32() thread {
+        if (idx >= 624) {
+            twist();
+        }
+        uint y = mt[idx++];
+        y ^= y >> 11;
+        y ^= (y << 7) & 0x9d2c5680u;
+        y ^= (y << 15) & 0xefc60000u;
+        y ^= y >> 18;
+        return y;
+    }
+
+    inline uchar randint_byte() thread {
+        uint r;
+        do {
+            r = next32() >> 23;
+        } while (r >= 256u);
+        return uchar(r);
+    }
+};
+
+static inline uint xp_u256_to_decimal_metal(const thread uint le_limbs[8], thread uchar out[78]) {
+    thread uchar be[32];
+    for (int i = 0; i < 8; ++i) {
+        const uint w = le_limbs[i];
+        be[31 - (i * 4 + 0)] = uchar(w & 0xffu);
+        be[31 - (i * 4 + 1)] = uchar((w >> 8) & 0xffu);
+        be[31 - (i * 4 + 2)] = uchar((w >> 16) & 0xffu);
+        be[31 - (i * 4 + 3)] = uchar((w >> 24) & 0xffu);
+    }
+    int hi = 31;
+    while (hi > 0 && be[hi] == 0u) {
+        --hi;
+    }
+    thread uchar rev[78];
+    uint len = 0u;
+    while (hi >= 0) {
+        uint rem = 0u;
+        for (int i = hi; i >= 0; --i) {
+            const uint cur = (rem << 8) | be[i];
+            be[i] = uchar(cur / 1000000000u);
+            rem = cur % 1000000000u;
+        }
+        thread uchar grp[9];
+        for (int g = 8; g >= 0; --g) {
+            grp[g] = uchar('0' + (rem % 10u));
+            rem /= 10u;
+        }
+        int new_hi = hi;
+        while (new_hi >= 0 && be[new_hi] == 0u) {
+            --new_hi;
+        }
+        if (new_hi < 0) {
+            int start = 0;
+            while (start < 8 && grp[start] == '0') {
+                ++start;
+            }
+            for (int g = start; g < 9; ++g) {
+                rev[len++] = grp[g];
+            }
+            if (len == 0u) {
+                rev[len++] = '0';
+            }
+        } else {
+            for (int g = 0; g < 9; ++g) {
+                rev[len++] = grp[g];
+            }
+        }
+        hi = new_hi;
+    }
+    for (uint i = 0u; i < len; ++i) {
+        out[i] = rev[len - 1u - i];
+    }
+    return len;
+}
+
+struct XpPybtcMtMetal {
+    XpPythonMtRandomMetal rng;
+
+    static inline void init(thread XpPybtcMtMetal& r, uint seed) {
+        XpPythonMtRandomMetal::init(r.rng, ulong(seed));
+    }
+
+    inline uchar next_hex_char() thread {
+        uint r;
+        do {
+            r = rng.next32() & 0xfu;
+        } while (r >= 16u);
+        const uchar hex[16] = {
+            '0','1','2','3','4','5','6','7','8','9','a','b','c','d','e','f'
+        };
+        return hex[r];
+    }
+
+    inline uint next_randrange256_decimal(thread uchar out[78]) thread {
+        thread uint limbs[8];
+        for (int i = 0; i < 8; ++i) {
+            limbs[i] = rng.next32();
+        }
+        return xp_u256_to_decimal_metal(limbs, out);
+    }
+
+    inline void next_priv(thread uchar priv32[32], uint variant, uint ts_micros_lo32) thread {
+        thread uchar msg[32 + 78 + 20];
+        uint pos = 0u;
+        if (variant == XP_PYBTC_MT_VARIANT_RANDOM_KEY_METAL) {
+            for (int i = 0; i < 32; ++i) {
+                msg[pos++] = next_hex_char();
+            }
+        }
+        thread uchar dec[78];
+        const uint dlen = next_randrange256_decimal(dec);
+        for (uint i = 0u; i < dlen; ++i) {
+            msg[pos++] = dec[i];
+        }
+        pos += xp_u64_to_decimal_metal(ulong(ts_micros_lo32), msg + pos);
+        SHA256(msg, size_t(pos), priv32);
+    }
+};
+
+struct XpNanoJavaRandomMetal {
+    XpJavaLcgDirectMetal rng;
+
+    static inline void init(thread XpNanoJavaRandomMetal& r, ulong seed) {
+        XpJavaLcgDirectMetal::init(r.rng, seed);
+    }
+
+    static inline void append_int_to_hex(thread uchar out[64], thread uint& pos, uint v) {
+        thread uchar tmp[8];
+        for (int i = 0; i < 8; ++i) {
+            uchar nib = uchar(v & 0xfu);
+            v >>= 4;
+            tmp[i] = (nib < 10u) ? uchar('0' + nib) : uchar('a' + (nib - 10u));
+        }
+        int start = 7;
+        while (start > 0 && tmp[start] == '0') {
+            --start;
+        }
+        for (int i = start; i >= 0; --i) {
+            if (pos < 64u) {
+                out[pos++] = tmp[i];
+            }
+        }
+    }
+
+    inline void next_priv(thread uchar priv32[32]) thread {
+        thread uchar hex[64];
+        uint pos = 0u;
+        int guard = 0;
+        while (pos < 64u && guard < 64) {
+            append_int_to_hex(hex, pos, rng.next_priv_word());
+            ++guard;
+        }
+        SHA256(hex, 64u, priv32);
+    }
+};
+
+static inline void xp_pywallet_ts_weak_next_priv_metal(thread uchar priv32[32], uint ts_micros_lo32) {
+    thread uchar msg[2 + 64 * 4 + 1 + 20];
+    uint pos = 0u;
+    msg[pos++] = 'b';
+    msg[pos++] = '\'';
+    for (int i = 0; i < 64; ++i) {
+        msg[pos++] = '\\';
+        msg[pos++] = 'x';
+        msg[pos++] = '0';
+        msg[pos++] = '0';
+    }
+    msg[pos++] = '\'';
+    pos += xp_u64_to_decimal_metal(ulong(ts_micros_lo32), msg + pos);
+    SHA256(msg, size_t(pos), priv32);
+}
+
+static inline uint xp_sha1_rotl_metal(uint x, uint n) {
+    return (x << n) | (x >> (32u - n));
+}
+
+static inline void xp_sha1_process_block_metal(const thread uchar block[64], thread uint h[5]) {
+    thread uint w[80];
+    for (int i = 0; i < 16; ++i) {
+        w[i] = (uint(block[i * 4]) << 24) | (uint(block[i * 4 + 1]) << 16) |
+               (uint(block[i * 4 + 2]) << 8) | uint(block[i * 4 + 3]);
+    }
+    for (int i = 16; i < 80; ++i) {
+        w[i] = xp_sha1_rotl_metal(w[i - 3] ^ w[i - 8] ^ w[i - 14] ^ w[i - 16], 1u);
+    }
+    uint a = h[0], b = h[1], c = h[2], d = h[3], e = h[4];
+    for (int i = 0; i < 80; ++i) {
+        uint f;
+        uint k;
+        if (i < 20) {
+            f = (b & c) | ((~b) & d);
+            k = 0x5a827999u;
+        } else if (i < 40) {
+            f = b ^ c ^ d;
+            k = 0x6ed9eba1u;
+        } else if (i < 60) {
+            f = (b & c) | (b & d) | (c & d);
+            k = 0x8f1bbcdcu;
+        } else {
+            f = b ^ c ^ d;
+            k = 0xca62c1d6u;
+        }
+        const uint t = xp_sha1_rotl_metal(a, 5u) + f + e + k + w[i];
+        e = d;
+        d = c;
+        c = xp_sha1_rotl_metal(b, 30u);
+        b = a;
+        a = t;
+    }
+    h[0] += a;
+    h[1] += b;
+    h[2] += c;
+    h[3] += d;
+    h[4] += e;
+}
+
+static inline void xp_sha1_short_message_metal(const thread uchar* data, uint len, thread uchar out20[20]) {
+    thread uint h[5] = {
+        0x67452301u, 0xefcdab89u, 0x98badcfeu, 0x10325476u, 0xc3d2e1f0u
+    };
+    thread uchar block[64];
+    for (int i = 0; i < 64; ++i) {
+        block[i] = 0u;
+    }
+    const uint first_len = (len < 64u) ? len : 64u;
+    for (uint i = 0u; i < first_len; ++i) {
+        block[i] = data[i];
+    }
+    const ulong bits = ulong(len) * 8ul;
+    if (len < 56u) {
+        block[len] = 0x80u;
+        for (int i = 0; i < 8; ++i) {
+            block[56 + i] = uchar(bits >> (56 - i * 8));
+        }
+        xp_sha1_process_block_metal(block, h);
+    } else {
+        if (len < 64u) {
+            block[len] = 0x80u;
+        }
+        xp_sha1_process_block_metal(block, h);
+        for (int i = 0; i < 64; ++i) {
+            block[i] = 0u;
+        }
+        if (len == 64u) {
+            block[0] = 0x80u;
+        }
+        for (int i = 0; i < 8; ++i) {
+            block[56 + i] = uchar(bits >> (56 - i * 8));
+        }
+        xp_sha1_process_block_metal(block, h);
+    }
+    for (int i = 0; i < 5; ++i) {
+        out20[i * 4] = uchar(h[i] >> 24);
+        out20[i * 4 + 1] = uchar(h[i] >> 16);
+        out20[i * 4 + 2] = uchar(h[i] >> 8);
+        out20[i * 4 + 3] = uchar(h[i]);
+    }
+}
+
+static inline void xp_sha1_compress20_zero_metal(const thread uchar in20[20], thread uchar out20[20]) {
+    thread uint w[80];
+    for (int i = 0; i < 5; ++i) {
+        w[i] = (uint(in20[i * 4]) << 24) | (uint(in20[i * 4 + 1]) << 16) |
+               (uint(in20[i * 4 + 2]) << 8) | uint(in20[i * 4 + 3]);
+    }
+    w[5] = 0u;
+    for (int i = 6; i < 16; ++i) {
+        w[i] = 0u;
+    }
+    for (int i = 16; i < 80; ++i) {
+        w[i] = xp_sha1_rotl_metal(w[i - 3] ^ w[i - 8] ^ w[i - 14] ^ w[i - 16], 1u);
+    }
+    uint a = 0x67452301u, b = 0xefcdab89u, c = 0x98badcfeu, d = 0x10325476u, e = 0xc3d2e1f0u;
+    for (int i = 0; i < 80; ++i) {
+        uint f;
+        uint k;
+        if (i < 20) {
+            f = (b & c) | ((~b) & d);
+            k = 0x5a827999u;
+        } else if (i < 40) {
+            f = b ^ c ^ d;
+            k = 0x6ed9eba1u;
+        } else if (i < 60) {
+            f = (b & c) | (b & d) | (c & d);
+            k = 0x8f1bbcdcu;
+        } else {
+            f = b ^ c ^ d;
+            k = 0xca62c1d6u;
+        }
+        const uint t = xp_sha1_rotl_metal(a, 5u) + f + e + k + w[i];
+        e = d;
+        d = c;
+        c = xp_sha1_rotl_metal(b, 30u);
+        b = a;
+        a = t;
+    }
+    thread uint h[5] = {
+        0x67452301u + a, 0xefcdab89u + b, 0x98badcfeu + c, 0x10325476u + d, 0xc3d2e1f0u + e
+    };
+    for (int i = 0; i < 5; ++i) {
+        out20[i * 4] = uchar(h[i] >> 24);
+        out20[i * 4 + 1] = uchar(h[i] >> 16);
+        out20[i * 4 + 2] = uchar(h[i] >> 8);
+        out20[i * 4 + 3] = uchar(h[i]);
+    }
+}
+
+static inline void xp_add160_be_metal(const thread uchar a[20],
+                                      const thread uchar b[20],
+                                      thread uchar out[20],
+                                      uchar plus_one) {
+    uint carry = plus_one != 0u ? 1u : 0u;
+    for (int i = 19; i >= 0; --i) {
+        const uint s = uint(a[i]) + uint(b[i]) + carry;
+        out[i] = uchar(s);
+        carry = s >> 8;
+    }
+}
+
+static inline void xp_xor20_metal(const thread uchar a[20], const thread uchar b[20], thread uchar out[20]) {
+    for (int i = 0; i < 20; ++i) {
+        out[i] = uchar(a[i] ^ b[i]);
+    }
+}
+
+static inline void xp_cgr_transition_metal(const thread uchar state20[20],
+                                           const thread uchar aux20[20],
+                                           thread uchar priv32[32],
+                                           thread uchar state20_after[20]) {
+    thread uchar xval[20];
+    thread uchar out20_a[20];
+    thread uchar state_a[20];
+    thread uchar out20_b[20];
+    xp_add160_be_metal(state20, aux20, xval, 0u);
+    xp_sha1_compress20_zero_metal(xval, out20_a);
+    xp_add160_be_metal(state20, out20_a, state_a, 1u);
+    xp_add160_be_metal(state_a, aux20, xval, 0u);
+    xp_sha1_compress20_zero_metal(xval, out20_b);
+    xp_add160_be_metal(state_a, out20_b, state20_after, 1u);
+    for (int i = 0; i < 20; ++i) {
+        priv32[i] = out20_a[i];
+    }
+    for (int i = 0; i < 12; ++i) {
+        priv32[20 + i] = out20_b[i];
+    }
+}
+
+static inline void xp_cgr_state_generate_priv_metal(const device XpCgrStateInput* in,
+                                                    uchar profile_kind,
+                                                    thread uchar priv32[32]) {
+    thread uchar state[20];
+    for (int i = 0; i < 20; ++i) {
+        state[i] = in->state20[i];
+    }
+    uchar count = in->transition_count;
+    if (count == 0u) {
+        count = 1u;
+    }
+    if (count > XP_CGR_CHAIN_MAX_METAL) {
+        count = XP_CGR_CHAIN_MAX_METAL;
+    }
+    uchar xor_mask = in->xor_mask;
+    if (in->transition_count == 0u &&
+        (profile_kind == XP_PROFILE_CGR_BRIDGE_METAL ||
+         profile_kind == XP_PROFILE_CGR_XOR_METAL ||
+         profile_kind == XP_PROFILE_CGR_CHAIN_BRIDGE_METAL)) {
+        xor_mask = 1u;
+    }
+    thread uchar local_priv[32];
+    thread uchar next_state[20];
+    for (uchar t = 0u; t < count; ++t) {
+        thread uchar raw[20];
+        thread uchar prefix[20];
+        thread uchar aux[20];
+        for (int i = 0; i < 20; ++i) {
+            if (in->transition_count == 0u && t == 0u) {
+                raw[i] = in->aux20[i];
+                prefix[i] = in->outbuf_prefix20[i];
+            } else {
+                raw[i] = in->chain_aux20[t][i];
+                prefix[i] = in->chain_prefix20[t][i];
+            }
+        }
+        if ((xor_mask & (1u << t)) != 0u) {
+            xp_xor20_metal(raw, prefix, aux);
+        } else {
+            for (int i = 0; i < 20; ++i) {
+                aux[i] = raw[i];
+            }
+        }
+        xp_cgr_transition_metal(state, aux, local_priv, next_state);
+        for (int i = 0; i < 20; ++i) {
+            state[i] = next_state[i];
+        }
+    }
+    for (int i = 0; i < 32; ++i) {
+        priv32[i] = local_priv[i];
+    }
+}
+
+static inline bool xp_ssleay_stir_generate_priv_metal(const device XpSsleayInput* in,
+                                                      thread uchar priv32[32]) {
+    if (in == nullptr || in->out_len != 32u || in->iter_count == 0u || in->iter_count > XP_SSLEAY_ITERATIONS_METAL) {
+        return false;
+    }
+    uint written = 0u;
+    for (uint iter = 0u; iter < in->iter_count && written < 32u; ++iter) {
+        thread uchar msg[20 + 8 + XP_SSLEAY_SLICE_LEN_METAL + XP_SSLEAY_SLICE_LEN_METAL];
+        uint pos = 0u;
+        for (int i = 0; i < 20; ++i) {
+            msg[pos++] = in->local_md[iter][i];
+        }
+        for (int i = 0; i < 8; ++i) {
+            msg[pos++] = in->md_c[iter][i];
+        }
+        const uint input_len = (in->input_len[iter] <= XP_SSLEAY_SLICE_LEN_METAL) ? in->input_len[iter] : XP_SSLEAY_SLICE_LEN_METAL;
+        for (uint i = 0u; i < input_len; ++i) {
+            msg[pos++] = in->input_buf[iter][i];
+        }
+        for (int i = 0; i < int(XP_SSLEAY_SLICE_LEN_METAL); ++i) {
+            msg[pos++] = in->state_slice[iter][i];
+        }
+        thread uchar digest[20];
+        xp_sha1_short_message_metal(msg, pos, digest);
+        for (int j = 10; j < 20 && written < 32u; ++j) {
+            priv32[written++] = digest[j];
+        }
+    }
+    return written == 32u;
+}
+
+struct XpRandState {
+    uchar state[XP_OPENSSL_STATE_SIZE_METAL + XP_OPENSSL_MD_DIGEST_LENGTH_METAL];
+    uchar md[XP_OPENSSL_MD_DIGEST_LENGTH_METAL];
+    ulong md_count[2];
+    int state_index;
+    int state_num;
+    float entropy;
+    int initialized;
+    int stirred_pool;
+    uint thc_pid;
+};
+
+static inline void xp_memzero(thread uchar* p, int n) {
+    for (int i = 0; i < n; ++i) {
+        p[i] = 0u;
+    }
+}
+
+static inline void xp_hitme(thread XpRandState* rs, uint n) {
+    if (n == 0u) {
+        xp_memzero(rs->state, XP_OPENSSL_STATE_SIZE_METAL + XP_OPENSSL_MD_DIGEST_LENGTH_METAL);
+        xp_memzero(rs->md, XP_OPENSSL_MD_DIGEST_LENGTH_METAL);
+        rs->md_count[0] = 0ul;
+        rs->md_count[1] = 0ul;
+        rs->state_index = 0;
+        rs->state_num = 0;
+        rs->entropy = 0.0f;
+        rs->initialized = 0;
+        rs->stirred_pool = 0;
+        rs->thc_pid = 0u;
+        return;
+    }
+    rs->thc_pid = n;
+}
+
+static inline void xp_append_le_word(thread uchar* dst, thread int& pos, ulong val, uint bytes) {
+    if (bytes == 4u) {
+        dst[pos++] = uchar(val);
+        dst[pos++] = uchar(val >> 8);
+        dst[pos++] = uchar(val >> 16);
+        dst[pos++] = uchar(val >> 24);
+        return;
+    }
+    for (int i = 0; i < 8; ++i) {
+        dst[pos++] = uchar(val >> (i * 8));
+    }
+}
+
+static inline uint xp_openssl_word_bytes(uchar arch) {
+    return (arch == XP_OPENSSL_ARCH_LE32_METAL) ? 4u : 8u;
+}
+
+static inline void xp_ssleay_rand_add(thread XpRandState* rs, int num, float add_entropy, uint word_bytes) {
+    int st_idx = rs->state_index;
+    ulong md_c[2] = { rs->md_count[0], rs->md_count[1] };
+    thread uchar local_md[XP_OPENSSL_MD_DIGEST_LENGTH_METAL];
+    for (int i = 0; i < XP_OPENSSL_MD_DIGEST_LENGTH_METAL; ++i) {
+        local_md[i] = rs->md[i];
+    }
+
+    rs->state_index += num;
+    if (rs->state_index >= XP_OPENSSL_STATE_SIZE_METAL) {
+        rs->state_index %= XP_OPENSSL_STATE_SIZE_METAL;
+        rs->state_num = XP_OPENSSL_STATE_SIZE_METAL;
+    } else if (rs->state_num < XP_OPENSSL_STATE_SIZE_METAL) {
+        if (rs->state_index > rs->state_num) {
+            rs->state_num = rs->state_index;
+        }
+    }
+    rs->md_count[1] += ulong((num / XP_OPENSSL_MD_DIGEST_LENGTH_METAL) + ((num % XP_OPENSSL_MD_DIGEST_LENGTH_METAL) > 0));
+
+    for (int i = 0; i < num; i += XP_OPENSSL_MD_DIGEST_LENGTH_METAL) {
+        int j = num - i;
+        if (j > XP_OPENSSL_MD_DIGEST_LENGTH_METAL) {
+            j = XP_OPENSSL_MD_DIGEST_LENGTH_METAL;
+        }
+        thread uchar md_in[80];
+        int pos = 0;
+        for (int k = 0; k < XP_OPENSSL_MD_DIGEST_LENGTH_METAL; ++k) {
+            md_in[pos++] = local_md[k];
+        }
+        for (int k = 0; k < j; ++k) {
+            md_in[pos++] = rs->state[(st_idx + k) % XP_OPENSSL_STATE_SIZE_METAL];
+        }
+        for (int b = 0; b < 2; ++b) {
+            xp_append_le_word(md_in, pos, md_c[b], word_bytes);
+        }
+        xp_sha1_short_message_metal(md_in, uint(pos), local_md);
+        md_c[1]++;
+        for (int k = 0; k < j; ++k) {
+            rs->state[st_idx] ^= local_md[k];
+            st_idx++;
+            if (st_idx >= XP_OPENSSL_STATE_SIZE_METAL) {
+                st_idx = 0;
+            }
+        }
+    }
+    for (int k = 0; k < XP_OPENSSL_MD_DIGEST_LENGTH_METAL; ++k) {
+        rs->md[k] ^= local_md[k];
+    }
+    rs->entropy += add_entropy;
+}
+
+static inline void xp_rand_poll(thread XpRandState* rs, uint word_bytes) {
+    xp_ssleay_rand_add(rs, 32, 32.0f, word_bytes);
+    xp_ssleay_rand_add(rs, int(word_bytes), 0.0f, word_bytes);
+    xp_ssleay_rand_add(rs, int(word_bytes), 0.0f, word_bytes);
+    xp_ssleay_rand_add(rs, int(word_bytes), 0.0f, word_bytes);
+}
+
+static inline void xp_ssleay_rand_bytes(thread XpRandState* rs, thread uchar* buf, int num, uint word_bytes) {
+    uint curr_pid = rs->thc_pid;
+    if (rs->initialized == 0) {
+        xp_rand_poll(rs, word_bytes);
+        rs->initialized = 1;
+    }
+    const int ok = (rs->entropy >= 32.0f) ? 1 : 0;
+    if (rs->stirred_pool == 0) {
+        int n = XP_OPENSSL_STATE_SIZE_METAL;
+        while (n > 0) {
+            xp_ssleay_rand_add(rs, XP_OPENSSL_DUMMY_SEED_LEN_METAL, 0.0f, word_bytes);
+            n -= XP_OPENSSL_DUMMY_SEED_LEN_METAL;
+        }
+        if (ok != 0) {
+            rs->stirred_pool = 1;
+        }
+    }
+
+    int st_idx = rs->state_index;
+    const int st_num = rs->state_num;
+    ulong md_c[2] = { rs->md_count[0], rs->md_count[1] };
+    thread uchar local_md[XP_OPENSSL_MD_DIGEST_LENGTH_METAL];
+    for (int i = 0; i < XP_OPENSSL_MD_DIGEST_LENGTH_METAL; ++i) {
+        local_md[i] = rs->md[i];
+    }
+    const int num_ceil = ((num + 9) / 10) * 10;
+    rs->state_index += num_ceil;
+    if (rs->state_index > rs->state_num) {
+        rs->state_index %= rs->state_num;
+    }
+    rs->md_count[0] += 1ul;
+
+    while (num > 0) {
+        int j = (num >= 10) ? 10 : num;
+        num -= j;
+        thread uchar md_in[80];
+        int pos = 0;
+        if (curr_pid != 0u) {
+            md_in[pos++] = uchar(curr_pid);
+            md_in[pos++] = uchar(curr_pid >> 8);
+            md_in[pos++] = uchar(curr_pid >> 16);
+            md_in[pos++] = uchar(curr_pid >> 24);
+            curr_pid = 0u;
+        }
+        for (int k = 0; k < XP_OPENSSL_MD_DIGEST_LENGTH_METAL; ++k) {
+            md_in[pos++] = local_md[k];
+        }
+        for (int b = 0; b < 2; ++b) {
+            xp_append_le_word(md_in, pos, md_c[b], word_bytes);
+        }
+        for (int k = 0; k < 10; ++k) {
+            md_in[pos++] = rs->state[(st_idx + k) % st_num];
+        }
+        xp_sha1_short_message_metal(md_in, uint(pos), local_md);
+        for (int i = 0; i < 10; ++i) {
+            rs->state[st_idx] ^= local_md[i];
+            st_idx++;
+            if (st_idx >= st_num) {
+                st_idx = 0;
+            }
+            if (i < j) {
+                *buf++ = local_md[i + 10];
+            }
+        }
+    }
+
+    thread uchar md_in[80];
+    int pos = 0;
+    for (int b = 0; b < 2; ++b) {
+        xp_append_le_word(md_in, pos, md_c[b], word_bytes);
+    }
+    for (int k = 0; k < XP_OPENSSL_MD_DIGEST_LENGTH_METAL; ++k) {
+        md_in[pos++] = local_md[k];
+    }
+    for (int k = 0; k < XP_OPENSSL_MD_DIGEST_LENGTH_METAL; ++k) {
+        md_in[pos++] = rs->md[k];
+    }
+    xp_sha1_short_message_metal(md_in, uint(pos), rs->md);
+}
+
+static inline void xp_openssl_path_ops(uint path, thread int setup[6], thread int gen[4]) {
+    const int SETUP[54][6] = {
+        {-3,-3,0,0,0,0}, {-2,-3,-3,0,0,0}, {-3,-2,-3,0,0,0}, {1800,-2,-3,-3,0,0}, {-2,1800,-3,-3,0,0},
+        {0,0,0,0,0,0}, {0,0,0,0,0,0}, {-3,0,0,0,0,0}, {-3,-3,0,0,0,0}, {-3,0,0,0,0,0},
+        {-3,-3,-3,0,0,0}, {-3,-3,-3,-3,0,0}, {-3,-3,-2,0,0,0}, {-3,-3,-2,-3,0,0}, {-3,-3,-2,-3,-3,0},
+        {-3,-2,-2,-3,0,0}, {-3,-3,-3,-3,0,0}, {-2,-3,-3,-3,0,0}, {-3,-2,-3,-3,0,0}, {-3,-3,-2,-3,0,0},
+        {-3,-3,-3,-2,0,0}, {-3,-3,-3,0,0,0}, {-2,-3,-3,0,0,0}, {-3,-2,-3,0,0,0}, {-3,-3,-2,0,0,0},
+        {-3,-3,0,0,0,0}, {-2,-3,0,0,0,0}, {-3,-2,0,0,0,0}, {-3,-3,-3,-3,-3,0}, {-2,-3,-3,-3,-3,0},
+        {-3,-2,-3,-3,-3,0}, {-3,-3,-2,-3,-3,0}, {-3,-3,-3,-2,-3,0}, {-3,-3,-3,-3,-2,0}, {-3,0,0,0,0,0},
+        {-3,-3,-3,-3,0,0}, {-2,-3,-3,-3,0,0}, {-3,-2,-3,-3,0,0}, {-3,-3,-2,-3,0,0}, {-3,-3,-3,-2,0,0},
+        {-3,-3,-3,0,0,0}, {-2,-3,-3,0,0,0}, {-3,-2,-3,0,0,0}, {-3,-3,-2,0,0,0}, {-3,-3,0,0,0,0},
+        {-2,-3,0,0,0,0}, {-3,-2,0,0,0,0}, {-3,-3,-3,-3,-3,0}, {-2,-3,-3,-3,-3,0}, {-3,-2,-3,-3,-3,0},
+        {-3,-3,-2,-3,-3,0}, {-3,-3,-3,-2,-3,0}, {-3,-3,-3,-3,-2,0}, {-3,0,0,0,0,0}
+    };
+    const int GEN[54][4] = {
+        {-3,-1,0,0}, {-3,-1,0,0}, {-3,-1,0,0}, {-1,0,0,0}, {-1,0,0,0},
+        {-1,0,0,0}, {-3,-1,0,0}, {-1,0,0,0}, {-1,0,0,0}, {-3,-1,0,0},
+        {-3,-1,0,0}, {-3,-1,0,0}, {-3,-1,0,0}, {-3,-1,0,0}, {-3,-1,0,0},
+        {-3,-1,0,0}, {-3,-1,0,0}, {-3,-1,0,0}, {-3,-1,0,0}, {-3,-1,0,0},
+        {-3,-1,0,0}, {-3,-1,0,0}, {-3,-1,0,0}, {-3,-1,0,0}, {-3,-1,0,0},
+        {-3,-1,0,0}, {-3,-1,0,0}, {-3,-1,0,0}, {-3,-1,0,0}, {-3,-1,0,0},
+        {-3,-1,0,0}, {-3,-1,0,0}, {-3,-1,0,0}, {-3,-1,0,0}, {-3,-1,0,0},
+        {-1,0,0,0}, {-1,0,0,0}, {-1,0,0,0}, {-1,0,0,0}, {-1,0,0,0},
+        {-1,0,0,0}, {-1,0,0,0}, {-1,0,0,0}, {-1,0,0,0}, {-1,0,0,0},
+        {-1,0,0,0}, {-1,0,0,0}, {-1,0,0,0}, {-1,0,0,0}, {-1,0,0,0},
+        {-1,0,0,0}, {-1,0,0,0}, {-1,0,0,0}, {-1,0,0,0}
+    };
+    for (int i = 0; i < 6; ++i) {
+        setup[i] = SETUP[path][i];
+    }
+    for (int i = 0; i < 4; ++i) {
+        gen[i] = GEN[path][i];
+    }
+}
+
+static inline void xp_openssl_run_setup(thread XpRandState* rs, uint path, uchar arch) {
+    const uint word_bytes = xp_openssl_word_bytes(arch);
+    thread int setup[6];
+    thread int gen_unused[4];
+    xp_openssl_path_ops(path, setup, gen_unused);
+    for (int i = 0; i < 6; ++i) {
+        const int op = setup[i];
+        if (op == 0) {
+            break;
+        }
+        if (op == -2) {
+            thread uchar tmp[32];
+            xp_ssleay_rand_bytes(rs, tmp, 32, word_bytes);
+        } else if (op == -3) {
+            xp_ssleay_rand_add(rs, 8, 0.0f, word_bytes);
+        } else if (op > 0) {
+            thread uchar tmp[8];
+            for (int n = 0; n < op; ++n) {
+                xp_ssleay_rand_bytes(rs, tmp, 8, word_bytes);
+            }
+        }
+    }
+}
+
+static inline bool xp_secp256k1_priv_in_range(const thread uchar priv32[32]) {
+    const uchar ORDER[32] = {
+        0xffu,0xffu,0xffu,0xffu,0xffu,0xffu,0xffu,0xffu,
+        0xffu,0xffu,0xffu,0xffu,0xffu,0xffu,0xffu,0xfeu,
+        0xbau,0xaeu,0xdcu,0xe6u,0xafu,0x48u,0xa0u,0x3bu,
+        0xbfu,0xd2u,0x5eu,0x8cu,0xd0u,0x36u,0x41u,0x41u
+    };
+    bool nonzero = false;
+    for (int i = 0; i < 32; ++i) {
+        if (priv32[i] != 0u) {
+            nonzero = true;
+        }
+    }
+    if (!nonzero) {
+        return false;
+    }
+    for (int i = 0; i < 32; ++i) {
+        if (priv32[i] < ORDER[i]) {
+            return true;
+        }
+        if (priv32[i] > ORDER[i]) {
+            return false;
+        }
+    }
+    return false;
+}
+
+static inline bool xp_openssl_ec_keygen_priv(thread XpRandState* rs, uchar arch, thread uchar priv32[32]) {
+    const uint word_bytes = xp_openssl_word_bytes(arch);
+    for (int attempt = 0; attempt < 100; ++attempt) {
+        xp_ssleay_rand_add(rs, int(word_bytes), 0.0f, word_bytes);
+        xp_ssleay_rand_bytes(rs, priv32, 32, word_bytes);
+        if (xp_secp256k1_priv_in_range(priv32)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static inline bool xp_openssl_next_priv(thread XpRandState* rs, uint path, uchar arch, thread uchar priv32[32]) {
+    const uint word_bytes = xp_openssl_word_bytes(arch);
+    thread int setup_unused[6];
+    thread int gen[4];
+    xp_openssl_path_ops(path, setup_unused, gen);
+    for (int i = 0; i < 4; ++i) {
+        const int op = gen[i];
+        if (op == 0) {
+            break;
+        }
+        if (op == -1) {
+            return xp_openssl_ec_keygen_priv(rs, arch, priv32);
+        }
+        if (op == -3) {
+            xp_ssleay_rand_add(rs, 8, 0.0f, word_bytes);
+        }
+    }
+    return false;
+}
+
+static inline uint xp_path_from_mask_index(ulong path_mask, uint index) {
+    uint seen = 0u;
+    for (uint p = 0u; p < XP_OPENSSL_PATH_COUNT_METAL; ++p) {
+        if ((path_mask & (1ul << p)) != 0ul) {
+            if (seen == index) {
+                return p;
+            }
+            ++seen;
+        }
+    }
+    return 0xffffffffu;
+}
+
+static inline bool xp_decode_openssl_linear(ulong linear,
+                                            ulong path_mask,
+                                            uint path_count,
+                                            uint pid_start,
+                                            uint pid_count,
+                                            thread uchar& arch,
+                                            thread uint& path,
+                                            thread uint& pid) {
+    if (pid_count == 0u || path_count == 0u) {
+        return false;
+    }
+    const ulong per_arch = ulong(path_count) * ulong(pid_count);
+    const ulong arch_ordinal = linear / per_arch;
+    if (arch_ordinal >= ulong(XP_OPENSSL_ARCH_COUNT_METAL)) {
+        return false;
+    }
+    const ulong rem = linear - arch_ordinal * per_arch;
+    const uint path_ordinal = uint(rem / ulong(pid_count));
+    const uint pid_idx = uint(rem - ulong(path_ordinal) * ulong(pid_count));
+    if (path_ordinal >= path_count || pid_idx >= pid_count) {
+        return false;
+    }
+    path = xp_path_from_mask_index(path_mask, path_ordinal);
+    if (path >= XP_OPENSSL_PATH_COUNT_METAL) {
+        return false;
+    }
+    arch = uchar(arch_ordinal);
+    pid = pid_start + pid_idx;
+    return true;
+}
+
+static inline uint xp_randstorm_seed_event_count_dev(uint encoded) {
+    return encoded & XP_RANDSTORM_SEED_EVENTS_COUNT_MASK_METAL;
+}
+
+static inline uint xp_randstorm_seed_event_final_time(uint time1, uint encoded) {
+    const uint count = xp_randstorm_seed_event_count_dev(encoded);
+    return (encoded & XP_RANDSTORM_SEED_EVENTS_REPEAT_FLAG_METAL) ? time1 : (time1 + count);
+}
+
+static inline bool xp_decode_randstorm_linear(ulong linear,
+                                              ulong profile_mask,
+                                              uint profile_count,
+                                              ulong state_start,
+                                              ulong state_count,
+                                              uint time_start,
+                                              uint time_count,
+                                              uint delta_count,
+                                              uint mileage_start,
+                                              ulong mileage_count,
+                                              uint time_mode,
+                                              thread uint& profile_ordinal,
+                                              thread uint& key_index,
+                                              thread uint& mileage,
+                                              thread ulong& state,
+                                              thread uint& time0,
+                                              thread uint& time1) {
+    if (profile_count == 0u || state_count == 0ul || delta_count == 0u || key_index == 0u) {
+        return false;
+    }
+    if (mileage_count == 0ul) {
+        return false;
+    }
+    const uint key_count = key_index;
+    const ulong mileage_idx = linear % mileage_count;
+    linear /= mileage_count;
+    const ulong delta_idx = linear % ulong(delta_count);
+    linear /= ulong(delta_count);
+    const ulong key_idx = linear % ulong(key_count);
+    linear /= ulong(key_count);
+    ulong time_idx = 0ul;
+    if (time_count != 0u) {
+        time_idx = linear % ulong(time_count);
+        linear /= ulong(time_count);
+    }
+    const ulong state_idx = linear % state_count;
+    const ulong profile_idx = linear / state_count;
+    if (profile_idx >= ulong(profile_count)) {
+        return false;
+    }
+    uint seen = 0u;
+    profile_ordinal = XP_RANDSTORM_LOCAL_PROFILE_COUNT_METAL;
+    for (uint i = 0u; i < XP_RANDSTORM_LOCAL_PROFILE_COUNT_METAL; ++i) {
+        if ((profile_mask & (1ul << i)) == 0ul) {
+            continue;
+        }
+        if (seen == uint(profile_idx)) {
+            profile_ordinal = i;
+            break;
+        }
+        ++seen;
+    }
+    if (profile_ordinal >= XP_RANDSTORM_LOCAL_PROFILE_COUNT_METAL) {
+        return false;
+    }
+    key_index = uint(key_idx);
+    mileage = mileage_start + uint(mileage_idx);
+    state = state_start + state_idx;
+    const bool has_time_range = (time_count != 0u);
+    const uint time_base = has_time_range ? (time_start + uint(time_idx)) : 0u;
+    if (time_mode == 1u) {
+        time0 = uint(state * 1000ul + ulong(time_base));
+    } else if (time_mode == 2u) {
+        time0 = uint(state + ulong(time_base));
+    } else {
+        time0 = has_time_range ? time_base : uint(state);
+    }
+    time1 = time0 + uint(delta_idx);
+    return true;
+}
+
+static inline bool xp_decode_randstorm_mwc32_linear(ulong linear,
+                                                    ulong profile_mask,
+                                                    uint profile_count,
+                                                    ulong state_start,
+                                                    ulong state_count,
+                                                    uint time_start,
+                                                    uint time_count,
+                                                    uint delta_count,
+                                                    uint mileage_start,
+                                                    ulong mileage_count,
+                                                    uint time_mode,
+                                                    thread uint& profile_ordinal,
+                                                    thread uint& key_index,
+                                                    thread uint& mileage,
+                                                    thread uint& state0,
+                                                    thread uint& time0,
+                                                    thread uint& time1) {
+    if (profile_count == 0u || state_count == 0ul || delta_count == 0u || key_index == 0u) {
+        return false;
+    }
+    if (mileage_count == 0ul) {
+        return false;
+    }
+    const uint key_count = key_index;
+    const ulong mileage_idx = linear % mileage_count;
+    linear /= mileage_count;
+    const ulong delta_idx = linear % ulong(delta_count);
+    linear /= ulong(delta_count);
+    const ulong key_idx = linear % ulong(key_count);
+    linear /= ulong(key_count);
+    ulong time_idx = 0ul;
+    if (time_count != 0u) {
+        time_idx = linear % ulong(time_count);
+        linear /= ulong(time_count);
+    }
+    const ulong state_idx = linear % state_count;
+    const ulong profile_idx = linear / state_count;
+    if (profile_idx >= ulong(profile_count)) {
+        return false;
+    }
+    uint seen = 0u;
+    profile_ordinal = XP_RANDSTORM_MWC32_PROFILE_COUNT_METAL;
+    for (uint i = 0u; i < XP_RANDSTORM_MWC32_PROFILE_COUNT_METAL; ++i) {
+        if ((profile_mask & (1ul << i)) == 0ul) {
+            continue;
+        }
+        if (seen == uint(profile_idx)) {
+            profile_ordinal = i;
+            break;
+        }
+        ++seen;
+    }
+    if (profile_ordinal >= XP_RANDSTORM_MWC32_PROFILE_COUNT_METAL) {
+        return false;
+    }
+    key_index = uint(key_idx);
+    mileage = mileage_start + uint(mileage_idx);
+    const ulong state = state_start + state_idx;
+    state0 = uint(state);
+    const bool has_time_range = (time_count != 0u);
+    const uint time_base = has_time_range ? (time_start + uint(time_idx)) : 0u;
+    if (time_mode == 1u) {
+        time0 = uint(ulong(state0) * 1000ul + ulong(time_base));
+    } else if (time_mode == 2u) {
+        time0 = uint(ulong(state0) + ulong(time_base));
+    } else {
+        time0 = has_time_range ? time_base : state0;
+    }
+    time1 = time0 + uint(delta_idx);
+    return true;
+}
+
+static inline bool xp_randstorm_xp_profile_is_raw32(uint profile) {
+    const uint group = profile / 8u;
+    return group != 0u && group != 2u;
+}
+
+static inline bool xp_randstorm_xp_profile_drop1(uint profile) {
+    const uint group = profile / 8u;
+    return group == 6u || group == 7u;
+}
+
+static inline bool xp_randstorm_xp_profile_uses_jsbn_add(uint profile) {
+    const uint group = profile / 8u;
+    return group == 0u || group == 2u;
+}
+
+static inline int xp_randstorm_xp_profile_gen(uint profile) {
+    const uint group = profile / 8u;
+    const uint engine = profile % 8u;
+    const bool lohi = (group == 2u || group == 3u || group == 5u || group == 7u);
+    const bool pool = (group == 4u || group == 5u);
+    switch (engine) {
+        case 0u: return pool ? (lohi ? 511 : 411) : (lohi ? 311 : 211);
+        case 1u: return pool ? (lohi ? 512 : 412) : (lohi ? 312 : 212);
+        case 2u: return pool ? (lohi ? 513 : 413) : (lohi ? 313 : 213);
+        case 3u: return pool ? (lohi ? 514 : 414) : (lohi ? 314 : 214);
+        case 4u: return pool ? (lohi ? 570 : 470) : (lohi ? 370 : 270);
+        case 5u: return pool ? (lohi ? 571 : 471) : (lohi ? 371 : 271);
+        case 6u: return pool ? (lohi ? 572 : 472) : (lohi ? 372 : 272);
+        case 7u: return pool ? (lohi ? 519 : 419) : (lohi ? 319 : 219);
+        default: return -1;
+    }
+}
+
+static inline ulong xp_randstorm_xp_math_state(uint profile, ulong state) {
+    (void)profile;
+    return state;
+}
+
+static inline bool xp_randstorm_mwc32_profile_is_raw32(uint profile) {
+    const uint group = profile / 4u;
+    return group != 0u && group != 2u;
+}
+
+static inline bool xp_randstorm_mwc32_profile_drop1(uint profile) {
+    const uint group = profile / 4u;
+    return group == 6u || group == 7u;
+}
+
+static inline bool xp_randstorm_mwc32_profile_is_byte8(uint profile) {
+    const uint group = profile / 4u;
+    return group == 8u || group == 9u;
+}
+
+static inline bool xp_randstorm_mwc32_profile_is_low_byte8(uint profile) {
+    return (profile / 4u) == 9u;
+}
+
+static inline int xp_randstorm_mwc32_profile_gen(uint profile) {
+    const uint group = profile / 4u;
+    const uint engine = profile % 4u;
+    const bool lohi = (group == 2u || group == 3u || group == 5u || group == 7u);
+    const bool pool = (group == 4u || group == 5u);
+    switch (engine) {
+        case 0u: return pool ? (lohi ? 511 : 411) : (lohi ? 311 : 211);
+        case 1u: return pool ? (lohi ? 570 : 470) : (lohi ? 370 : 270);
+        case 2u: return pool ? (lohi ? 571 : 471) : (lohi ? 371 : 271);
+        case 3u: return pool ? (lohi ? 572 : 472) : (lohi ? 372 : 272);
+        default: return -1;
+    }
+}
+
+static inline int xp_randstorm_mwc32_profile_byte8_gen(uint profile) {
+    switch (profile % 4u) {
+        case 0u: return 810;
+        case 1u: return 814;
+        case 2u: return 815;
+        case 3u: return 816;
+        default: return -1;
+    }
+}
+
+static inline ulong xp_randstorm_mwc32_math_state(uint profile, uint state0) {
+    const uint engine = profile % 4u;
+    const uint state1 =
+        (engine == 0u) ? 1u :
+        (engine == 1u) ? 0x64d1c3c9u :
+        (engine == 2u) ? 1u : 2u;
+    return (ulong(state0) << 32) | ulong(state1);
+}
+
+static inline int xp_randstorm_bytes_profile_gen(uint profile) {
+    const uint engine = profile % 8u;
+    return (engine < 8u) ? (810 + int(engine)) : -1;
+}
+
+static inline int xp_randstorm_v8init_profile_gen(uint profile) {
+    const uint group = profile / 20u;
+    const uint engine = profile % 20u;
+    const bool lohi = group == 1u;
+    switch (engine) {
+        case 0u: return lohi ? 710 : 610;
+        case 1u: return lohi ? 711 : 611;
+        case 2u: return lohi ? 712 : 612;
+        case 3u: return lohi ? 713 : 613;
+        case 4u: return lohi ? 714 : 614;
+        case 5u: return lohi ? 715 : 615;
+        case 6u: return lohi ? 716 : 616;
+        case 7u: return lohi ? 717 : 617;
+        case 8u: return lohi ? 718 : 618;
+        case 9u: return lohi ? 719 : 619;
+        case 10u: return lohi ? 720 : 620;
+        case 11u: return lohi ? 721 : 621;
+        case 12u: return lohi ? 722 : 622;
+        case 13u: return lohi ? 723 : 623;
+        case 14u: return lohi ? 724 : 624;
+        case 15u: return lohi ? 725 : 625;
+        case 16u: return lohi ? 726 : 626;
+        case 17u: return lohi ? 727 : 627;
+        case 18u: return lohi ? 728 : 628;
+        case 19u: return lohi ? 729 : 629;
+        default: return -1;
+    }
+}
+
+static inline int xp_randstorm_v8init_bytes_profile_gen(uint profile) {
+    if (profile < 20u) {
+        return 830 + int(profile);
+    }
+    if (profile < 40u) {
+        return 850 + int(profile - 20u);
+    }
+    return -1;
+}
+
+static inline void xp_randstorm_jsbn_big_random_to_priv(thread uchar priv32[32]) {
+    const uchar ORDER_MINUS_ONE[32] = {
+        0xffu,0xffu,0xffu,0xffu,0xffu,0xffu,0xffu,0xffu,
+        0xffu,0xffu,0xffu,0xffu,0xffu,0xffu,0xffu,0xfeu,
+        0xbau,0xaeu,0xdcu,0xe6u,0xafu,0x48u,0xa0u,0x3bu,
+        0xbfu,0xd2u,0x5eu,0x8cu,0xd0u,0x36u,0x41u,0x40u
+    };
+    bool ge = true;
+    for (int i = 0; i < 32; ++i) {
+        if (priv32[i] > ORDER_MINUS_ONE[i]) {
+            break;
+        }
+        if (priv32[i] < ORDER_MINUS_ONE[i]) {
+            ge = false;
+            break;
+        }
+    }
+    if (ge) {
+        int borrow = 0;
+        for (int i = 31; i >= 0; --i) {
+            const int v = int(priv32[i]) - int(ORDER_MINUS_ONE[i]) - borrow;
+            priv32[i] = uchar(v);
+            borrow = (v < 0) ? 1 : 0;
+        }
+    }
+    int carry = 1;
+    for (int i = 31; i >= 0 && carry != 0; --i) {
+        const int v = int(priv32[i]) + carry;
+        priv32[i] = uchar(v);
+        carry = (v >> 8) & 1;
+    }
+}
+
+static inline void xp_worker_impl(device bool* isResult,
+                                  device bool* buffResult,
+                                  const constant secp256k1_ge_storage* precPtr,
+                                  ulong precPitch,
+                                  uchar profile_kind,
+                                  ulong path_mask,
+                                  uint path_count,
+                                  uint pid_start,
+                                  uint pid_count,
+                                  uint keys_per_pid,
+                                  ulong linear_start,
+                                  ulong linear_count,
+                                  ulong randstorm_state_start,
+                                  ulong randstorm_state_count,
+                                  uint randstorm_time_start,
+                                  uint randstorm_time_count,
+                                  uint randstorm_delta_count,
+                                  const device XpCgrStateInput* cgr_inputs,
+                                  uint cgr_count,
+                                  const device XpSsleayInput* ssleay_inputs,
+                                  uint ssleay_count,
+                                  uint input_line_base,
+                                  bool do_c,
+                                  bool do_u,
+                                  bool do_s,
+                                  bool do_r,
+                                  bool do_x,
+                                  bool do_e,
+                                  device RuntimeConfig& config,
+                                  device XorFilterState& filters,
+                                  device FilterStorageState& storage,
+                                  const device uchar* bloom_storage,
+                                  const device uchar* xor_storage,
+                                  const device uchar* xor_un_storage,
+                                  const device uchar* xor_uc_storage,
+                                  const device uchar* xor_hc_storage,
+                                  device XpReplayResult* xp_results,
+                                  device atomic_uint* xp_count,
+                                  uint xp_randstorm_seed_events,
+                                  uint xp_randstorm_screen_seed_x,
+                                  uint xp_randstorm_screen_seed_y,
+                                  uint xp_randstorm_time_mode,
+                                  uint xp_randstorm_mileage_start,
+                                  ulong xp_randstorm_mileage_count,
+                                  uint tid) {
+    (void)pid_start;
+    (void)pid_count;
+    (void)randstorm_delta_count;
+    if (ulong(tid) >= linear_count) {
+        return;
+    }
+
+    const ulong linear = linear_start + ulong(tid);
+    if (XP_PROFILE_MATCH(XP_PROFILE_OPENSSL_METAL)) {
+        if (pid_count == 0u || path_count == 0u || keys_per_pid == 0u) {
+            return;
+        }
+        uchar arch = XP_OPENSSL_ARCH_NONE_METAL;
+        uint path = 0xffffffffu;
+        uint pid = 0u;
+        if (!xp_decode_openssl_linear(linear, path_mask, path_count, pid_start, pid_count, arch, path, pid)) {
+            return;
+        }
+        thread XpRandState rs;
+        xp_hitme(&rs, 0u);
+        xp_hitme(&rs, pid);
+        xp_openssl_run_setup(&rs, path, arch);
+        for (uint key_index = 0u; key_index < keys_per_pid; ++key_index) {
+            thread uchar priv32[32];
+            if (!xp_openssl_next_priv(&rs, path, arch, priv32)) {
+                return;
+            }
+            xp_check_emit_targets(isResult, buffResult, precPtr, precPitch, profile_kind, uchar(path),
+                                  pid, key_index, 0xffffffffu, priv32, arch, 0ul, 0u, 0u, 0u,
+                                  do_c, do_u, do_s, do_r, do_x, do_e, config, filters, storage,
+                                  bloom_storage, xor_storage, xor_un_storage, xor_uc_storage,
+                                  xor_hc_storage, xp_results, xp_count);
+        }
+        return;
+    }
+    if (XP_PROFILE_MATCH(XP_PROFILE_RANDSTORM_JSBN_METAL)) {
+        if (keys_per_pid == 0u) {
+            return;
+        }
+        uint profile_ordinal = 0u;
+        uint key_index = keys_per_pid;
+        uint mileage = 0u;
+        ulong state = 0ul;
+        uint time0 = 0u;
+        uint time1 = 0u;
+        if (!xp_decode_randstorm_linear(linear, path_mask, path_count,
+                                        randstorm_state_start, randstorm_state_count,
+                                        randstorm_time_start, randstorm_time_count, randstorm_delta_count,
+                                        xp_randstorm_mileage_start, xp_randstorm_mileage_count, xp_randstorm_time_mode,
+                                        profile_ordinal, key_index, mileage, state, time0, time1)) {
+            return;
+        }
+        const bool raw32 = xp_randstorm_xp_profile_is_raw32(profile_ordinal);
+        const bool drop1 = xp_randstorm_xp_profile_drop1(profile_ordinal);
+        const uint bytes_per_key = raw32 ? (drop1 ? 33u : 32u) : 33u;
+        const int gen = xp_randstorm_xp_profile_gen(profile_ordinal);
+        const ulong math_state = xp_randstorm_xp_math_state(profile_ordinal, state);
+        thread uchar entropy[33];
+        const ulong skip64 = ulong(bytes_per_key) * ulong(key_index) + (drop1 ? 1ul : 0ul);
+        if (skip64 > 0xfffffffful) {
+            return;
+        }
+        const uint final_time1 = xp_randstorm_seed_event_final_time(time1, xp_randstorm_seed_events);
+        if (!RandstormJsbnArc4FillOffsetEventsMileage64(raw32 ? 32 : 33, entropy, uint(skip64),
+                                                        math_state, time0, final_time1,
+                                                        xp_randstorm_seed_events, xp_randstorm_screen_seed_x,
+                                                        xp_randstorm_screen_seed_y, mileage, gen)) {
+            return;
+        }
+        thread uchar priv32[32];
+        for (int i = 0; i < 32; ++i) {
+            priv32[i] = entropy[i + (raw32 ? 0 : 1)];
+        }
+        if (!raw32) {
+            xp_randstorm_jsbn_big_random_to_priv(priv32);
+        }
+        const uint mileage_line = (xp_randstorm_mileage_count > 1ul || xp_randstorm_mileage_start != 0u) ? mileage : 0xffffffffu;
+        xp_check_emit_targets(isResult, buffResult, precPtr, precPitch, profile_kind, uchar(profile_ordinal),
+                              time0, key_index, mileage_line, priv32, XP_OPENSSL_ARCH_NONE_METAL,
+                              state, time0, final_time1, 0u, do_c, do_u, do_s, do_r, do_x, do_e,
+                              config, filters, storage, bloom_storage, xor_storage, xor_un_storage,
+                              xor_uc_storage, xor_hc_storage, xp_results, xp_count);
+        if (drop1) {
+            thread uchar priv32_add1[32];
+            for (int i = 0; i < 32; ++i) {
+                priv32_add1[i] = priv32[i];
+            }
+            priv32_add1[31] = uchar(priv32_add1[31] + 1u);
+            xp_check_emit_targets(isResult, buffResult, precPtr, precPitch, profile_kind, uchar(profile_ordinal),
+                                  time0, key_index, mileage_line, priv32_add1, XP_OPENSSL_ARCH_NONE_METAL,
+                                  state, time0, final_time1, 1u, do_c, do_u, do_s, do_r, do_x, do_e,
+                                  config, filters, storage, bloom_storage, xor_storage, xor_un_storage,
+                                  xor_uc_storage, xor_hc_storage, xp_results, xp_count);
+        }
+        return;
+    }
+    if (XP_PROFILE_MATCH(XP_PROFILE_RANDSTORM_BYTES_METAL)) {
+        if (keys_per_pid == 0u) {
+            return;
+        }
+        uint profile_ordinal = 0u;
+        uint key_index = keys_per_pid;
+        uint mileage = 0u;
+        ulong state = 0ul;
+        uint time0 = 0u;
+        uint time1 = 0u;
+        if (!xp_decode_randstorm_linear(linear, path_mask, path_count,
+                                        randstorm_state_start, randstorm_state_count,
+                                        0u, 0u, 1u,
+                                        xp_randstorm_mileage_start, xp_randstorm_mileage_count, xp_randstorm_time_mode,
+                                        profile_ordinal, key_index, mileage, state, time0, time1)) {
+            return;
+        }
+        const int gen = xp_randstorm_bytes_profile_gen(profile_ordinal);
+        if (gen < 0) {
+            return;
+        }
+        thread uchar priv32[32];
+        const ulong skip64 = 32ul * ulong(key_index);
+        if (skip64 > 0xfffffffful) {
+            return;
+        }
+        const bool low8 = profile_ordinal >= 8u;
+        if (low8) {
+            if (!RandstormDirectBytesLowFillOffsetMileage64(32, priv32, uint(skip64), state, mileage, gen)) {
+                return;
+            }
+        } else {
+            if (!RandstormDirectBytesFillOffsetMileage64(32, priv32, uint(skip64), state, mileage, gen)) {
+                return;
+            }
+        }
+        const uint mileage_line = (xp_randstorm_mileage_count > 1ul || xp_randstorm_mileage_start != 0u) ? mileage : 0xffffffffu;
+        xp_check_emit_targets(isResult, buffResult, precPtr, precPitch, profile_kind, uchar(profile_ordinal),
+                              0u, key_index, mileage_line, priv32, XP_OPENSSL_ARCH_NONE_METAL,
+                              state, 0u, 0u, 0u, do_c, do_u, do_s, do_r, do_x, do_e,
+                              config, filters, storage, bloom_storage, xor_storage, xor_un_storage,
+                              xor_uc_storage, xor_hc_storage, xp_results, xp_count);
+        return;
+    }
+    if (XP_PROFILE_MATCH(XP_PROFILE_RANDSTORM_CRYPTO1_JSBN_METAL)) {
+        if (keys_per_pid == 0u) {
+            return;
+        }
+        uint profile_ordinal = 0u;
+        uint key_index = keys_per_pid;
+        uint mileage = 0u;
+        ulong state = 0ul;
+        uint time0 = 0u;
+        uint time1 = 0u;
+        if (!xp_decode_randstorm_linear(linear, path_mask, path_count,
+                                        randstorm_state_start, randstorm_state_count,
+                                        0u, 0u, 1u,
+                                        xp_randstorm_mileage_start, xp_randstorm_mileage_count, xp_randstorm_time_mode,
+                                        profile_ordinal, key_index, mileage, state, time0, time1)) {
+            return;
+        }
+        const int gen = xp_randstorm_bytes_profile_gen(profile_ordinal);
+        if (gen < 0) {
+            return;
+        }
+        thread uchar entropy[33];
+        const ulong skip64 = 33ul * ulong(key_index);
+        if (skip64 > 0xfffffffful) {
+            return;
+        }
+        if (!RandstormCryptoBrowserifyBytes1FillOffsetMileage64(33, entropy, uint(skip64), state, mileage, gen)) {
+            return;
+        }
+        thread uchar priv32[32];
+        for (int i = 0; i < 32; ++i) {
+            priv32[i] = entropy[i + 1];
+        }
+        xp_randstorm_jsbn_big_random_to_priv(priv32);
+        const uint mileage_line = (xp_randstorm_mileage_count > 1ul || xp_randstorm_mileage_start != 0u) ? mileage : 0xffffffffu;
+        xp_check_emit_targets(isResult, buffResult, precPtr, precPitch, profile_kind, uchar(profile_ordinal),
+                              0u, key_index, mileage_line, priv32, XP_OPENSSL_ARCH_NONE_METAL,
+                              state, 0u, 0u, 0u, do_c, do_u, do_s, do_r, do_x, do_e,
+                              config, filters, storage, bloom_storage, xor_storage, xor_un_storage,
+                              xor_uc_storage, xor_hc_storage, xp_results, xp_count);
+        return;
+    }
+    if (XP_PROFILE_MATCH(XP_PROFILE_RANDSTORM_V8INIT_METAL)) {
+        if (keys_per_pid == 0u) {
+            return;
+        }
+        uint profile_ordinal = 0u;
+        uint key_index = keys_per_pid;
+        uint mileage = 0u;
+        ulong seed = 0ul;
+        uint time0 = 0u;
+        uint time1 = 0u;
+        if (!xp_decode_randstorm_linear(linear, path_mask, path_count,
+                                        randstorm_state_start, randstorm_state_count,
+                                        randstorm_time_start, randstorm_time_count, randstorm_delta_count,
+                                        xp_randstorm_mileage_start, xp_randstorm_mileage_count, xp_randstorm_time_mode,
+                                        profile_ordinal, key_index, mileage, seed, time0, time1)) {
+            return;
+        }
+        const int gen = xp_randstorm_v8init_profile_gen(profile_ordinal);
+        if (gen < 0) {
+            return;
+        }
+        thread uchar entropy[33];
+        const ulong skip64 = 33ul * ulong(key_index);
+        if (skip64 > 0xfffffffful) {
+            return;
+        }
+        const uint final_time1 = xp_randstorm_seed_event_final_time(time1, xp_randstorm_seed_events);
+        if (!RandstormV8InitJsbnArc4FillOffsetEventsMileage64(33, entropy, uint(skip64), seed,
+                                                              time0, final_time1, xp_randstorm_seed_events,
+                                                              xp_randstorm_screen_seed_x, xp_randstorm_screen_seed_y,
+                                                              mileage, gen)) {
+            return;
+        }
+        thread uchar priv32[32];
+        for (int i = 0; i < 32; ++i) {
+            priv32[i] = entropy[i + 1];
+        }
+        xp_randstorm_jsbn_big_random_to_priv(priv32);
+        const uint mileage_line = (xp_randstorm_mileage_count > 1ul || xp_randstorm_mileage_start != 0u) ? mileage : 0xffffffffu;
+        xp_check_emit_targets(isResult, buffResult, precPtr, precPitch, profile_kind, uchar(profile_ordinal),
+                              time0, key_index, mileage_line, priv32, XP_OPENSSL_ARCH_NONE_METAL,
+                              seed, time0, final_time1, 0u, do_c, do_u, do_s, do_r, do_x, do_e,
+                              config, filters, storage, bloom_storage, xor_storage, xor_un_storage,
+                              xor_uc_storage, xor_hc_storage, xp_results, xp_count);
+        return;
+    }
+    if (XP_PROFILE_MATCH(XP_PROFILE_RANDSTORM_V8INIT_BYTES_METAL)) {
+        if (keys_per_pid == 0u) {
+            return;
+        }
+        uint profile_ordinal = 0u;
+        uint key_index = keys_per_pid;
+        uint mileage = 0u;
+        ulong seed = 0ul;
+        uint time0 = 0u;
+        uint time1 = 0u;
+        if (!xp_decode_randstorm_linear(linear, path_mask, path_count,
+                                        randstorm_state_start, randstorm_state_count,
+                                        0u, 0u, 1u,
+                                        xp_randstorm_mileage_start, xp_randstorm_mileage_count, xp_randstorm_time_mode,
+                                        profile_ordinal, key_index, mileage, seed, time0, time1)) {
+            return;
+        }
+        const int gen = xp_randstorm_v8init_bytes_profile_gen(profile_ordinal);
+        if (gen < 0) {
+            return;
+        }
+        thread uchar priv32[32];
+        const ulong skip64 = 32ul * ulong(key_index);
+        if (skip64 > 0xfffffffful) {
+            return;
+        }
+        const bool low8 = profile_ordinal >= 20u;
+        if (low8) {
+            if (!RandstormV8InitDirectBytesLowFillOffsetMileage64(32, priv32, uint(skip64), seed, mileage, gen)) {
+                return;
+            }
+        } else {
+            if (!RandstormV8InitDirectBytesFillOffsetMileage64(32, priv32, uint(skip64), seed, mileage, gen)) {
+                return;
+            }
+        }
+        const uint mileage_line = (xp_randstorm_mileage_count > 1ul || xp_randstorm_mileage_start != 0u) ? mileage : 0xffffffffu;
+        xp_check_emit_targets(isResult, buffResult, precPtr, precPitch, profile_kind, uchar(profile_ordinal),
+                              0u, key_index, mileage_line, priv32, XP_OPENSSL_ARCH_NONE_METAL,
+                              seed, 0u, 0u, 0u, do_c, do_u, do_s, do_r, do_x, do_e,
+                              config, filters, storage, bloom_storage, xor_storage, xor_un_storage,
+                              xor_uc_storage, xor_hc_storage, xp_results, xp_count);
+        return;
+    }
+    if (XP_PROFILE_MATCH(XP_PROFILE_RANDSTORM_V8INIT_POOL32_METAL)) {
+        if (keys_per_pid == 0u) {
+            return;
+        }
+        uint profile_ordinal = 0u;
+        uint key_index = keys_per_pid;
+        uint mileage = 0u;
+        ulong seed = 0ul;
+        uint time0 = 0u;
+        uint time1 = 0u;
+        if (!xp_decode_randstorm_linear(linear, path_mask, path_count,
+                                        randstorm_state_start, randstorm_state_count,
+                                        0u, 0u, 1u,
+                                        xp_randstorm_mileage_start, xp_randstorm_mileage_count, xp_randstorm_time_mode,
+                                        profile_ordinal, key_index, mileage, seed, time0, time1)) {
+            return;
+        }
+        const int gen = xp_randstorm_v8init_profile_gen(profile_ordinal);
+        if (gen < 0) {
+            return;
+        }
+        thread uchar priv32[32];
+        const ulong skip64 = 32ul * ulong(key_index);
+        if (skip64 > 0xfffffffful) {
+            return;
+        }
+        if (!RandstormV8InitPool32FillOffsetMileage64(32, priv32, uint(skip64), seed, mileage, gen)) {
+            return;
+        }
+        const uint mileage_line = (xp_randstorm_mileage_count > 1ul || xp_randstorm_mileage_start != 0u) ? mileage : 0xffffffffu;
+        xp_check_emit_targets(isResult, buffResult, precPtr, precPitch, profile_kind, uchar(profile_ordinal),
+                              0u, key_index, mileage_line, priv32, XP_OPENSSL_ARCH_NONE_METAL,
+                              seed, 0u, 0u, 0u, do_c, do_u, do_s, do_r, do_x, do_e,
+                              config, filters, storage, bloom_storage, xor_storage, xor_un_storage,
+                              xor_uc_storage, xor_hc_storage, xp_results, xp_count);
+        return;
+    }
+    if (XP_PROFILE_MATCH(XP_PROFILE_RANDSTORM_MWC32_METAL)) {
+        if (keys_per_pid == 0u) {
+            return;
+        }
+        uint profile_ordinal = 0u;
+        uint key_index = keys_per_pid;
+        uint mileage = 0u;
+        uint state0 = 0u;
+        uint time0 = 0u;
+        uint time1 = 0u;
+        if (!xp_decode_randstorm_mwc32_linear(linear, path_mask, path_count,
+                                             randstorm_state_start, randstorm_state_count,
+                                             randstorm_time_start, randstorm_time_count, randstorm_delta_count,
+                                             xp_randstorm_mileage_start, xp_randstorm_mileage_count, xp_randstorm_time_mode,
+                                             profile_ordinal, key_index, mileage, state0, time0, time1)) {
+            return;
+        }
+        const ulong math_state = xp_randstorm_mwc32_math_state(profile_ordinal, state0);
+        const uint mileage_line = (xp_randstorm_mileage_count > 1ul || xp_randstorm_mileage_start != 0u) ? mileage : 0xffffffffu;
+        if (xp_randstorm_mwc32_profile_is_byte8(profile_ordinal)) {
+            const int byte_gen = xp_randstorm_mwc32_profile_byte8_gen(profile_ordinal);
+            if (byte_gen < 0) {
+                return;
+            }
+            thread uchar priv32[32];
+            const ulong skip64 = 32ul * ulong(key_index);
+            if (skip64 > 0xfffffffful) {
+                return;
+            }
+            if (xp_randstorm_mwc32_profile_is_low_byte8(profile_ordinal)) {
+                if (!RandstormDirectBytesLowFillOffsetMileage64(32, priv32, uint(skip64), math_state, mileage, byte_gen)) {
+                    return;
+                }
+            } else {
+                if (!RandstormDirectBytesFillOffsetMileage64(32, priv32, uint(skip64), math_state, mileage, byte_gen)) {
+                    return;
+                }
+            }
+            xp_check_emit_targets(isResult, buffResult, precPtr, precPitch, profile_kind, uchar(profile_ordinal),
+                                  0u, key_index, mileage_line, priv32, XP_OPENSSL_ARCH_NONE_METAL,
+                                  ulong(state0), 0u, 0u, 0u, do_c, do_u, do_s, do_r, do_x, do_e,
+                                  config, filters, storage, bloom_storage, xor_storage, xor_un_storage,
+                                  xor_uc_storage, xor_hc_storage, xp_results, xp_count);
+            return;
+        }
+        const bool raw32 = xp_randstorm_mwc32_profile_is_raw32(profile_ordinal);
+        const bool drop1 = xp_randstorm_mwc32_profile_drop1(profile_ordinal);
+        const uint bytes_per_key = raw32 ? (drop1 ? 33u : 32u) : 33u;
+        const int gen = xp_randstorm_mwc32_profile_gen(profile_ordinal);
+        thread uchar entropy[33];
+        const ulong skip64 = ulong(bytes_per_key) * ulong(key_index) + (drop1 ? 1ul : 0ul);
+        if (skip64 > 0xfffffffful) {
+            return;
+        }
+        const uint final_time1 = xp_randstorm_seed_event_final_time(time1, xp_randstorm_seed_events);
+        if (!RandstormJsbnArc4FillOffsetEventsMileage64(raw32 ? 32 : 33, entropy, uint(skip64),
+                                                        math_state, time0, final_time1,
+                                                        xp_randstorm_seed_events, xp_randstorm_screen_seed_x,
+                                                        xp_randstorm_screen_seed_y, mileage, gen)) {
+            return;
+        }
+        thread uchar priv32[32];
+        for (int i = 0; i < 32; ++i) {
+            priv32[i] = entropy[i + (raw32 ? 0 : 1)];
+        }
+        if (!raw32) {
+            xp_randstorm_jsbn_big_random_to_priv(priv32);
+        }
+        xp_check_emit_targets(isResult, buffResult, precPtr, precPitch, profile_kind, uchar(profile_ordinal),
+                              time0, key_index, mileage_line, priv32, XP_OPENSSL_ARCH_NONE_METAL,
+                              ulong(state0), time0, final_time1, 0u, do_c, do_u, do_s, do_r, do_x, do_e,
+                              config, filters, storage, bloom_storage, xor_storage, xor_un_storage,
+                              xor_uc_storage, xor_hc_storage, xp_results, xp_count);
+        if (drop1) {
+            thread uchar priv32_add1[32];
+            for (int i = 0; i < 32; ++i) {
+                priv32_add1[i] = priv32[i];
+            }
+            priv32_add1[31] = uchar(priv32_add1[31] + 1u);
+            xp_check_emit_targets(isResult, buffResult, precPtr, precPitch, profile_kind, uchar(profile_ordinal),
+                                  time0, key_index, mileage_line, priv32_add1, XP_OPENSSL_ARCH_NONE_METAL,
+                                  ulong(state0), time0, final_time1, 1u, do_c, do_u, do_s, do_r, do_x, do_e,
+                                  config, filters, storage, bloom_storage, xor_storage, xor_un_storage,
+                                  xor_uc_storage, xor_hc_storage, xp_results, xp_count);
+        }
+        return;
+    }
+    if (XP_PROFILE_MATCH(XP_PROFILE_RANDSTORM_PYMT_METAL)) {
+        if (keys_per_pid == 0u || randstorm_state_count == 0ul) {
+            return;
+        }
+        const ulong state_idx = linear;
+        if (state_idx >= randstorm_state_count) {
+            return;
+        }
+        const ulong state = randstorm_state_start + state_idx;
+        thread XpPythonMtRandomMetal rng;
+        XpPythonMtRandomMetal::init(rng, state);
+        for (uint key_index = 0u; key_index < keys_per_pid; ++key_index) {
+            thread uchar priv32[32];
+            for (int i = 0; i < 32; ++i) {
+                priv32[i] = rng.randint_byte();
+            }
+            xp_check_emit_targets(isResult, buffResult, precPtr, precPitch, profile_kind, 0xffu,
+                                  0u, key_index, 0xffffffffu, priv32, XP_OPENSSL_ARCH_NONE_METAL,
+                                  state, 0u, 0u, 0u, do_c, do_u, do_s, do_r, do_x, do_e,
+                                  config, filters, storage, bloom_storage, xor_storage,
+                                  xor_un_storage, xor_uc_storage, xor_hc_storage,
+                                  xp_results, xp_count);
+        }
+        return;
+    }
+    if (XP_PROFILE_MATCH(XP_PROFILE_PHPCOINADDRESS_METAL)) {
+        if (keys_per_pid == 0u || randstorm_state_count == 0ul || path_count == 0u || path_mask == 0ul) {
+            return;
+        }
+        const ulong state_idx = linear % randstorm_state_count;
+        const ulong variant_idx = linear / randstorm_state_count;
+        if (variant_idx >= ulong(path_count)) {
+            return;
+        }
+        const uint variant = xp_mask_variant_index(path_mask, uint(variant_idx), XP_PHPCOINADDRESS_VARIANT_COUNT_METAL);
+        if (variant >= XP_PHPCOINADDRESS_VARIANT_COUNT_METAL) {
+            return;
+        }
+        const ulong seed = randstorm_state_start + state_idx;
+        thread XpPhpMtRandMetal rng;
+        XpPhpMtRandMetal::init(rng, uint(seed), variant);
+        for (uint key_index = 0u; key_index < keys_per_pid; ++key_index) {
+            thread uchar priv32[32];
+            rng.next_phpcoinaddress_priv(priv32);
+            xp_check_emit_targets(isResult, buffResult, precPtr, precPitch, profile_kind, uchar(variant),
+                                  0u, key_index, 0xffffffffu, priv32, XP_OPENSSL_ARCH_NONE_METAL,
+                                  seed, 0u, 0u, 0u, do_c, do_u, do_s, do_r, do_x, do_e,
+                                  config, filters, storage, bloom_storage, xor_storage,
+                                  xor_un_storage, xor_uc_storage, xor_hc_storage,
+                                  xp_results, xp_count);
+        }
+        return;
+    }
+    if (XP_PROFILE_MATCH(XP_PROFILE_ELLIPTIC_PHP_RAND_HMACDRBG_METAL)) {
+        if (keys_per_pid == 0u || randstorm_state_count == 0ul || path_count == 0u || path_mask == 0ul) {
+            return;
+        }
+        const ulong state_idx = linear % randstorm_state_count;
+        const ulong variant_idx = linear / randstorm_state_count;
+        if (variant_idx >= ulong(path_count)) {
+            return;
+        }
+        const uint variant = xp_mask_variant_index(path_mask, uint(variant_idx), XP_ELLIPTIC_PHP_VARIANT_COUNT_METAL);
+        if (variant >= XP_ELLIPTIC_PHP_VARIANT_COUNT_METAL) {
+            return;
+        }
+        const ulong seed = randstorm_state_start + state_idx;
+        thread XpPhp5RandMetal rng;
+        XpPhp5RandMetal::init(rng, uint(seed), variant);
+        for (uint key_index = 0u; key_index < keys_per_pid; ++key_index) {
+            thread uchar priv32[32];
+            xp_elliptic_php_next_priv_metal(rng, priv32);
+            xp_check_emit_targets(isResult, buffResult, precPtr, precPitch, profile_kind, uchar(variant),
+                                  0u, key_index, 0xffffffffu, priv32, XP_OPENSSL_ARCH_NONE_METAL,
+                                  seed, 0u, 0u, 0u, do_c, do_u, do_s, do_r, do_x, do_e,
+                                  config, filters, storage, bloom_storage, xor_storage,
+                                  xor_un_storage, xor_uc_storage, xor_hc_storage,
+                                  xp_results, xp_count);
+        }
+        return;
+    }
+    if (XP_PROFILE_MATCH(XP_PROFILE_BLUEWALLET_ISAAC_METAL)) {
+        if (keys_per_pid == 0u || randstorm_state_count == 0ul || path_count == 0u || path_mask == 0ul) {
+            return;
+        }
+        const ulong state_idx = linear % randstorm_state_count;
+        const ulong variant_idx = linear / randstorm_state_count;
+        if (variant_idx >= ulong(path_count)) {
+            return;
+        }
+        const uint variant = xp_mask_variant_index(path_mask, uint(variant_idx), XP_BLUEWALLET_ISAAC_VARIANT_COUNT_METAL);
+        if (variant >= XP_BLUEWALLET_ISAAC_VARIANT_COUNT_METAL) {
+            return;
+        }
+        const ulong seed = randstorm_state_start + state_idx;
+        thread XpBlueWalletIsaac05Metal rng;
+        rng.seed_module_load(uint(seed), seed != 0ul);
+        for (uint key_index = 0u; key_index < keys_per_pid; ++key_index) {
+            thread uchar priv32[32];
+            xp_bluewallet_isaac_next_priv_metal(rng, variant, priv32);
+            xp_check_emit_targets(isResult, buffResult, precPtr, precPitch, profile_kind, uchar(variant),
+                                  0u, key_index, 0xffffffffu, priv32, XP_OPENSSL_ARCH_NONE_METAL,
+                                  seed, 0u, 0u, 0u, do_c, do_u, do_s, do_r, do_x, do_e,
+                                  config, filters, storage, bloom_storage, xor_storage,
+                                  xor_un_storage, xor_uc_storage, xor_hc_storage,
+                                  xp_results, xp_count);
+        }
+        return;
+    }
+    if (XP_PROFILE_MATCH(XP_PROFILE_TIME_LCG_DIRECT_METAL)) {
+        if (keys_per_pid == 0u || randstorm_state_count == 0ul || path_count == 0u || path_mask == 0ul) {
+            return;
+        }
+        const ulong state_idx = linear % randstorm_state_count;
+        const ulong variant_idx = linear / randstorm_state_count;
+        if (variant_idx >= ulong(path_count)) {
+            return;
+        }
+        const uint variant = xp_mask_variant_index(path_mask, uint(variant_idx), XP_TIME_LCG_DIRECT_VARIANT_COUNT_METAL);
+        if (variant >= XP_TIME_LCG_DIRECT_VARIANT_COUNT_METAL) {
+            return;
+        }
+        ulong seed = randstorm_state_start + state_idx;
+        uint pid = 0u;
+        uint seed_time0 = 0u;
+        uint seed_time1 = 0u;
+        uint lcg_variant = variant;
+        if (variant == XP_TIME_LCG_DIRECT_VARIANT_GLIBC_XOR_PID_METAL) {
+            const ulong time_idx = state_idx / XP_TIME_LCG_DIRECT_XOR_PID_COUNT_METAL;
+            pid = uint(state_idx % XP_TIME_LCG_DIRECT_XOR_PID_COUNT_METAL) + 1u;
+            seed_time0 = uint(randstorm_state_start + time_idx);
+            seed_time1 = pid;
+            seed = ulong(seed_time0 ^ pid);
+            lcg_variant = XP_TIME_LCG_DIRECT_VARIANT_GLIBC_METAL;
+        }
+        thread XpTimeLcgDirectMetal rng;
+        XpTimeLcgDirectMetal::init(rng, uint(seed), lcg_variant);
+        for (uint key_index = 0u; key_index < keys_per_pid; ++key_index) {
+            thread uchar priv32[32];
+            rng.next_priv(priv32);
+            xp_check_emit_targets(isResult, buffResult, precPtr, precPitch, profile_kind, uchar(variant),
+                                  pid, key_index, 0xffffffffu, priv32, XP_OPENSSL_ARCH_NONE_METAL,
+                                  seed, seed_time0, seed_time1, 0u, do_c, do_u, do_s, do_r, do_x, do_e,
+                                  config, filters, storage, bloom_storage, xor_storage,
+                                  xor_un_storage, xor_uc_storage, xor_hc_storage,
+                                  xp_results, xp_count);
+        }
+        return;
+    }
+    if (XP_PROFILE_MATCH(XP_PROFILE_JAVA_LCG_DIRECT_METAL)) {
+        if (keys_per_pid == 0u || randstorm_state_count == 0ul || path_count == 0u || path_mask == 0ul) {
+            return;
+        }
+        const ulong state_idx = linear % randstorm_state_count;
+        const ulong variant_idx = linear / randstorm_state_count;
+        if (variant_idx >= ulong(path_count)) {
+            return;
+        }
+        const uint variant = xp_mask_variant_index(path_mask, uint(variant_idx), XP_JAVA_LCG_DIRECT_VARIANT_COUNT_METAL);
+        if (variant >= XP_JAVA_LCG_DIRECT_VARIANT_COUNT_METAL) {
+            return;
+        }
+        const ulong seed = randstorm_state_start + state_idx;
+        thread XpJavaLcgDirectMetal rng;
+        XpJavaLcgDirectMetal::init(rng, seed);
+        for (uint key_index = 0u; key_index < keys_per_pid; ++key_index) {
+            thread uchar priv32[32];
+            rng.next_priv(priv32);
+            xp_check_emit_targets(isResult, buffResult, precPtr, precPitch, profile_kind, uchar(variant),
+                                  0u, key_index, 0xffffffffu, priv32, XP_OPENSSL_ARCH_NONE_METAL,
+                                  seed, 0u, 0u, 0u, do_c, do_u, do_s, do_r, do_x, do_e,
+                                  config, filters, storage, bloom_storage, xor_storage,
+                                  xor_un_storage, xor_uc_storage, xor_hc_storage,
+                                  xp_results, xp_count);
+        }
+        return;
+    }
+    if (XP_PROFILE_MATCH(XP_PROFILE_TIME_MT_METAL)) {
+        if (keys_per_pid == 0u || randstorm_state_count == 0ul) {
+            return;
+        }
+        const ulong state_idx = linear;
+        if (state_idx >= randstorm_state_count) {
+            return;
+        }
+        const ulong seed = randstorm_state_start + state_idx;
+        thread XpTimeMt19937Metal rng;
+        XpTimeMt19937Metal::init(rng, uint(seed));
+        for (uint key_index = 0u; key_index < keys_per_pid; ++key_index) {
+            thread uchar priv32[32];
+            rng.next_priv_le_limbs(priv32);
+            xp_check_emit_targets(isResult, buffResult, precPtr, precPitch, profile_kind,
+                                  uchar(XP_TIME_MT_VARIANT_MT19937_U32_LE_LIMBS_METAL),
+                                  0u, key_index, 0xffffffffu, priv32, XP_OPENSSL_ARCH_NONE_METAL,
+                                  seed, 0u, 0u, 0u, do_c, do_u, do_s, do_r, do_x, do_e,
+                                  config, filters, storage, bloom_storage, xor_storage,
+                                  xor_un_storage, xor_uc_storage, xor_hc_storage,
+                                  xp_results, xp_count);
+        }
+        return;
+    }
+    if (XP_PROFILE_MATCH(XP_PROFILE_SHA256_DIRECT_METAL)) {
+        if (keys_per_pid == 0u || randstorm_state_count == 0ul || path_count == 0u || path_mask == 0ul) {
+            return;
+        }
+        const ulong state_idx = linear % randstorm_state_count;
+        const ulong variant_idx = linear / randstorm_state_count;
+        if (variant_idx >= ulong(path_count)) {
+            return;
+        }
+        const uint variant = xp_mask_variant_index(path_mask, uint(variant_idx), XP_SHA256_DIRECT_VARIANT_COUNT_METAL);
+        if (variant >= XP_SHA256_DIRECT_VARIANT_COUNT_METAL) {
+            return;
+        }
+        const ulong input = randstorm_state_start + state_idx;
+        thread uchar priv32[32];
+        if (!xp_sha256_direct_priv_metal(input, variant, priv32)) {
+            return;
+        }
+        xp_check_emit_targets(isResult, buffResult, precPtr, precPitch, profile_kind, uchar(variant),
+                              0u, 0u, 0xffffffffu, priv32, XP_OPENSSL_ARCH_NONE_METAL,
+                              input, 0u, 0u, 0u, do_c, do_u, do_s, do_r, do_x, do_e,
+                              config, filters, storage, bloom_storage, xor_storage,
+                              xor_un_storage, xor_uc_storage, xor_hc_storage,
+                              xp_results, xp_count);
+        return;
+    }
+    if (XP_PROFILE_MATCH(XP_PROFILE_PID_HASH_DIRECT_METAL)) {
+        if (randstorm_state_count == 0ul || path_count == 0u || path_mask == 0ul) {
+            return;
+        }
+        const ulong state_idx = linear % randstorm_state_count;
+        const ulong variant_idx = linear / randstorm_state_count;
+        if (variant_idx >= ulong(path_count)) {
+            return;
+        }
+        const uint variant = xp_mask_variant_index(path_mask, uint(variant_idx), XP_PID_HASH_DIRECT_VARIANT_COUNT_METAL);
+        if (variant >= XP_PID_HASH_DIRECT_VARIANT_COUNT_METAL) {
+            return;
+        }
+        const ulong pid = randstorm_state_start + state_idx;
+        thread uchar priv32[32];
+        if (!xp_pid_hash_direct_priv_metal(pid, variant, priv32)) {
+            return;
+        }
+        xp_check_emit_targets(isResult, buffResult, precPtr, precPitch, profile_kind, uchar(variant),
+                              uint(pid), 0u, 0xffffffffu, priv32, XP_OPENSSL_ARCH_NONE_METAL,
+                              pid, 0u, 0u, 0u, do_c, do_u, do_s, do_r, do_x, do_e,
+                              config, filters, storage, bloom_storage, xor_storage,
+                              xor_un_storage, xor_uc_storage, xor_hc_storage,
+                              xp_results, xp_count);
+        return;
+    }
+    if (XP_PROFILE_MATCH(XP_PROFILE_LOWBITS_DIRECT_METAL)) {
+        if (randstorm_state_count == 0ul || path_count == 0u || path_mask == 0ul) {
+            return;
+        }
+        const ulong state_idx = linear % randstorm_state_count;
+        const ulong variant_idx = linear / randstorm_state_count;
+        if (variant_idx >= ulong(path_count)) {
+            return;
+        }
+        const ulong value = randstorm_state_start + state_idx;
+        thread uchar priv32[32];
+        if (!xp_lowbits_direct_priv_metal(value, XP_LOWBITS_DIRECT_VARIANT_BE64_METAL, priv32)) {
+            return;
+        }
+        xp_check_emit_targets(isResult, buffResult, precPtr, precPitch, profile_kind,
+                              uchar(XP_LOWBITS_DIRECT_VARIANT_BE64_METAL),
+                              uint(value), 0u, 0xffffffffu, priv32, XP_OPENSSL_ARCH_NONE_METAL,
+                              value, 0u, 0u, 0u, do_c, do_u, do_s, do_r, do_x, do_e,
+                              config, filters, storage, bloom_storage, xor_storage,
+                              xor_un_storage, xor_uc_storage, xor_hc_storage,
+                              xp_results, xp_count);
+        return;
+    }
+    if (XP_PROFILE_MATCH(XP_PROFILE_PYBTC_MT_METAL)) {
+        if (keys_per_pid == 0u || randstorm_state_count == 0ul || path_count == 0u || path_mask == 0ul) {
+            return;
+        }
+        const bool has_time = randstorm_time_count != 0u;
+        const ulong key_count = ulong(keys_per_pid);
+        const ulong time_count = has_time ? ulong(randstorm_time_count) : 1ul;
+        ulong rem = linear;
+        const ulong key_idx = rem % key_count;
+        rem /= key_count;
+        const ulong time_idx = has_time ? (rem % time_count) : 0ul;
+        rem /= time_count;
+        const ulong state_idx = rem % randstorm_state_count;
+        rem /= randstorm_state_count;
+        const ulong variant_idx = rem;
+        if (variant_idx >= ulong(path_count)) {
+            return;
+        }
+        const uint variant = xp_mask_variant_index(path_mask, uint(variant_idx), XP_PYBTC_MT_VARIANT_COUNT_METAL);
+        if (variant >= XP_PYBTC_MT_VARIANT_COUNT_METAL) {
+            return;
+        }
+        const ulong base_state = randstorm_state_start + state_idx;
+        const uint ts_lo = has_time ? (randstorm_time_start + uint(time_idx)) : 0u;
+        const uint key_index = uint(key_idx);
+        thread XpPybtcMtMetal rng;
+        XpPybtcMtMetal::init(rng, uint(base_state));
+        for (uint k = 0u; k < key_index; ++k) {
+            thread uchar dummy[32];
+            rng.next_priv(dummy, variant, ts_lo);
+        }
+        thread uchar priv32[32];
+        rng.next_priv(priv32, variant, ts_lo);
+        xp_check_emit_targets(isResult, buffResult, precPtr, precPitch, profile_kind, uchar(variant),
+                              ts_lo, key_index, 0xffffffffu, priv32, XP_OPENSSL_ARCH_NONE_METAL,
+                              base_state, ts_lo, 0u, 0u, do_c, do_u, do_s, do_r, do_x, do_e,
+                              config, filters, storage, bloom_storage, xor_storage,
+                              xor_un_storage, xor_uc_storage, xor_hc_storage,
+                              xp_results, xp_count);
+        return;
+    }
+    if (XP_PROFILE_MATCH(XP_PROFILE_NANO_JAVA_RANDOM_METAL)) {
+        if (keys_per_pid == 0u || randstorm_state_count == 0ul || path_count == 0u || path_mask == 0ul) {
+            return;
+        }
+        const ulong state_idx = linear % randstorm_state_count;
+        const ulong variant_idx = linear / randstorm_state_count;
+        if (variant_idx >= ulong(path_count)) {
+            return;
+        }
+        const ulong seed = randstorm_state_start + state_idx;
+        thread XpNanoJavaRandomMetal rng;
+        XpNanoJavaRandomMetal::init(rng, seed);
+        for (uint key_index = 0u; key_index < keys_per_pid; ++key_index) {
+            thread uchar priv32[32];
+            rng.next_priv(priv32);
+            xp_check_emit_targets(isResult, buffResult, precPtr, precPitch, profile_kind,
+                                  uchar(XP_NANO_JAVA_RANDOM_VARIANT_HEX64_METAL),
+                                  0u, key_index, 0xffffffffu, priv32, XP_OPENSSL_ARCH_NONE_METAL,
+                                  seed, 0u, 0u, 0u, do_c, do_u, do_s, do_r, do_x, do_e,
+                                  config, filters, storage, bloom_storage, xor_storage,
+                                  xor_un_storage, xor_uc_storage, xor_hc_storage,
+                                  xp_results, xp_count);
+        }
+        return;
+    }
+    if (XP_PROFILE_MATCH(XP_PROFILE_PYWALLET_TS_WEAK_METAL)) {
+        if (randstorm_state_count == 0ul) {
+            return;
+        }
+        const ulong state_idx = linear % randstorm_state_count;
+        const ulong variant_idx = (path_count > 0u) ? (linear / randstorm_state_count) : 0ul;
+        if (path_count > 0u && variant_idx >= ulong(path_count)) {
+            return;
+        }
+        const uint ts_lo = uint(randstorm_state_start + state_idx);
+        thread uchar priv32[32];
+        xp_pywallet_ts_weak_next_priv_metal(priv32, ts_lo);
+        xp_check_emit_targets(isResult, buffResult, precPtr, precPitch, profile_kind,
+                              uchar(XP_PYWALLET_TS_WEAK_VARIANT_SHA256_METAL),
+                              ts_lo, 0u, 0xffffffffu, priv32, XP_OPENSSL_ARCH_NONE_METAL,
+                              ulong(ts_lo), 0u, 0u, 0u, do_c, do_u, do_s, do_r, do_x, do_e,
+                              config, filters, storage, bloom_storage, xor_storage,
+                              xor_un_storage, xor_uc_storage, xor_hc_storage,
+                              xp_results, xp_count);
+        return;
+    }
+    if (XP_PROFILE_MATCH(XP_PROFILE_CGR_STATE_METAL) || XP_PROFILE_MATCH(XP_PROFILE_CGR_BRIDGE_METAL) ||
+        XP_PROFILE_MATCH(XP_PROFILE_CGR_XOR_METAL) || XP_PROFILE_MATCH(XP_PROFILE_CGR_CHAIN_METAL) ||
+        XP_PROFILE_MATCH(XP_PROFILE_CGR_CHAIN_BRIDGE_METAL)) {
+        const uint local_line = uint(linear);
+        if (cgr_inputs == nullptr || local_line >= cgr_count) {
+            return;
+        }
+        thread uchar priv32[32];
+        xp_cgr_state_generate_priv_metal(&cgr_inputs[local_line], profile_kind, priv32);
+        xp_check_emit_targets(isResult, buffResult, precPtr, precPitch, profile_kind, 0xffu,
+                              0u, 0u, input_line_base + local_line, priv32, XP_OPENSSL_ARCH_NONE_METAL,
+                              0ul, 0u, 0u, 0u, do_c, do_u, do_s, do_r, do_x, do_e,
+                              config, filters, storage, bloom_storage, xor_storage,
+                              xor_un_storage, xor_uc_storage, xor_hc_storage,
+                              xp_results, xp_count);
+        return;
+    }
+    if (XP_PROFILE_MATCH(XP_PROFILE_RAW32_METAL)) {
+        const uint local_line = uint(linear);
+        if (cgr_inputs == nullptr || local_line >= cgr_count) {
+            return;
+        }
+        thread uchar priv32[32];
+        for (int i = 0; i < 20; ++i) {
+            priv32[i] = cgr_inputs[local_line].state20[i];
+        }
+        for (int i = 0; i < 12; ++i) {
+            priv32[20 + i] = cgr_inputs[local_line].aux20[i];
+        }
+        xp_check_emit_targets(isResult, buffResult, precPtr, precPitch, profile_kind, 0xffu,
+                              0u, 0u, input_line_base + local_line, priv32, 0xffu,
+                              0ul, 0u, 0u, 0u, do_c, do_u, do_s, do_r, do_x, do_e,
+                              config, filters, storage, bloom_storage, xor_storage,
+                              xor_un_storage, xor_uc_storage, xor_hc_storage,
+                              xp_results, xp_count);
+        return;
+    }
+    if (XP_PROFILE_MATCH(XP_PROFILE_SSLEAY_STIR_METAL)) {
+        const uint local_line = uint(linear);
+        if (ssleay_inputs == nullptr || local_line >= ssleay_count) {
+            return;
+        }
+        thread uchar priv32[32];
+        if (!xp_ssleay_stir_generate_priv_metal(&ssleay_inputs[local_line], priv32)) {
+            return;
+        }
+        xp_check_emit_targets(isResult, buffResult, precPtr, precPitch, profile_kind, 0xffu,
+                              0u, 0u, input_line_base + local_line, priv32, XP_OPENSSL_ARCH_NONE_METAL,
+                              0ul, 0u, 0u, 0u, do_c, do_u, do_s, do_r, do_x, do_e,
+                              config, filters, storage, bloom_storage, xor_storage,
+                              xor_un_storage, xor_uc_storage, xor_hc_storage,
+                              xp_results, xp_count);
+        return;
+    }
+}
+
+#endif

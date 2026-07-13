@@ -1,0 +1,216 @@
+#ifndef METAL_CRYPTO_KERNEL_STATE_METALH
+#define METAL_CRYPTO_KERNEL_STATE_METALH
+
+#include <metal_stdlib>
+
+using namespace metal;
+
+constant uint kFoundStringBytes = 512;
+constant uint kFoundPrivateKeyBytes = 64;
+constant uint kFoundHashWords = 20;
+constant uint kFoundPassBytes = 128;
+constant uint kMaxPendingSaveTasksPerGpu = 64;
+constant uint kMnemonicWordCount = 2048;
+constant uint kMnemonicWordStride = 34;
+constant uint kMnemonicDictBytes = kMnemonicWordCount * kMnemonicWordStride;
+constant uint kBloomFilterSlots = 100;
+constant uint kXorFilterSlots = 25;
+constant uint kHashTargetWords = 8;
+constant uint kSubstrateMaxPaths = 128;
+constant uint kSubstrateMaxJunctions = 16;
+constant uint kSubstrateMaxPasswordLen = 64;
+constant uchar recovery_salt[12] = { 'm', 'n', 'e', 'm', 'o', 'n', 'i', 'c', 0, 0, 0, 1 };
+constant uchar recovery_electrum_salt[12] = { 'e', 'l', 'e', 'c', 't', 'r', 'u', 'm', 0, 0, 0, 1 };
+constant uchar recovery_key_swap[16] = { 0x20, 0x6e, 0x69, 0x6f, 0x63, 0x74, 0x69, 0x42, 0, 0, 0, 0, 0x64, 0x65, 0x65, 0x73 };
+constant uchar ed_key[12] = { 'e', 'd', '2', '5', '5', '1', '9', ' ', 's', 'e', 'e', 'd' };
+constant uchar ed_key_swap[16] = { 0x20, 0x39, 0x31, 0x35, 0x35, 0x32, 0x64, 0x65, 0, 0, 0, 0, 0x64, 0x65, 0x65, 0x73 };
+
+struct RuntimeConfig {
+    uint maxFounds;
+    uint deep;
+    uint useBloom;
+    uint useXor;
+    uint useXorUn;
+    uint useXorUc;
+    uint useXorHc;
+    uint isHex;
+    uint isPass;
+    uint full;
+    uint utf8;
+    uint isLittleEndian;
+    uint isEd25519Scalar;
+    uint isEd25519Hash;
+    uint secp256;
+    uint ed25519;
+    uint electrum;
+    uint electrumSegwit;
+    uint electrum128;
+    uint electrumCakeWallet;
+    uint dictLang;
+    uint useCustomDict;
+    uint tonMnemonic;
+    uint tonOnly;
+    uint oldElectrum;
+    uint compressed;
+    uint uncompressed;
+    uint segwit;
+    uint p2wsh;
+    uint taproot;
+    uint ethereum;
+    uint xpoint;
+    uint solana;
+    uint ton;
+    uint tonAll;
+    uint dot;
+    uint aptos;
+    uint sui;
+    uint xrp;
+    uint exodus;
+    uint iota;
+    uint ada;
+    uint icp;
+    uint fil;
+    uint xtz;
+    uint endomorphism;
+    uint secpTargetsAny;
+    uint edTargetsAny;
+    uint substratePathCount;
+    uint bipDerivationsEnabled;
+    uint adaPointerEnabled;
+    uint adaTypeMask;
+    uint tonTypeMask;
+    uint dotTypeMask;
+    uint aptosTypeMask;
+    uint suiTypeMask;
+    uint xrpTypeMask;
+    uint iotaTypeMask;
+    uint icpTypeMask;
+    uint filTypeMask;
+    uint xtzTypeMask;
+    uint iteration;
+    uint shaLevel;
+    uint shaPre[8];
+    uint hashTargetWords[8];
+    uint hashTargetMasks[8];
+    uint hashTargetLen;
+    uint hashTargetEnabled;
+    uint derivationTypeMask;
+    ulong adaPointerSlot;
+    ulong adaPointerTx;
+    ulong adaPointerCert;
+    ulong pbkdf2Iterations;
+    ulong seqStep;
+    ulong skip;
+    ulong skip64;
+    ulong seed;
+    uchar flags[32];
+};
+
+struct XorFilterMetadata {
+    ulong size[kXorFilterSlots];
+    ulong arrayLength[kXorFilterSlots];
+    ulong segmentCount[kXorFilterSlots];
+    ulong segmentCountLength[kXorFilterSlots];
+    ulong segmentLength[kXorFilterSlots];
+    ulong segmentLengthMask[kXorFilterSlots];
+};
+
+struct XorFilterState {
+    XorFilterMetadata x;
+    XorFilterMetadata uncompressed;
+    XorFilterMetadata uc;
+    XorFilterMetadata hc;
+};
+
+struct FilterStorageState {
+    uint bloomCount;
+    uint xorCount;
+    uint xorUnCount;
+    uint xorUcCount;
+    uint xorHcCount;
+    uint reserved[3];
+    ulong bloomOffsets[kBloomFilterSlots];
+    ulong bloomSizes[kBloomFilterSlots];
+    ulong xorOffsets[kXorFilterSlots];
+    ulong xorUnOffsets[kXorFilterSlots];
+    ulong xorUcOffsets[kXorFilterSlots];
+    ulong xorHcOffsets[kXorFilterSlots];
+};
+
+struct FoundBufferLayout {
+    atomic_uint resultsCountLow;
+    uint resultsCountHigh;
+    uint maxFounds;
+    uint reserved;
+};
+
+struct RandomStateData {
+    atomic_uint counter;
+    uint counterHigh;
+    ulong seed;
+    uint initialized;
+    uint reserved;
+};
+
+struct SubstrateJunctionDevice {
+    uchar chain_code[32];
+    uchar is_hard;
+    uchar reserved[3];
+};
+
+struct SubstratePathDevice {
+    uint junction_count;
+    uint password_len;
+    uint save_index;
+    uint reserved;
+    uchar password[kSubstrateMaxPasswordLen];
+    SubstrateJunctionDevice junctions[kSubstrateMaxJunctions];
+};
+
+#ifndef METAL_CRYPTO_PROFANITY_TYPES_DEFINED
+#define METAL_CRYPTO_PROFANITY_TYPES_DEFINED
+
+struct ProfanityUint128 {
+    ulong m_lo;
+    ulong m_hi;
+};
+
+struct ProfanitySeedWords {
+    ulong s[4];
+};
+
+struct ProfanityXKeys {
+    ulong key64;
+    ProfanityUint128 key128;
+};
+
+struct ProfanityRecoveryHit {
+    uchar x32[32];
+    ulong offset;
+    ulong lane_id;
+    uchar filter_type;
+    uchar reserved[7];
+};
+
+struct ProfanityVerifiedResult {
+    uchar priv[32];
+    uchar x32[32];
+    uchar payload[32];
+    ulong lane_id;
+    ulong round;
+    uint seed32;
+    uchar type;
+    uchar payload_len;
+    uchar reserved[2];
+};
+
+typedef ProfanityVerifiedResult ProfanityRecoveryVerifiedResult;
+
+struct ProfanityWalkState {
+    ulong x[4];
+    ulong y[4];
+};
+
+#endif
+
+#endif

@@ -1,0 +1,595 @@
+#ifndef METAL_CRYPTO_WORKER_PROFANITY_COMMON_METALH
+#define METAL_CRYPTO_WORKER_PROFANITY_COMMON_METALH
+
+#include <metal_stdlib>
+#include "ProfanityRecoveryCommon.metalh"
+#include "FilterCommon.metalh"
+#include "GPUHash.metalh"
+
+#ifdef memcpy
+#undef memcpy
+#endif
+#ifdef memset
+#undef memset
+#endif
+
+using namespace metal;
+
+constant uint PROFANITY_WALK_BATCH_METAL = 1024u;
+constant uchar PROFANITY_TAG_TAPTWEAK_METAL[32] = {
+    0xe8u,0x0fu,0xe1u,0x63u,0x9cu,0x9cu,0xa0u,0x50u,0xe3u,0xafu,0x1bu,0x39u,0xc1u,0x43u,0xc6u,0x3eu,
+    0x42u,0x9cu,0xbcu,0xebu,0x15u,0xd9u,0x40u,0xfbu,0xb5u,0xc5u,0xa1u,0xf4u,0xafu,0x57u,0xc5u,0xe9u
+};
+
+static inline uint profanity_be32_tap_thread(const thread uchar* p) {
+    return (uint(p[0]) << 24u) | (uint(p[1]) << 16u) | (uint(p[2]) << 8u) | uint(p[3]);
+}
+
+static inline uint profanity_be32_tap_constant(const constant uchar* p) {
+    return (uint(p[0]) << 24u) | (uint(p[1]) << 16u) | (uint(p[2]) << 8u) | uint(p[3]);
+}
+
+static inline void profanity_sha256_taptweak_px_metal(const thread uchar px32[32],
+                                                      thread uchar out32[32]) {
+    thread uint h[8];
+    SHA256Initialize(h);
+
+    thread uint w0[16];
+    for (int i = 0; i < 8; ++i) {
+        w0[i] = profanity_be32_tap_constant(PROFANITY_TAG_TAPTWEAK_METAL + i * 4);
+        w0[i + 8] = w0[i];
+    }
+    SHA256Transform(h, w0);
+
+    thread uint w1[16];
+    for (int i = 0; i < 8; ++i) {
+        w1[i] = profanity_be32_tap_thread(px32 + i * 4);
+    }
+    w1[8] = 0x80000000u;
+    for (int i = 9; i < 15; ++i) {
+        w1[i] = 0u;
+    }
+    w1[15] = 0x00000300u;
+    SHA256Transform(h, w1);
+
+    for (int i = 0; i < 8; ++i) {
+        out32[i * 4 + 0] = uchar(h[i] >> 24u);
+        out32[i * 4 + 1] = uchar(h[i] >> 16u);
+        out32[i * 4 + 2] = uchar(h[i] >> 8u);
+        out32[i * 4 + 3] = uchar(h[i]);
+    }
+}
+
+static inline void profanity_tweak_taproot_metal(thread uchar* out32,
+                                                 const thread uchar* pub_uncomp,
+                                                 const constant secp256k1_ge_storage* precPtr,
+                                                 size_t precPitch) {
+    const thread uchar* p = pub_uncomp;
+    if (p[0] != 0x04u) {
+        for (int k = 0; k < 32; ++k) {
+            out32[k] = 0u;
+        }
+        return;
+    }
+
+    secp256k1_fe x;
+    secp256k1_fe y;
+    secp256k1_fe_set_b32(&x, p + 1);
+    secp256k1_fe_set_b32(&y, p + 33);
+
+    secp256k1_ge point;
+    secp256k1_ge_set_xy(&point, &x, &y);
+    secp256k1_fe_normalize_var(&point.y);
+    if (secp256k1_fe_is_odd(&point.y)) {
+        secp256k1_ge neg = point;
+        secp256k1_fe_negate(&neg.y, &neg.y, 1);
+        point = neg;
+    }
+
+    thread uchar px32[32];
+    thread uchar tweak32[32];
+    secp256k1_fe_normalize_var(&point.x);
+    secp256k1_fe_get_b32(px32, &point.x);
+    profanity_sha256_taptweak_px_metal(px32, tweak32);
+
+    secp256k1_scalar tweak_scalar;
+    secp256k1_scalar_set_b32(&tweak_scalar, tweak32, nullptr);
+
+    secp256k1_gej tweak_j;
+    secp256k1_ecmult_big(&tweak_j, &tweak_scalar, precPtr, precPitch);
+    secp256k1_gej out_j;
+    secp256k1_gej_add_ge_var(&out_j, &tweak_j, &point, nullptr);
+    if (out_j.infinity != 0) {
+        for (int k = 0; k < 32; ++k) {
+            out32[k] = 0u;
+        }
+        return;
+    }
+
+    secp256k1_fe z_inv;
+    secp256k1_fe_inv_all_var(1, &z_inv, &out_j.z);
+    secp256k1_ge out_ge;
+    secp256k1_ge_set_gej_zinv(&out_ge, &out_j, &z_inv);
+    secp256k1_fe_normalize_var(&out_ge.y);
+    if (secp256k1_fe_is_odd(&out_ge.y)) {
+        secp256k1_ge_neg(&out_ge, &out_ge);
+    }
+    secp256k1_fe_normalize_var(&out_ge.x);
+    secp256k1_fe_get_b32(out32, &out_ge.x);
+}
+
+static inline ProfanitySeedWords profanity_base_words_metal(ulong seed_s0,
+                                                            ulong seed_s1,
+                                                            ulong seed_s2,
+                                                            ulong seed_s3) {
+    ProfanitySeedWords w;
+    w.s[0] = seed_s0;
+    w.s[1] = seed_s1;
+    w.s[2] = seed_s2;
+    w.s[3] = seed_s3;
+    return w;
+}
+
+static inline bool profanity_filters_active_metal(device RuntimeConfig& config) {
+    return config.full != 0u || config.hashTargetEnabled != 0u ||
+        config.useBloom != 0u || config.useXor != 0u || config.useXorUn != 0u ||
+        config.useXorUc != 0u || config.useXorHc != 0u;
+}
+
+static inline bool profanity_check_hash_words_metal(device RuntimeConfig& config,
+                                                    device XorFilterState& filters,
+                                                    device FilterStorageState& storage,
+                                                    const device uchar* bloom_storage,
+                                                    const device uchar* xor_storage,
+                                                    const device uchar* xor_un_storage,
+                                                    const device uchar* xor_uc_storage,
+                                                    const device uchar* xor_hc_storage,
+                                                    const thread uint* hash_words) {
+    return filter_check_hash(config, filters, storage, bloom_storage, xor_storage,
+                             xor_un_storage, xor_uc_storage, xor_hc_storage, hash_words);
+}
+
+static inline uint profanity_bswap32_metal(uint v) {
+    return ((v & 0x000000ffu) << 24u) |
+        ((v & 0x0000ff00u) << 8u) |
+        ((v & 0x00ff0000u) >> 8u) |
+        ((v & 0xff000000u) >> 24u);
+}
+
+static inline uint profanity_x_prefix_word_metal(const thread ulong* px, int word) {
+    const ulong limb = px[3 - (word >> 1)];
+    const uint raw = (word & 1) != 0 ? uint(limb) : uint(limb >> 32u);
+    return profanity_bswap32_metal(raw);
+}
+
+static inline bool profanity_x_hash_target_only_metal(device RuntimeConfig& config) {
+    return config.full == 0u &&
+        config.hashTargetEnabled != 0u &&
+        config.useBloom == 0u && config.useXor == 0u && config.useXorUn == 0u &&
+        config.useXorUc == 0u && config.useXorHc == 0u &&
+        config.hashTargetLen <= 20u;
+}
+
+static inline bool profanity_check_x_target_prefix_fast_metal(const thread ulong* px,
+                                                              device RuntimeConfig& config) {
+    uint diff = 0u;
+    for (int i = 0; i < 5; ++i) {
+        diff |= (profanity_x_prefix_word_metal(px, i) ^ config.hashTargetWords[i]) & config.hashTargetMasks[i];
+    }
+    return diff == 0u;
+}
+
+static inline void profanity_emit_result_idx_metal(device bool* isResult,
+                                                   device bool* buffResult,
+                                                   uint seed32,
+                                                   const thread ProfanitySeedWords& base_words,
+                                                   ulong lane_id,
+                                                   ulong round,
+                                                   const thread ulong* px,
+                                                   uchar type_value,
+                                                   const thread void* payload,
+                                                   int payload_len,
+                                                   device ProfanityVerifiedResult* profanity_results,
+                                                   device atomic_uint* profanity_count,
+                                                   uint max_founds) {
+    if (buffResult != nullptr) {
+        buffResult[0] = true;
+    }
+    if (isResult != nullptr) {
+        isResult[0] = true;
+    }
+    if (profanity_results == nullptr || profanity_count == nullptr) {
+        return;
+    }
+    const ulong ridx = profanity_atomic_add_count(profanity_count, 1u);
+    if (ridx >= ulong(max_founds)) {
+        return;
+    }
+
+    device ProfanityVerifiedResult& out = profanity_results[ridx];
+    thread uchar private_key[32];
+    thread uchar x32[32];
+    profanity_words_to_private_bytes_lane_round(base_words, lane_id, round, private_key);
+    profanity_store_x32_from_u64x4(px, x32);
+    profanity_copy_thread_to_device(out.priv, private_key, 32u);
+    profanity_copy_thread_to_device(out.x32, x32, 32u);
+    for (uint i = 0u; i < 32u; ++i) {
+        out.payload[i] = 0u;
+    }
+    int n = payload_len;
+    if (n < 0) {
+        n = 0;
+    }
+    if (n > 32) {
+        n = 32;
+    }
+    if (payload != nullptr && n > 0) {
+        const thread uchar* p = reinterpret_cast<const thread uchar*>(payload);
+        for (int i = 0; i < n; ++i) {
+            out.payload[i] = p[i];
+        }
+    }
+    out.lane_id = lane_id;
+    out.round = round;
+    out.seed32 = seed32;
+    out.type = type_value;
+    out.payload_len = uchar(n);
+    out.reserved[0] = 0u;
+    out.reserved[1] = 0u;
+}
+
+static inline bool profanity_private_to_xy_metal(const constant secp256k1_ge_storage* precPtr,
+                                                 size_t precPitch,
+                                                 const thread uchar priv32[32],
+                                                 thread uchar pubkey65[65],
+                                                 thread ulong px[4],
+                                                 thread ulong py[4]) {
+    pubkey65[0] = 0x04u;
+    const int ok = secp256k1_ec_pubkey_create(reinterpret_cast<thread secp256k1_pubkey*>(pubkey65 + 1),
+                                              priv32,
+                                              precPtr,
+                                              precPitch);
+    if (ok == 0) {
+        return false;
+    }
+    for (int w = 0; w < 4; ++w) {
+        const int off = (3 - w) * 8;
+        px[w] = profanity_load_be64(pubkey65 + 1 + off);
+        py[w] = profanity_load_be64(pubkey65 + 33 + off);
+    }
+    return true;
+}
+
+static inline void profanity_check_emit_targets_metal(device bool* isResult,
+                                                      device bool* buffResult,
+                                                      const constant secp256k1_ge_storage* precPtr,
+                                                      size_t precPitch,
+                                                      uint seed32,
+                                                      const thread ProfanitySeedWords& base_words,
+                                                      ulong lane_id,
+                                                      ulong round,
+                                                      const thread uchar pubkey65[65],
+                                                      thread ulong px[4],
+                                                      thread ulong py[4],
+                                                      bool do_c,
+                                                      bool do_u,
+                                                      bool do_s,
+                                                      bool do_r,
+                                                      bool do_x,
+                                                      bool do_e,
+                                                      device RuntimeConfig& config,
+                                                      device XorFilterState& filters,
+                                                      device FilterStorageState& storage,
+                                                      const device uchar* bloom_storage,
+                                                      const device uchar* xor_storage,
+                                                      const device uchar* xor_un_storage,
+                                                      const device uchar* xor_uc_storage,
+                                                      const device uchar* xor_hc_storage,
+                                                      device ProfanityVerifiedResult* profanity_results,
+                                                      device atomic_uint* profanity_count) {
+    thread uint hash160[8] = { 0u };
+    thread uint comp_hash[8] = { 0u };
+    const uchar odd_py = uchar(py[0] & 1ul);
+    const bool need_comp = do_c || do_s || config.p2wsh != 0u;
+
+    if (do_u) {
+        _GetHash160Uncomp_fast(px, py, reinterpret_cast<thread uchar*>(hash160));
+        if (profanity_check_hash_words_metal(config, filters, storage, bloom_storage, xor_storage, xor_un_storage, xor_uc_storage, xor_hc_storage, hash160)) {
+            profanity_emit_result_idx_metal(isResult, buffResult, seed32, base_words, lane_id, round, px,
+                                            0x01u, hash160, 20, profanity_results, profanity_count, config.maxFounds);
+        }
+    }
+    if (need_comp) {
+        _GetHash160Comp_fast(px, odd_py, reinterpret_cast<thread uchar*>(comp_hash));
+    }
+    if (do_c) {
+        if (profanity_check_hash_words_metal(config, filters, storage, bloom_storage, xor_storage, xor_un_storage, xor_uc_storage, xor_hc_storage, comp_hash)) {
+            profanity_emit_result_idx_metal(isResult, buffResult, seed32, base_words, lane_id, round, px,
+                                            0x02u, comp_hash, 20, profanity_results, profanity_count, config.maxFounds);
+        }
+    }
+    if (do_s) {
+        for (int i = 0; i < 8; ++i) {
+            hash160[i] = comp_hash[i];
+        }
+        _GetHash160P2SHCompFromHash(hash160, hash160);
+        if (profanity_check_hash_words_metal(config, filters, storage, bloom_storage, xor_storage, xor_un_storage, xor_uc_storage, xor_hc_storage, hash160)) {
+            profanity_emit_result_idx_metal(isResult, buffResult, seed32, base_words, lane_id, round, px,
+                                            0x03u, hash160, 20, profanity_results, profanity_count, config.maxFounds);
+        }
+    }
+    if (config.p2wsh != 0u) {
+        thread uchar p2wsh_hash[32];
+        thread uint p2wsh_rmd[8] = { 0u };
+        _GetP2WSHComp_fast(px, odd_py, p2wsh_hash, p2wsh_rmd);
+        if (profanity_check_hash_words_metal(config, filters, storage, bloom_storage, xor_storage, xor_un_storage, xor_uc_storage, xor_hc_storage, p2wsh_rmd)) {
+            profanity_emit_result_idx_metal(isResult, buffResult, seed32, base_words, lane_id, round, px,
+                                            0x07u, p2wsh_hash, 32, profanity_results, profanity_count, config.maxFounds);
+        }
+    }
+    if (do_r) {
+        thread uchar taproot_hash[32];
+        profanity_tweak_taproot_metal(taproot_hash, pubkey65, precPtr, precPitch);
+        _GetRMD160(reinterpret_cast<thread uint*>(taproot_hash), hash160);
+        if (profanity_check_hash_words_metal(config, filters, storage, bloom_storage, xor_storage, xor_un_storage, xor_uc_storage, xor_hc_storage, hash160)) {
+            profanity_emit_result_idx_metal(isResult, buffResult, seed32, base_words, lane_id, round, px,
+                                            0x04u, taproot_hash, 32, profanity_results, profanity_count, config.maxFounds);
+        }
+    }
+    if (do_x) {
+        thread uint xpoint[8] = { 0u };
+        if (profanity_x_hash_target_only_metal(config)) {
+            if (profanity_check_x_target_prefix_fast_metal(px, config)) {
+                u64x4_to_x32(px, reinterpret_cast<thread unsigned char*>(xpoint));
+                profanity_emit_result_idx_metal(isResult, buffResult, seed32, base_words, lane_id, round, px,
+                                                0x05u, xpoint, 32, profanity_results, profanity_count, config.maxFounds);
+            }
+        } else {
+            u64x4_to_x32(px, reinterpret_cast<thread unsigned char*>(xpoint));
+            if (profanity_check_hash_words_metal(config, filters, storage, bloom_storage, xor_storage, xor_un_storage, xor_uc_storage, xor_hc_storage, xpoint)) {
+                profanity_emit_result_idx_metal(isResult, buffResult, seed32, base_words, lane_id, round, px,
+                                                0x05u, xpoint, 32, profanity_results, profanity_count, config.maxFounds);
+            }
+        }
+    }
+    if (do_e) {
+        thread uint eth_hash160[5] = { 0u };
+        keccak_eth64_tail20_from_xy(px, py, eth_hash160);
+        if (profanity_check_hash_words_metal(config, filters, storage, bloom_storage, xor_storage, xor_un_storage, xor_uc_storage, xor_hc_storage, eth_hash160)) {
+            profanity_emit_result_idx_metal(isResult, buffResult, seed32, base_words, lane_id, round, px,
+                                            0x06u, eth_hash160, 20, profanity_results, profanity_count, config.maxFounds);
+        }
+    }
+}
+
+static inline void worker_profanity_impl(device bool* isResult,
+                                         device bool* buffResult,
+                                         const constant secp256k1_ge_storage* precPtr,
+                                         ulong precPitch,
+                                         ulong seed_s0,
+                                         ulong seed_s1,
+                                         ulong seed_s2,
+                                         ulong seed_s3,
+                                         uint seed32,
+                                         ulong lane_start,
+                                         ulong lane_count,
+                                         ulong state_index_start,
+                                         ulong round_start,
+                                         ulong round_count,
+                                         device ProfanityWalkState* walk_state,
+                                         ulong walk_state_capacity,
+                                         bool use_walk_state,
+                                         bool store_walk_state,
+                                         bool do_c,
+                                         bool do_u,
+                                         bool do_s,
+                                         bool do_r,
+                                         bool do_x,
+                                         bool do_e,
+                                         device RuntimeConfig& config,
+                                         device XorFilterState& filters,
+                                         device FilterStorageState& storage,
+                                         const device uchar* bloom_storage,
+                                         const device uchar* xor_storage,
+                                         const device uchar* xor_un_storage,
+                                         const device uchar* xor_uc_storage,
+                                         const device uchar* xor_hc_storage,
+                                         device ProfanityVerifiedResult* profanity_results,
+                                         device atomic_uint* profanity_count,
+                                         uint tid) {
+    (void)use_walk_state;
+    if (ulong(tid) >= lane_count || round_count == 0ul || !profanity_filters_active_metal(config)) {
+        return;
+    }
+
+    const ulong lane_id = lane_start + ulong(tid);
+    const ulong state_index = state_index_start + ulong(tid);
+    const ProfanitySeedWords base_words = profanity_base_words_metal(seed_s0, seed_s1, seed_s2, seed_s3);
+
+    thread ulong last_px[4] = { 0ul, 0ul, 0ul, 0ul };
+    thread ulong last_py[4] = { 0ul, 0ul, 0ul, 0ul };
+    bool have_last = false;
+
+    for (ulong local = 0ul; local < round_count; ++local) {
+        const ulong round = round_start + local;
+        thread uchar priv32[32];
+        profanity_words_to_private_bytes_lane_round(base_words, lane_id, round, priv32);
+
+        thread uchar pubkey65[65];
+        thread ulong px[4];
+        thread ulong py[4];
+        if (profanity_private_to_xy_metal(precPtr, size_t(precPitch), priv32, pubkey65, px, py)) {
+            for (int i = 0; i < 4; ++i) {
+                last_px[i] = px[i];
+                last_py[i] = py[i];
+            }
+            have_last = true;
+            profanity_check_emit_targets_metal(isResult, buffResult, precPtr, size_t(precPitch),
+                                               seed32, base_words, lane_id, round, pubkey65, px, py,
+                                               do_c, do_u, do_s, do_r, do_x, do_e,
+                                               config, filters, storage, bloom_storage,
+                                               xor_storage, xor_un_storage, xor_uc_storage,
+                                               xor_hc_storage, profanity_results,
+                                               profanity_count);
+        }
+    }
+
+    if (store_walk_state && walk_state != nullptr && state_index < walk_state_capacity && have_last) {
+        device ProfanityWalkState& st = walk_state[state_index];
+        for (int i = 0; i < 4; ++i) {
+            st.x[i] = last_px[i];
+            st.y[i] = last_py[i];
+        }
+    }
+}
+
+static inline void profanity_reverse_store_be64_metal(thread uchar* p, ulong v) {
+    for (int i = 7; i >= 0; --i) {
+        p[i] = uchar(v & 0xffu);
+        v >>= 8u;
+    }
+}
+
+static inline void profanity_reverse_scalar_from_lane_round_metal(thread uchar out32[32],
+                                                                  ulong lane_id,
+                                                                  ulong round) {
+    for (int i = 0; i < 32; ++i) {
+        out32[i] = 0u;
+    }
+    profanity_reverse_store_be64_metal(out32 + 0, lane_id);
+    profanity_reverse_store_be64_metal(out32 + 24, round);
+}
+
+static inline void profanity_reverse_fe_to_u64x4_metal(thread ulong out[4],
+                                                       const thread secp256k1_fe* fe) {
+    thread uchar buf[32];
+    secp256k1_fe tmp = *fe;
+    secp256k1_fe_normalize_var(&tmp);
+    secp256k1_fe_get_b32(buf, &tmp);
+    for (int w = 0; w < 4; ++w) {
+        ulong v = 0ul;
+        const int base = (3 - w) * 8;
+        for (int b = 0; b < 8; ++b) {
+            v = (v << 8u) | ulong(buf[base + b]);
+        }
+        out[w] = v;
+    }
+}
+
+static inline bool profanity_reverse_x32_from_target_delta_metal(const constant secp256k1_ge_storage* precPtr,
+                                                                 ulong precPitch,
+                                                                 const device secp256k1_ge* target_ge,
+                                                                 ulong lane_id,
+                                                                 ulong round,
+                                                                 thread uchar x32[32],
+                                                                 thread ulong px[4],
+                                                                 thread ulong py[4]) {
+    if (target_ge == nullptr) {
+        return false;
+    }
+    thread uchar scalar32[32];
+    profanity_reverse_scalar_from_lane_round_metal(scalar32, lane_id, round);
+
+    secp256k1_scalar scalar;
+    secp256k1_scalar_set_b32(&scalar, scalar32, nullptr);
+
+    secp256k1_gej delta_j;
+    secp256k1_ecmult_big(&delta_j, &scalar, precPtr, size_t(precPitch));
+
+    secp256k1_gej neg_delta;
+    secp256k1_gej_neg(&neg_delta, &delta_j);
+
+    secp256k1_ge q = *target_ge;
+    secp256k1_gej qj;
+    secp256k1_gej_set_ge(&qj, &q);
+    secp256k1_gej_add_var(&qj, &qj, &neg_delta, nullptr);
+    if (qj.infinity != 0) {
+        return false;
+    }
+
+    secp256k1_ge out_ge;
+    secp256k1_ge_set_gej(&out_ge, &qj);
+    profanity_reverse_fe_to_u64x4_metal(px, &out_ge.x);
+    profanity_reverse_fe_to_u64x4_metal(py, &out_ge.y);
+    profanity_store_x32_from_u64x4(px, x32);
+    return true;
+}
+
+static inline void profanity_reverse_emit_hit_metal(device ProfanityRecoveryHit* hits,
+                                                    device atomic_uint* hit_count,
+                                                    uint max_hits,
+                                                    const thread uchar x32[32],
+                                                    ulong offset,
+                                                    ulong lane_id,
+                                                    uchar filter_type) {
+    if (hits == nullptr || hit_count == nullptr) {
+        return;
+    }
+    const uint idx = atomic_fetch_add_explicit(hit_count, 1u, memory_order_relaxed);
+    if (idx >= max_hits) {
+        return;
+    }
+    device ProfanityRecoveryHit& hit = hits[idx];
+    profanity_copy_thread_to_device(hit.x32, x32, 32u);
+    hit.offset = offset;
+    hit.lane_id = lane_id;
+    hit.filter_type = filter_type;
+    for (int i = 0; i < 7; ++i) {
+        hit.reserved[i] = 0u;
+    }
+}
+
+static inline void worker_profanity_recovery_reverse_direct_impl(const constant secp256k1_ge_storage* precPtr,
+                                                                 ulong precPitch,
+                                                                 const device secp256k1_ge* target_ge,
+                                                                 ulong lane_start,
+                                                                 ulong lane_count,
+                                                                 ulong state_index_start,
+                                                                 ulong round_start,
+                                                                 ulong round_count,
+                                                                 device ProfanityRecoveryHit* hits,
+                                                                 device atomic_uint* hit_count,
+                                                                 uint max_hits,
+                                                                 device ProfanityWalkState* walk_state,
+                                                                 ulong walk_state_capacity,
+                                                                 bool use_walk_state,
+                                                                 bool store_walk_state,
+                                                                 uchar filter_type,
+                                                                 uint tid) {
+    (void)use_walk_state;
+    if (ulong(tid) >= lane_count || round_count == 0ul || max_hits == 0u) {
+        return;
+    }
+
+    const ulong lane_id = lane_start + ulong(tid);
+    const ulong state_index = state_index_start + ulong(tid);
+    thread ulong last_px[4] = { 0ul, 0ul, 0ul, 0ul };
+    thread ulong last_py[4] = { 0ul, 0ul, 0ul, 0ul };
+    bool have_last = false;
+
+    for (ulong local = 0ul; local < round_count; ++local) {
+        const ulong round = round_start + local;
+        thread uchar x32[32];
+        thread ulong px[4];
+        thread ulong py[4];
+        if (!profanity_reverse_x32_from_target_delta_metal(precPtr, precPitch, target_ge, lane_id, round, x32, px, py)) {
+            continue;
+        }
+        for (int i = 0; i < 4; ++i) {
+            last_px[i] = px[i];
+            last_py[i] = py[i];
+        }
+        have_last = true;
+        profanity_reverse_emit_hit_metal(hits, hit_count, max_hits, x32, round, lane_id, filter_type);
+    }
+
+    if (store_walk_state && walk_state != nullptr && state_index < walk_state_capacity && have_last) {
+        device ProfanityWalkState& st = walk_state[state_index];
+        for (int i = 0; i < 4; ++i) {
+            st.x[i] = last_px[i];
+            st.y[i] = last_py[i];
+        }
+    }
+}
+
+#endif

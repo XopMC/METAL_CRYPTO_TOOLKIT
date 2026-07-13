@@ -1,0 +1,224 @@
+#ifndef METAL_CRYPTO_WORKER_DER_THREAD_SETUP_COMMON_METALH
+#define METAL_CRYPTO_WORKER_DER_THREAD_SETUP_COMMON_METALH
+
+#include "WorkerMnemonicCommon.metalh"
+#include "WorkerCommon.metalh"
+#include "PrngCommon.metalh"
+
+static inline void der_setup_zero(thread uchar* p, uint n) {
+    for (uint i = 0u; i < n; ++i) {
+        p[i] = 0u;
+    }
+}
+
+static inline uchar der_setup_hex_nibble(uchar c) {
+    if (c >= uchar('0') && c <= uchar('9')) return c - uchar('0');
+    if (c >= uchar('a') && c <= uchar('f')) return c - uchar('a') + 10u;
+    if (c >= uchar('A') && c <= uchar('F')) return c - uchar('A') + 10u;
+    return 0u;
+}
+
+static inline void der_setup_unhex_device(const device char* src,
+                                          uint src_len,
+                                          thread uchar* dst,
+                                          uint dst_len) {
+    const uint n = min(src_len >> 1u, dst_len);
+    for (uint i = 0u; i < n; ++i) {
+        const uchar hi = der_setup_hex_nibble(uchar(src[i * 2u]));
+        const uchar lo = der_setup_hex_nibble(uchar(src[i * 2u + 1u]));
+        dst[i] = uchar((hi << 4u) | lo);
+    }
+}
+
+static inline void der_setup_copy_input(thread char dst[512],
+                                        thread ulong& len,
+                                        const device char* input,
+                                        uint input_len) {
+    len = ulong(min(input_len, 511u));
+    for (uint i = 0u; i < uint(len); ++i) {
+        dst[i] = input[i];
+    }
+    dst[len] = 0;
+    for (uint i = uint(len) + 1u; i < 512u; ++i) {
+        dst[i] = 0;
+    }
+}
+
+static inline void der_setup_save_string(device char* d_save_str,
+                                         device uint* d_save_len,
+                                         const thread char* src,
+                                         uint len) {
+    if (d_save_str != nullptr) {
+        const uint n = min(len, 511u);
+        der_copy_thread_char_to_device(d_save_str, src, n);
+        d_save_str[n] = 0;
+    }
+    if (d_save_len != nullptr) {
+        *d_save_len = min(len, 511u);
+    }
+}
+
+static inline void der_setup_generate_mnemonic(const thread uchar* entropy,
+                                               size_t entropy_size,
+                                               thread char* phrase,
+                                               int dict_lang,
+                                               const device char* dict_words,
+                                               thread size_t& phrase_len,
+                                               uint old_electrum) {
+    if (old_electrum != 0u) {
+        return;
+    }
+
+    const size_t checksum_bits = entropy_size * 8ul / 32ul;
+    const size_t word_count = (entropy_size * 8ul + checksum_bits) / 11ul;
+    uchar hash[32] = { 0 };
+    SHA256(entropy, entropy_size, hash);
+
+    size_t bit_offset = 0ul;
+    size_t offset = 0ul;
+    for (size_t i = 0ul; i < word_count; ++i) {
+        size_t index = 0ul;
+#pragma unroll 11
+        for (size_t j = 0ul; j < 11ul; ++j) {
+            const size_t byte_pos = bit_offset / 8ul;
+            const size_t bit_pos = 7ul - (bit_offset % 8ul);
+            const uchar current_byte = byte_pos < entropy_size
+                ? entropy[byte_pos]
+                : hash[byte_pos - entropy_size];
+            if ((current_byte & uchar(1u << bit_pos)) != 0u) {
+                index |= 1ul << (10ul - j);
+            }
+            ++bit_offset;
+        }
+
+        size_t word_length = 0ul;
+        while (mnemonic_word_char_at(dict_lang, dict_words, index, word_length) != '\0') {
+            ++word_length;
+        }
+        for (size_t j = 0ul; j < word_length; ++j) {
+            phrase[offset + j] = mnemonic_word_char_at(dict_lang, dict_words, index, j);
+        }
+        offset += word_length;
+        if (i + 1ul < word_count) {
+            phrase[offset++] = ' ';
+        }
+    }
+    phrase_len = offset;
+}
+
+static inline void der_setup_hash_to_master(const thread uchar* material,
+                                            ulong material_len,
+                                            const thread uchar* raw_entropy,
+                                            uint raw_entropy_len,
+                                            const thread char* passphrase,
+                                            uint pass_len,
+                                            uchar mode,
+                                            device RuntimeConfig& config,
+                                            thread extended_private_key_t& secp_master,
+                                            thread extended_private_key_t& ed_master,
+                                            thread cardano_extended_private_key_t& cardano_icarus,
+                                            thread cardano_extended_private_key_t& cardano_daedalus,
+                                            thread cardano_extended_private_key_t& cardano_ledger,
+                                            thread cardano_extended_private_key_t& cardano_byron,
+                                            thread uchar entropy_out[64],
+                                            thread uint& entropy_len_out,
+                                            thread uchar& entropy_valid_out) {
+    uchar seed64[64] = { 0 };
+    const bool run_bip32_ed25519_paths = config.ed25519 != 0u &&
+        config.bipDerivationsEnabled != 0u &&
+        ((config.derivationTypeMask & WORKER_DERIVATION_TYPE_MASK_BIP32_ED25519) != 0u);
+    const bool run_dot_suri_paths = config.dot != 0u && config.substratePathCount > 0u;
+    if (entropy_valid_out == 0u) {
+        entropy_len_out = 0u;
+    }
+
+    if (mode == 0u) {
+        const uint n = min(uint(material_len), 64u);
+        for (uint i = 0u; i < n; ++i) {
+            reinterpret_cast<thread uchar*>(&secp_master)[i] = material[i];
+            reinterpret_cast<thread uchar*>(&ed_master)[i] = material[i];
+        }
+        return;
+    }
+
+    if (mode == 1u || mode == 4u) {
+        if (material_len == 64ul) {
+            HMAC_SHA512_BTC_SEED_64(material, reinterpret_cast<thread uchar*>(&secp_master));
+            HMAC_SHA512_ED25519_SEED_64(material, reinterpret_cast<thread uchar*>(&ed_master));
+        } else {
+            HMAC_SHA512(WORKER_BITCOIN_SEED_KEY, 12ul, material, material_len,
+                        reinterpret_cast<thread uchar*>(&secp_master));
+            HMAC_SHA512(ed_key, 12ul, material, material_len,
+                        reinterpret_cast<thread uchar*>(&ed_master));
+        }
+        return;
+    }
+
+    uchar salt_buf[136] = { 0 };
+    const constant uchar* salt_src = config.electrum != 0u ? recovery_electrum_salt : recovery_salt;
+    for (uint i = 0u; i < 8u; ++i) {
+        salt_buf[i] = salt_src[i];
+    }
+    const uint pass_copy = min(pass_len, 128u);
+    for (uint i = 0u; i < pass_copy; ++i) {
+        salt_buf[8u + i] = uchar(passphrase[i]);
+    }
+    fastpbkdf2_hmac_sha512(material, material_len, salt_buf, ulong(8u + pass_copy),
+                           config.pbkdf2Iterations, seed64, 64ul);
+    HMAC_SHA512_BTC_SEED_64(seed64, reinterpret_cast<thread uchar*>(&secp_master));
+    HMAC_SHA512_ED25519_SEED_64(seed64, reinterpret_cast<thread uchar*>(&ed_master));
+
+    if (mode == 2u && (run_bip32_ed25519_paths || run_dot_suri_paths)) {
+        uint entropy_len = 0u;
+        uchar entropy_tmp[256] = { 0 };
+        char mnemonic_material[512] = { 0 };
+        const uint mnemonic_len = min(uint(material_len), 512u);
+        for (uint i = 0u; i < mnemonic_len; ++i) {
+            mnemonic_material[i] = char(material[i]);
+        }
+        if (mnemonic_to_entropy(mnemonic_material, int(mnemonic_len), entropy_tmp, &entropy_len)) {
+            entropy_valid_out = 1u;
+            entropy_len_out = min(entropy_len, 64u);
+            for (uint i = 0u; i < entropy_len_out; ++i) {
+                entropy_out[i] = entropy_tmp[i];
+            }
+        }
+    } else if (mode == 3u && (run_bip32_ed25519_paths || run_dot_suri_paths) &&
+               raw_entropy != nullptr && raw_entropy_len > 0u) {
+        entropy_valid_out = 1u;
+        entropy_len_out = min(raw_entropy_len, 64u);
+        for (uint i = 0u; i < entropy_len_out; ++i) {
+            entropy_out[i] = raw_entropy[i];
+        }
+    }
+
+    if (entropy_valid_out != 0u && run_bip32_ed25519_paths) {
+        cip3_icarus_master_xprv_from_entropy(
+            entropy_out, entropy_len_out, reinterpret_cast<const thread uchar*>(passphrase),
+            pass_copy, &cardano_icarus);
+        cip3_byron_master_xprv_from_entropy(entropy_out, entropy_len_out, &cardano_daedalus);
+        cardano_byron_legacy_master_xprv_from_entropy(entropy_out, entropy_len_out,
+                                                      &cardano_byron);
+        cardano_kholaw_master_xprv_from_seed(seed64, 64u, &cardano_ledger);
+    }
+}
+
+static inline bool der_setup_entropy_fill(int entropy_len,
+                                          thread uchar entropy[128],
+                                          ulong seed_l,
+                                          bool is_64,
+                                          int gen,
+                                          ulong skip64) {
+    if (entropy_len <= 0 || entropy_len > 128) {
+        return false;
+    }
+    if (is_64) {
+        return prng64_entropy_fill(entropy_len, entropy, seed_l, 0, gen, skip64);
+    }
+    if (seed_l > 0xfffffffful) {
+        return false;
+    }
+    return prng32_entropy_fill(entropy_len, entropy, uint(seed_l), 0, gen, skip64);
+}
+
+#endif

@@ -1,0 +1,303 @@
+#ifndef METAL_CRYPTO_WORKER_DER_THREAD_COMMON_METALH
+#define METAL_CRYPTO_WORKER_DER_THREAD_COMMON_METALH
+
+#include "GPUHash.metalh"
+
+static inline void _GetHash160ED(const thread unsigned char* pubkey,
+                                 thread int& keyLen,
+                                 thread uint8_t* hash) {
+    uchar tmp[32];
+    const uint start = uint(keyLen);
+    for (uint i = 0u; i < 32u; ++i) {
+        tmp[i] = pubkey[start + i];
+    }
+    int local_key_len = 0;
+    _GetHash160ED(tmp, local_key_len, hash);
+    keyLen += 32;
+}
+
+#include "WorkerPrivCommon.metalh"
+
+#define DERIVATION_TYPE_MASK_BIP32 0x01u
+#define DERIVATION_TYPE_MASK_SLIP0010 0x02u
+#define DERIVATION_TYPE_MASK_BIP32_ED25519 0x04u
+
+struct DerThreadRunParams {
+    uint d_save_len;
+    uint pass_len;
+    uint der_indexes_size;
+    uint der_offset;
+    ulong seed_value;
+    ulong round;
+    uchar store_seed;
+    uchar _pad0;
+    uchar _pad1;
+    uchar _pad2;
+};
+
+static inline void der_copy_device_char_to_found(device char* dst,
+                                                 const device char* src,
+                                                 uint len) {
+    for (uint i = 0u; i < len; ++i) {
+        dst[i] = src[i];
+    }
+}
+
+static inline void der_copy_device_uchar_to_thread(thread uchar* dst,
+                                                   const device uchar* src,
+                                                   uint len) {
+    for (uint i = 0u; i < len; ++i) {
+        dst[i] = src[i];
+    }
+}
+
+static inline void der_copy_device_char_to_thread(thread char* dst,
+                                                  const device char* src,
+                                                  uint len) {
+    for (uint i = 0u; i < len; ++i) {
+        dst[i] = src[i];
+    }
+}
+
+static inline void der_copy_thread_uchar_to_device(device uchar* dst,
+                                                   const thread uchar* src,
+                                                   uint len) {
+    for (uint i = 0u; i < len; ++i) {
+        dst[i] = src[i];
+    }
+}
+
+static inline void der_copy_thread_char_to_device(device char* dst,
+                                                  const thread char* src,
+                                                  uint len) {
+    for (uint i = 0u; i < len; ++i) {
+        dst[i] = src[i];
+    }
+}
+
+static inline void der_store_result(device bool* isResult,
+                                    device bool* buffResult,
+                                    const thread uchar* private_key32,
+                                    const thread void* payload,
+                                    uint payload_len,
+                                    uchar type_value,
+                                    uint global_path,
+                                    const device char* save_str,
+                                    uint save_len,
+                                    const device char* passphrase,
+                                    uint pass_len,
+                                    bool store_seed,
+                                    ulong seed_value,
+                                    long current_round,
+                                    device RuntimeConfig& config,
+                                    FoundBuffers found) {
+    if (buffResult != nullptr) {
+        buffResult[0] = true;
+    }
+    if (isResult != nullptr) {
+        isResult[0] = true;
+    }
+    if (found.resultsCount == nullptr) {
+        return;
+    }
+
+    const ulong idx64 = found_atomic_add_count(found.resultsCount, 1u);
+    if (idx64 >= ulong(found.maxFounds)) {
+        return;
+    }
+    const uint idx = uint(idx64);
+
+    if (found.foundDerivations != nullptr) {
+        found.foundDerivations[idx] = global_path;
+    }
+    if (found.foundStrings != nullptr && save_str != nullptr && save_len > 0u) {
+        const uint n = min(save_len, uint(kFoundStringBytes));
+        der_copy_device_char_to_found(found.foundStrings + ulong(idx) * kFoundStringBytes, save_str, n);
+    }
+    if (found.len != nullptr) {
+        found.len[idx] = save_len;
+    }
+    if (found.foundPrvKeys != nullptr && private_key32 != nullptr) {
+        found_copy_thread_to_device_uchar(found.foundPrvKeys + ulong(idx) * kFoundPrivateKeyBytes, private_key32, 32u);
+    }
+    if (found.foundHash160 != nullptr && payload != nullptr && payload_len > 0u) {
+        const uint n = min(payload_len, kFoundHashWords * 4u);
+        device uchar* out = reinterpret_cast<device uchar*>(found.foundHash160 + ulong(idx) * kFoundHashWords);
+        found_copy_thread_to_device_bytes(out, payload, n);
+    }
+    if (found.type != nullptr) {
+        found.type[idx] = type_value;
+    }
+    if (found.round != nullptr) {
+        found.round[idx] = current_round;
+    }
+    if (pass_len > 0u && passphrase != nullptr) {
+        const uint n = min(pass_len, uint(kFoundPassBytes - 1u));
+        if (found.passSize != nullptr) {
+            found.passSize[idx] = ushort(n);
+        }
+        if (found.pass != nullptr) {
+            der_copy_device_char_to_found(found.pass + ulong(idx) * kFoundPassBytes, passphrase, n);
+            found.pass[ulong(idx) * kFoundPassBytes + ulong(n)] = '\0';
+        }
+    } else if (config.isPass != 0u && found.passSize != nullptr) {
+        found.passSize[idx] = 0u;
+    }
+    if (store_seed && found.seed != nullptr) {
+        found.seed[idx] = seed_value;
+    }
+}
+
+static inline bool der_check_and_store_words(device bool* isResult,
+                                             device bool* buffResult,
+                                             const thread uchar* private_key32,
+                                             const thread void* payload,
+                                             uint payload_len,
+                                             const thread uint* hash_words,
+                                             uchar type_value,
+                                             uint global_path,
+                                             const device char* save_str,
+                                             uint save_len,
+                                             const device char* passphrase,
+                                             uint pass_len,
+                                             bool store_seed,
+                                             ulong seed_value,
+                                             long current_round,
+                                             device RuntimeConfig& config,
+                                             device XorFilterState& filters,
+                                             device FilterStorageState& storage,
+                                             const device uchar* bloom_storage,
+                                             const device uchar* xor_storage,
+                                             const device uchar* xor_un_storage,
+                                             const device uchar* xor_uc_storage,
+                                             const device uchar* xor_hc_storage,
+                                             FoundBuffers found) {
+    if (!priv_check_hash_words(config, filters, storage, bloom_storage, xor_storage, xor_un_storage,
+                               xor_uc_storage, xor_hc_storage, hash_words)) {
+        return false;
+    }
+    der_store_result(isResult, buffResult, private_key32, payload, payload_len, type_value,
+                     global_path, save_str, save_len, passphrase, pass_len, store_seed,
+                     seed_value, current_round, config, found);
+    return true;
+}
+
+static inline void der_get_child_key_secp256k1(const constant secp256k1_ge_storage* precPtr,
+                                               size_t precPitch,
+                                               const thread extended_private_key_t* master_private,
+                                               const device uint* deriv,
+                                               uint path_len,
+                                               thread uchar out32[32]) {
+    extended_private_key_t cur = *master_private;
+    for (uint i = 0u; i < path_len; ++i) {
+        const uint index = deriv[i];
+        if (index < 0x80000000u) {
+            normal_private_child_from_private(precPtr, precPitch, &cur, &cur, index);
+        } else {
+            hardened_private_child_from_private(&cur, &cur, index);
+        }
+    }
+    for (int i = 0; i < 32; ++i) {
+        out32[i] = cur.key[i];
+    }
+}
+
+static inline void der_get_child_key_ed25519(const thread extended_private_key_t* master_private,
+                                             const device uint* deriv,
+                                             uint path_len,
+                                             thread uchar out32[32]) {
+    extended_private_key_t cur = *master_private;
+    for (uint i = 0u; i < path_len; ++i) {
+        uint index = deriv[i];
+        if (index < 0x80000000u) {
+            index |= 0x80000000u;
+        }
+        hardened_private_child_from_private_ed25519(&cur, &cur, index);
+    }
+    for (int i = 0; i < 32; ++i) {
+        out32[i] = cur.key[i];
+    }
+}
+
+static inline void der_get_child_key_ed25519_precomp_first(const thread extended_private_key_t* master_private,
+                                                           const device uint* deriv,
+                                                           uint path_len,
+                                                           const thread hmac_sha512_precomp_t* master_precomp,
+                                                           thread uchar out32[32]) {
+    uint index = deriv[0];
+    if (index < 0x80000000u) {
+        index |= 0x80000000u;
+    }
+    extended_private_key_t child;
+    hardened_private_child_from_private_ed25519_precomp(master_private, &child, index, master_precomp);
+    for (uint i = 1u; i < path_len; ++i) {
+        index = deriv[i];
+        if (index < 0x80000000u) {
+            index |= 0x80000000u;
+        }
+        hardened_private_child_from_private_ed25519(&child, &child, index);
+    }
+    for (int i = 0; i < 32; ++i) {
+        out32[i] = child.key[i];
+    }
+}
+
+static inline void der_load_master_extended(const device uchar* src64,
+                                            thread extended_private_key_t* out) {
+    const device extended_private_key_t* in = reinterpret_cast<const device extended_private_key_t*>(src64);
+    for (int i = 0; i < 32; ++i) {
+        out->key[i] = in->key[i];
+        out->chain_code[i] = in->chain_code[i];
+    }
+}
+
+static inline void der_store_master_extended(device uchar* dst64,
+                                             const thread extended_private_key_t& src) {
+    if (dst64 == nullptr) {
+        return;
+    }
+    const thread uchar* raw = reinterpret_cast<const thread uchar*>(&src);
+    der_copy_thread_uchar_to_device(dst64, raw, 64u);
+}
+
+static inline void der_store_cardano_xprv(device uchar* dst96,
+                                          const thread cardano_extended_private_key_t& src) {
+    if (dst96 == nullptr) {
+        return;
+    }
+    const thread uchar* raw = reinterpret_cast<const thread uchar*>(&src);
+    der_copy_thread_uchar_to_device(dst96, raw, uint(sizeof(cardano_extended_private_key_t)));
+}
+
+static inline void der_make_found_buffers(device char* foundStrings,
+                                          device uchar* foundPrvKeys,
+                                          device uint* foundHash160,
+                                          device uint* foundLen,
+                                          device uint* foundIter,
+                                          device uchar* foundType,
+                                          device uint* foundDerivations,
+                                          device uint* foundDerivations2,
+                                          device char* foundPass,
+                                          device ushort* foundPassSize,
+                                          device long* foundRound,
+                                          device ulong* foundSeed,
+                                          device atomic_uint* resultsCount,
+                                          uint maxFounds,
+                                          thread FoundBuffers& found) {
+    found.foundStrings = foundStrings;
+    found.foundPrvKeys = foundPrvKeys;
+    found.foundHash160 = foundHash160;
+    found.len = foundLen;
+    found.iter = foundIter;
+    found.type = foundType;
+    found.foundDerivations = foundDerivations;
+    found.foundDerivations2 = foundDerivations2;
+    found.pass = foundPass;
+    found.passSize = foundPassSize;
+    found.round = foundRound;
+    found.seed = foundSeed;
+    found.resultsCount = resultsCount;
+    found.maxFounds = maxFounds;
+}
+
+#endif

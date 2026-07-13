@@ -1,0 +1,84 @@
+#ifndef METAL_CRYPTO_WORKER_PRIV_SEQ_NEW_COMMON_METALH
+#define METAL_CRYPTO_WORKER_PRIV_SEQ_NEW_COMMON_METALH
+
+#ifndef METAL_CRYPTO_WORKER_PRIV_COMMON_METALH
+#include "../lib/secp256k1/secp256k1.metalh"
+#endif
+
+using namespace metal;
+
+constant uint VS_GRP_SIZE_METAL = uint(METAL_VANITY_GROUP_SIZE);
+constant uint VS_GRP_HALF_METAL = VS_GRP_SIZE_METAL / 2u;
+constant uint VS_GRP_TABLE_SIZE_METAL = VS_GRP_HALF_METAL;
+
+struct SecpWalkState {
+    secp256k1_ge p0;
+    secp256k1_ge h;
+    ulong vanityPersistShiftX[4];
+    ulong vanityPersistShiftY[4];
+};
+
+REC_DEVICE void worker_priv_seq_fe_to_u64x4(thread ulong r[4], const thread secp256k1_fe* fe) {
+    thread uchar buf[32];
+    secp256k1_fe tmp = *fe;
+    secp256k1_fe_normalize_var(&tmp);
+    secp256k1_fe_get_b32(buf, &tmp);
+    for (int w = 0; w < 4; w++) {
+        ulong val = 0ul;
+        for (int b = 0; b < 8; b++) {
+            val = (val << 8) | ulong(buf[(3 - w) * 8 + b]);
+        }
+        r[w] = val;
+    }
+}
+
+REC_DEVICE void worker_priv_seq_u64x4_to_fe(thread secp256k1_fe* r, const thread ulong x[4]) {
+    thread uchar buf[32];
+    for (int w = 0; w < 4; w++) {
+        ulong val = x[w];
+        for (int b = 7; b >= 0; b--) {
+            buf[(3 - w) * 8 + b] = uchar(val & 0xfful);
+            val >>= 8;
+        }
+    }
+    secp256k1_fe_set_b32(r, buf);
+}
+
+REC_DEVICE void worker_priv_seq_u64x4_to_fe_device(thread secp256k1_fe* r, const device ulong* x) {
+    thread ulong local[4];
+    for (int i = 0; i < 4; i++) {
+        local[i] = x[i];
+    }
+    worker_priv_seq_u64x4_to_fe(r, local);
+}
+
+REC_DEVICE void worker_priv_seq_load256a(thread ulong r[4], const device ulong* a, uint tidInGroup, uint threadsPerGroup) {
+    r[0] = a[tidInGroup];
+    r[1] = a[tidInGroup + threadsPerGroup];
+    r[2] = a[tidInGroup + 2u * threadsPerGroup];
+    r[3] = a[tidInGroup + 3u * threadsPerGroup];
+}
+
+REC_DEVICE void worker_priv_seq_store256a(device ulong* r, const thread ulong a[4], uint tidInGroup, uint threadsPerGroup) {
+    r[tidInGroup] = a[0];
+    r[tidInGroup + threadsPerGroup] = a[1];
+    r[tidInGroup + 2u * threadsPerGroup] = a[2];
+    r[tidInGroup + 3u * threadsPerGroup] = a[3];
+}
+
+REC_DEVICE void worker_priv_seq_walk_get_start_gej(thread secp256k1_gej* pstart,
+                                                   const device SecpWalkState& walkState,
+                                                   ulong starter) {
+    secp256k1_ge p0 = walkState.p0;
+    secp256k1_ge h = walkState.h;
+    secp256k1_gej p0j;
+    secp256k1_gej hj;
+    secp256k1_gej tmp;
+    secp256k1_gej_set_ge(&p0j, &p0);
+    secp256k1_gej_set_ge(&hj, &h);
+    secp256k1_gej_mul_u64_gej(&tmp, &hj, starter);
+    secp256k1_gej_add_var(&p0j, &p0j, &tmp, NULL);
+    *pstart = p0j;
+}
+
+#endif

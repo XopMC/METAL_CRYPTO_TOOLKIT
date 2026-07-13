@@ -1,0 +1,790 @@
+#pragma once
+
+/*
+ * This file is part of the VanitySearch distribution
+ * (https://github.com/JeanLucPons/VanitySearch).
+ * Copyright (c) 2019 Jean Luc PONS.
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, version 3.
+ *
+ * This program is distributed in the hope that it will be useful, but
+ * WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
+ * General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program. If not, see <http://www.gnu.org/licenses/>.
+ */
+
+#include <metal_stdlib>
+
+using namespace metal;
+
+// 256(+64)-bit integer arithmetic for the secp256k1 field. Limbs are stored
+// least-significant first, exactly as in the METAL VanitySearch implementation.
+
+constant ulong GPUMATH_MM64 = 0xD838091DD2253531ul;
+constant ulong GPUMATH_MSK62 = 0x3FFFFFFFFFFFFFFFul;
+constant ulong GPUMATH_P0 = 0xFFFFFFFEFFFFFC2Ful;
+constant ulong GPUMATH_PN = 0xFFFFFFFFFFFFFFFFul;
+constant ulong GPUMATH_REDUCTION = 0x1000003D1ul;
+
+static inline ulong gpumath_add_cc(ulong a, ulong b, thread ulong& carry) {
+    const ulong r = a + b;
+    carry = ulong(r < a);
+    return r;
+}
+
+static inline ulong gpumath_addc_cc(ulong a, ulong b, thread ulong& carry) {
+    const ulong carry_in = carry;
+    const ulong ab = a + b;
+    const ulong carry_ab = ulong(ab < a);
+    const ulong r = ab + carry_in;
+    carry = carry_ab | ulong(r < ab);
+    return r;
+}
+
+static inline ulong gpumath_addc(ulong a, ulong b, ulong carry) {
+    return a + b + carry;
+}
+
+static inline ulong gpumath_sub_cc(ulong a, ulong b, thread ulong& borrow) {
+    const ulong r = a - b;
+    borrow = ulong(a < b);
+    return r;
+}
+
+static inline ulong gpumath_subc_cc(ulong a, ulong b, thread ulong& borrow) {
+    const ulong borrow_in = borrow;
+    const ulong ab = a - b;
+    const ulong borrow_ab = ulong(a < b);
+    const ulong r = ab - borrow_in;
+    borrow = borrow_ab | ulong(ab < borrow_in);
+    return r;
+}
+
+static inline ulong gpumath_subc(ulong a, ulong b, ulong borrow) {
+    return a - b - borrow;
+}
+
+static inline ulong gpumath_mad_hi_cc(ulong a,
+                                      ulong b,
+                                      ulong c,
+                                      thread ulong& carry) {
+    return gpumath_add_cc(mulhi(a, b), c, carry);
+}
+
+static inline ulong gpumath_madc_hi_cc(ulong a,
+                                       ulong b,
+                                       ulong c,
+                                       thread ulong& carry) {
+    return gpumath_addc_cc(mulhi(a, b), c, carry);
+}
+
+static inline ulong gpumath_madc_hi(ulong a, ulong b, ulong c, ulong carry) {
+    return mulhi(a, b) + c + carry;
+}
+
+static inline ulong gpumath_madc_hi_signed(ulong a,
+                                           ulong b,
+                                           ulong c,
+                                           ulong carry) {
+    const long hi = mulhi(long(a), long(b));
+    return ulong(hi) + c + carry;
+}
+
+static inline bool gpumath_is_negative(const thread ulong x[5]) {
+    return long(x[4]) < 0l;
+}
+
+static inline bool gpumath_is_zero(const thread ulong x[5]) {
+    return (x[4] | x[3] | x[2] | x[1] | x[0]) == 0ul;
+}
+
+static inline bool gpumath_is_one(const thread ulong x[5]) {
+    return x[4] == 0ul && x[3] == 0ul && x[2] == 0ul &&
+           x[1] == 0ul && x[0] == 1ul;
+}
+
+static inline void gpumath_load320(thread ulong r[5], const thread ulong a[5]) {
+    r[0] = a[0];
+    r[1] = a[1];
+    r[2] = a[2];
+    r[3] = a[3];
+    r[4] = a[4];
+}
+
+static inline void Load256(thread ulong r[4], const thread ulong a[4]) {
+    r[0] = a[0];
+    r[1] = a[1];
+    r[2] = a[2];
+    r[3] = a[3];
+}
+
+static inline void Load256(thread ulong r[4], const device ulong* a) {
+    r[0] = a[0];
+    r[1] = a[1];
+    r[2] = a[2];
+    r[3] = a[3];
+}
+
+static inline void Load256(thread ulong r[4], const constant ulong* a) {
+    r[0] = a[0];
+    r[1] = a[1];
+    r[2] = a[2];
+    r[3] = a[3];
+}
+
+static inline void gpumath_add_p(thread ulong r[5]) {
+    ulong carry;
+    r[0] = gpumath_add_cc(r[0], GPUMATH_P0, carry);
+    r[1] = gpumath_addc_cc(r[1], GPUMATH_PN, carry);
+    r[2] = gpumath_addc_cc(r[2], GPUMATH_PN, carry);
+    r[3] = gpumath_addc_cc(r[3], GPUMATH_PN, carry);
+    r[4] = gpumath_addc(r[4], 0ul, carry);
+}
+
+static inline void gpumath_sub_p(thread ulong r[5]) {
+    ulong borrow;
+    r[0] = gpumath_sub_cc(r[0], GPUMATH_P0, borrow);
+    r[1] = gpumath_subc_cc(r[1], GPUMATH_PN, borrow);
+    r[2] = gpumath_subc_cc(r[2], GPUMATH_PN, borrow);
+    r[3] = gpumath_subc_cc(r[3], GPUMATH_PN, borrow);
+    r[4] = gpumath_subc(r[4], 0ul, borrow);
+}
+
+static inline void gpumath_neg320(thread ulong r[5]) {
+    ulong borrow;
+    r[0] = gpumath_sub_cc(0ul, r[0], borrow);
+    r[1] = gpumath_subc_cc(0ul, r[1], borrow);
+    r[2] = gpumath_subc_cc(0ul, r[2], borrow);
+    r[3] = gpumath_subc_cc(0ul, r[3], borrow);
+    r[4] = gpumath_subc(0ul, r[4], borrow);
+}
+
+static inline void gpumath_umult(thread ulong r[5],
+                                 const thread ulong a[4],
+                                 ulong b) {
+    ulong carry;
+    r[0] = a[0] * b;
+    r[1] = a[1] * b;
+    r[1] = gpumath_mad_hi_cc(a[0], b, r[1], carry);
+    r[2] = a[2] * b;
+    r[2] = gpumath_madc_hi_cc(a[1], b, r[2], carry);
+    r[3] = a[3] * b;
+    r[3] = gpumath_madc_hi_cc(a[2], b, r[3], carry);
+    r[4] = gpumath_madc_hi(a[3], b, 0ul, carry);
+}
+
+static inline void gpumath_umult_special(thread ulong r[5],
+                                         const thread ulong a[4]) {
+    ulong carry;
+
+    r[0] = (a[0] << 32u) + (a[0] << 9u) + (a[0] << 8u) +
+           (a[0] << 7u) + (a[0] << 6u) + (a[0] << 4u) + a[0];
+    r[1] = (a[1] << 32u) + (a[1] << 9u) + (a[1] << 8u) +
+           (a[1] << 7u) + (a[1] << 6u) + (a[1] << 4u) + a[1];
+    r[1] = gpumath_mad_hi_cc(a[0], GPUMATH_REDUCTION, r[1], carry);
+    r[2] = (a[2] << 32u) + (a[2] << 9u) + (a[2] << 8u) +
+           (a[2] << 7u) + (a[2] << 6u) + (a[2] << 4u) + a[2];
+    r[2] = gpumath_madc_hi_cc(a[1], GPUMATH_REDUCTION, r[2], carry);
+    r[3] = (a[3] << 32u) + (a[3] << 9u) + (a[3] << 8u) +
+           (a[3] << 7u) + (a[3] << 6u) + (a[3] << 4u) + a[3];
+    r[3] = gpumath_madc_hi_cc(a[2], GPUMATH_REDUCTION, r[3], carry);
+    r[4] = gpumath_madc_hi(a[3], GPUMATH_REDUCTION, 0ul, carry);
+}
+
+static inline void gpumath_shift_r62(thread ulong r[5]) {
+    r[0] = (r[1] << 2u) | (r[0] >> 62u);
+    r[1] = (r[2] << 2u) | (r[1] >> 62u);
+    r[2] = (r[3] << 2u) | (r[2] >> 62u);
+    r[3] = (r[4] << 2u) | (r[3] >> 62u);
+    r[4] = ulong(long(r[4]) >> 62u);
+}
+
+static inline void gpumath_imult(thread ulong r[5],
+                                 const thread ulong a[5],
+                                 long b) {
+    ulong t0;
+    ulong t1;
+    ulong t2;
+    ulong t3;
+    ulong t4;
+    if (b < 0l) {
+        b = -b;
+        ulong borrow;
+        t0 = gpumath_sub_cc(0ul, a[0], borrow);
+        t1 = gpumath_subc_cc(0ul, a[1], borrow);
+        t2 = gpumath_subc_cc(0ul, a[2], borrow);
+        t3 = gpumath_subc_cc(0ul, a[3], borrow);
+        t4 = gpumath_subc(0ul, a[4], borrow);
+    } else {
+        t0 = a[0];
+        t1 = a[1];
+        t2 = a[2];
+        t3 = a[3];
+        t4 = a[4];
+    }
+
+    const ulong ub = ulong(b);
+    ulong carry;
+    r[0] = t0 * ub;
+    r[1] = t1 * ub;
+    r[1] = gpumath_mad_hi_cc(t0, ub, r[1], carry);
+    r[2] = t2 * ub;
+    r[2] = gpumath_madc_hi_cc(t1, ub, r[2], carry);
+    r[3] = t3 * ub;
+    r[3] = gpumath_madc_hi_cc(t2, ub, r[3], carry);
+    r[4] = t4 * ub;
+    r[4] = gpumath_madc_hi(t3, ub, r[4], carry);
+}
+
+static inline void ModNeg256(thread ulong r[4], const thread ulong a[4]) {
+    ulong borrow;
+    r[0] = gpumath_sub_cc(GPUMATH_P0, a[0], borrow);
+    r[1] = gpumath_subc_cc(GPUMATH_PN, a[1], borrow);
+    r[2] = gpumath_subc_cc(GPUMATH_PN, a[2], borrow);
+    r[3] = gpumath_subc(GPUMATH_PN, a[3], borrow);
+}
+
+static inline void ModNeg256(thread ulong r[4]) {
+    ulong borrow;
+    r[0] = gpumath_sub_cc(GPUMATH_P0, r[0], borrow);
+    r[1] = gpumath_subc_cc(GPUMATH_PN, r[1], borrow);
+    r[2] = gpumath_subc_cc(GPUMATH_PN, r[2], borrow);
+    r[3] = gpumath_subc(GPUMATH_PN, r[3], borrow);
+}
+
+static inline void ModSub256(thread ulong r[4],
+                             const thread ulong a[4],
+                             const thread ulong b[4]) {
+    ulong borrow;
+    r[0] = gpumath_sub_cc(a[0], b[0], borrow);
+    r[1] = gpumath_subc_cc(a[1], b[1], borrow);
+    r[2] = gpumath_subc_cc(a[2], b[2], borrow);
+    r[3] = gpumath_subc_cc(a[3], b[3], borrow);
+    const ulong final_borrow = borrow;
+    const ulong mask = 0ul - final_borrow;
+    ulong carry;
+    r[0] = gpumath_add_cc(r[0], GPUMATH_P0 & mask, carry);
+    r[1] = gpumath_addc_cc(r[1], GPUMATH_PN & mask, carry);
+    r[2] = gpumath_addc_cc(r[2], GPUMATH_PN & mask, carry);
+    r[3] = gpumath_addc(r[3], GPUMATH_PN & mask, carry);
+}
+
+static inline void ModSub256(thread ulong r[4], const thread ulong b[4]) {
+    ulong borrow;
+    r[0] = gpumath_sub_cc(r[0], b[0], borrow);
+    r[1] = gpumath_subc_cc(r[1], b[1], borrow);
+    r[2] = gpumath_subc_cc(r[2], b[2], borrow);
+    r[3] = gpumath_subc_cc(r[3], b[3], borrow);
+    const ulong final_borrow = borrow;
+    const ulong mask = 0ul - final_borrow;
+    ulong carry;
+    r[0] = gpumath_add_cc(r[0], GPUMATH_P0 & mask, carry);
+    r[1] = gpumath_addc_cc(r[1], GPUMATH_PN & mask, carry);
+    r[2] = gpumath_addc_cc(r[2], GPUMATH_PN & mask, carry);
+    r[3] = gpumath_addc(r[3], GPUMATH_PN & mask, carry);
+}
+
+static inline uchar ModSub256isOdd(const thread ulong a[4],
+                                   const thread ulong b[4]) {
+    ulong borrow;
+    const ulong t0 = gpumath_sub_cc(a[0], b[0], borrow);
+    (void)gpumath_subc_cc(a[1], b[1], borrow);
+    (void)gpumath_subc_cc(a[2], b[2], borrow);
+    (void)gpumath_subc_cc(a[3], b[3], borrow);
+    return uchar((t0 & 1ul) ^ (borrow & 1ul));
+}
+
+static inline void _ModMult(thread ulong r[4],
+                            const thread ulong a[4],
+                            const thread ulong b[4]) {
+    ulong r512[8];
+    ulong t[5];
+    ulong ah;
+    ulong al;
+
+    r512[5] = 0ul;
+    r512[6] = 0ul;
+    r512[7] = 0ul;
+
+    gpumath_umult(r512, a, b[0]);
+    gpumath_umult(t, a, b[1]);
+    ulong carry;
+    r512[1] = gpumath_add_cc(r512[1], t[0], carry);
+    r512[2] = gpumath_addc_cc(r512[2], t[1], carry);
+    r512[3] = gpumath_addc_cc(r512[3], t[2], carry);
+    r512[4] = gpumath_addc_cc(r512[4], t[3], carry);
+    r512[5] = gpumath_addc(r512[5], t[4], carry);
+
+    gpumath_umult(t, a, b[2]);
+    r512[2] = gpumath_add_cc(r512[2], t[0], carry);
+    r512[3] = gpumath_addc_cc(r512[3], t[1], carry);
+    r512[4] = gpumath_addc_cc(r512[4], t[2], carry);
+    r512[5] = gpumath_addc_cc(r512[5], t[3], carry);
+    r512[6] = gpumath_addc(r512[6], t[4], carry);
+
+    gpumath_umult(t, a, b[3]);
+    r512[3] = gpumath_add_cc(r512[3], t[0], carry);
+    r512[4] = gpumath_addc_cc(r512[4], t[1], carry);
+    r512[5] = gpumath_addc_cc(r512[5], t[2], carry);
+    r512[6] = gpumath_addc_cc(r512[6], t[3], carry);
+    r512[7] = gpumath_addc(r512[7], t[4], carry);
+
+    gpumath_umult_special(t, r512 + 4);
+    r512[0] = gpumath_add_cc(r512[0], t[0], carry);
+    r512[1] = gpumath_addc_cc(r512[1], t[1], carry);
+    r512[2] = gpumath_addc_cc(r512[2], t[2], carry);
+    r512[3] = gpumath_addc_cc(r512[3], t[3], carry);
+    t[4] = gpumath_addc(t[4], 0ul, carry);
+
+    al = t[4] * GPUMATH_REDUCTION;
+    ah = mulhi(t[4], GPUMATH_REDUCTION);
+    r[0] = gpumath_add_cc(r512[0], al, carry);
+    r[1] = gpumath_addc_cc(r512[1], ah, carry);
+    r[2] = gpumath_addc_cc(r512[2], 0ul, carry);
+    r[3] = gpumath_addc(r512[3], 0ul, carry);
+}
+
+static inline void _ModMult(thread ulong r[4], const thread ulong a[4]) {
+    ulong r512[8];
+    ulong t[5];
+    ulong ah;
+    ulong al;
+
+    r512[5] = 0ul;
+    r512[6] = 0ul;
+    r512[7] = 0ul;
+
+    gpumath_umult(r512, a, r[0]);
+    gpumath_umult(t, a, r[1]);
+    ulong carry;
+    r512[1] = gpumath_add_cc(r512[1], t[0], carry);
+    r512[2] = gpumath_addc_cc(r512[2], t[1], carry);
+    r512[3] = gpumath_addc_cc(r512[3], t[2], carry);
+    r512[4] = gpumath_addc_cc(r512[4], t[3], carry);
+    r512[5] = gpumath_addc(r512[5], t[4], carry);
+
+    gpumath_umult(t, a, r[2]);
+    r512[2] = gpumath_add_cc(r512[2], t[0], carry);
+    r512[3] = gpumath_addc_cc(r512[3], t[1], carry);
+    r512[4] = gpumath_addc_cc(r512[4], t[2], carry);
+    r512[5] = gpumath_addc_cc(r512[5], t[3], carry);
+    r512[6] = gpumath_addc(r512[6], t[4], carry);
+
+    gpumath_umult(t, a, r[3]);
+    r512[3] = gpumath_add_cc(r512[3], t[0], carry);
+    r512[4] = gpumath_addc_cc(r512[4], t[1], carry);
+    r512[5] = gpumath_addc_cc(r512[5], t[2], carry);
+    r512[6] = gpumath_addc_cc(r512[6], t[3], carry);
+    r512[7] = gpumath_addc(r512[7], t[4], carry);
+
+    gpumath_umult_special(t, r512 + 4);
+    r512[0] = gpumath_add_cc(r512[0], t[0], carry);
+    r512[1] = gpumath_addc_cc(r512[1], t[1], carry);
+    r512[2] = gpumath_addc_cc(r512[2], t[2], carry);
+    r512[3] = gpumath_addc_cc(r512[3], t[3], carry);
+    t[4] = gpumath_addc(t[4], 0ul, carry);
+
+    al = t[4] * GPUMATH_REDUCTION;
+    ah = mulhi(t[4], GPUMATH_REDUCTION);
+    r[0] = gpumath_add_cc(r512[0], al, carry);
+    r[1] = gpumath_addc_cc(r512[1], ah, carry);
+    r[2] = gpumath_addc_cc(r512[2], 0ul, carry);
+    r[3] = gpumath_addc(r512[3], 0ul, carry);
+}
+
+static inline void _ModSqr(thread ulong rp[4], const thread ulong up[4]) {
+    ulong r512[8];
+    ulong u10;
+    ulong u11;
+    ulong r0;
+    ulong r1;
+    ulong r3;
+    ulong r4;
+    ulong t1;
+    ulong t2;
+    ulong carry;
+
+    r512[0] = up[0] * up[0];
+    r1 = mulhi(up[0], up[0]);
+
+    r3 = up[0] * up[1];
+    r4 = mulhi(up[0], up[1]);
+    r3 = gpumath_add_cc(r3, r3, carry);
+    r4 = gpumath_addc_cc(r4, r4, carry);
+    t1 = gpumath_addc(0ul, 0ul, carry);
+    r3 = gpumath_add_cc(r3, r1, carry);
+    r4 = gpumath_addc_cc(r4, 0ul, carry);
+    t1 = gpumath_addc(t1, 0ul, carry);
+    r512[1] = r3;
+
+    r0 = up[0] * up[2];
+    r1 = mulhi(up[0], up[2]);
+    r0 = gpumath_add_cc(r0, r0, carry);
+    r1 = gpumath_addc_cc(r1, r1, carry);
+    t2 = gpumath_addc(0ul, 0ul, carry);
+    u10 = up[1] * up[1];
+    u11 = mulhi(up[1], up[1]);
+    r0 = gpumath_add_cc(r0, u10, carry);
+    r1 = gpumath_addc_cc(r1, u11, carry);
+    t2 = gpumath_addc(t2, 0ul, carry);
+    r0 = gpumath_add_cc(r0, r4, carry);
+    r1 = gpumath_addc_cc(r1, t1, carry);
+    t2 = gpumath_addc(t2, 0ul, carry);
+    r512[2] = r0;
+
+    r3 = up[0] * up[3];
+    r4 = mulhi(up[0], up[3]);
+    u10 = up[1] * up[2];
+    u11 = mulhi(up[1], up[2]);
+    r3 = gpumath_add_cc(r3, u10, carry);
+    r4 = gpumath_addc_cc(r4, u11, carry);
+    t1 = gpumath_addc(0ul, 0ul, carry);
+    t1 += t1;
+    r3 = gpumath_add_cc(r3, r3, carry);
+    r4 = gpumath_addc_cc(r4, r4, carry);
+    t1 = gpumath_addc(t1, 0ul, carry);
+    r3 = gpumath_add_cc(r3, r1, carry);
+    r4 = gpumath_addc_cc(r4, t2, carry);
+    t1 = gpumath_addc(t1, 0ul, carry);
+    r512[3] = r3;
+
+    r0 = up[1] * up[3];
+    r1 = mulhi(up[1], up[3]);
+    r0 = gpumath_add_cc(r0, r0, carry);
+    r1 = gpumath_addc_cc(r1, r1, carry);
+    t2 = gpumath_addc(0ul, 0ul, carry);
+    u10 = up[2] * up[2];
+    u11 = mulhi(up[2], up[2]);
+    r0 = gpumath_add_cc(r0, u10, carry);
+    r1 = gpumath_addc_cc(r1, u11, carry);
+    t2 = gpumath_addc(t2, 0ul, carry);
+    r0 = gpumath_add_cc(r0, r4, carry);
+    r1 = gpumath_addc_cc(r1, t1, carry);
+    t2 = gpumath_addc(t2, 0ul, carry);
+    r512[4] = r0;
+
+    r3 = up[2] * up[3];
+    r4 = mulhi(up[2], up[3]);
+    r3 = gpumath_add_cc(r3, r3, carry);
+    r4 = gpumath_addc_cc(r4, r4, carry);
+    t1 = gpumath_addc(0ul, 0ul, carry);
+    r3 = gpumath_add_cc(r3, r1, carry);
+    r4 = gpumath_addc_cc(r4, t2, carry);
+    t1 = gpumath_addc(t1, 0ul, carry);
+    r512[5] = r3;
+
+    r0 = up[3] * up[3];
+    r1 = mulhi(up[3], up[3]);
+    r0 = gpumath_add_cc(r0, r4, carry);
+    r1 = gpumath_addc(r1, t1, carry);
+    r512[6] = r0;
+    r512[7] = r1;
+
+    r0 = r512[4] * GPUMATH_REDUCTION;
+    r1 = r512[5] * GPUMATH_REDUCTION;
+    r1 = gpumath_mad_hi_cc(r512[4], GPUMATH_REDUCTION, r1, carry);
+    t2 = r512[6] * GPUMATH_REDUCTION;
+    t2 = gpumath_madc_hi_cc(r512[5], GPUMATH_REDUCTION, t2, carry);
+    r3 = r512[7] * GPUMATH_REDUCTION;
+    r3 = gpumath_madc_hi_cc(r512[6], GPUMATH_REDUCTION, r3, carry);
+    r4 = gpumath_madc_hi(r512[7], GPUMATH_REDUCTION, 0ul, carry);
+
+    r512[0] = gpumath_add_cc(r512[0], r0, carry);
+    r512[1] = gpumath_addc_cc(r512[1], r1, carry);
+    r512[2] = gpumath_addc_cc(r512[2], t2, carry);
+    r512[3] = gpumath_addc_cc(r512[3], r3, carry);
+    r4 = gpumath_addc(r4, 0ul, carry);
+
+    u10 = r4 * GPUMATH_REDUCTION;
+    u11 = mulhi(r4, GPUMATH_REDUCTION);
+    rp[0] = gpumath_add_cc(r512[0], u10, carry);
+    rp[1] = gpumath_addc_cc(r512[1], u11, carry);
+    rp[2] = gpumath_addc_cc(r512[2], 0ul, carry);
+    rp[3] = gpumath_addc(r512[3], 0ul, carry);
+}
+
+static inline void gpumath_shift_r62(thread ulong dest[5],
+                                     const thread ulong r[5],
+                                     ulong carry) {
+    dest[0] = (r[1] << 2u) | (r[0] >> 62u);
+    dest[1] = (r[2] << 2u) | (r[1] >> 62u);
+    dest[2] = (r[3] << 2u) | (r[2] >> 62u);
+    dest[3] = (r[4] << 2u) | (r[3] >> 62u);
+    dest[4] = (carry << 2u) | (r[4] >> 62u);
+}
+
+static inline ulong gpumath_imult_c(thread ulong r[5],
+                                    const thread ulong a[5],
+                                    long b) {
+    ulong t0;
+    ulong t1;
+    ulong t2;
+    ulong t3;
+    ulong t4;
+    if (b < 0l) {
+        b = -b;
+        ulong borrow;
+        t0 = gpumath_sub_cc(0ul, a[0], borrow);
+        t1 = gpumath_subc_cc(0ul, a[1], borrow);
+        t2 = gpumath_subc_cc(0ul, a[2], borrow);
+        t3 = gpumath_subc_cc(0ul, a[3], borrow);
+        t4 = gpumath_subc(0ul, a[4], borrow);
+    } else {
+        t0 = a[0];
+        t1 = a[1];
+        t2 = a[2];
+        t3 = a[3];
+        t4 = a[4];
+    }
+
+    const ulong ub = ulong(b);
+    ulong carry;
+    r[0] = t0 * ub;
+    r[1] = t1 * ub;
+    r[1] = gpumath_mad_hi_cc(t0, ub, r[1], carry);
+    r[2] = t2 * ub;
+    r[2] = gpumath_madc_hi_cc(t1, ub, r[2], carry);
+    r[3] = t3 * ub;
+    r[3] = gpumath_madc_hi_cc(t2, ub, r[3], carry);
+    r[4] = t4 * ub;
+    r[4] = gpumath_madc_hi_cc(t3, ub, r[4], carry);
+    return gpumath_madc_hi_signed(t4, ub, 0ul, carry);
+}
+
+static inline uint gpumath_ctz(ulong x) {
+    return ctz(x);
+}
+
+static inline ulong gpumath_shift_left_128(ulong a, ulong b, uint n) {
+    return (b << n) | (a >> (64u - n));
+}
+
+static inline void gpumath_div_step62(thread ulong u[5],
+                                      thread ulong v[5],
+                                      thread int* pos,
+                                      thread long* uu,
+                                      thread long* uv,
+                                      thread long* vu,
+                                      thread long* vv) {
+    *uu = 1l;
+    *uv = 0l;
+    *vu = 0l;
+    *vv = 1l;
+
+    uint bit_count = 62u;
+    ulong u0 = u[0];
+    ulong v0 = v[0];
+    ulong uh;
+    ulong vh;
+
+    while (*pos > 0 && (u[*pos] | v[*pos]) == 0ul) {
+        --*pos;
+    }
+    if (*pos == 0) {
+        uh = u[0];
+        vh = v[0];
+    } else {
+        const uint shift = clz(u[*pos] | v[*pos]);
+        if (shift == 0u) {
+            uh = u[*pos];
+            vh = v[*pos];
+        } else {
+            uh = gpumath_shift_left_128(u[*pos - 1], u[*pos], shift);
+            vh = gpumath_shift_left_128(v[*pos - 1], v[*pos], shift);
+        }
+    }
+
+    while (true) {
+        const uint zeros = gpumath_ctz(v0 | (1ul << bit_count));
+        v0 >>= zeros;
+        vh >>= zeros;
+        *uu = long(ulong(*uu) << zeros);
+        *uv = long(ulong(*uv) << zeros);
+        bit_count -= zeros;
+
+        if (bit_count == 0u) {
+            break;
+        }
+
+        if (vh < uh) {
+            const ulong tmp_h = uh;
+            uh = vh;
+            vh = tmp_h;
+            const ulong tmp_0 = u0;
+            u0 = v0;
+            v0 = tmp_0;
+            const long tmp_u = *uu;
+            *uu = *vu;
+            *vu = tmp_u;
+            const long tmp_v = *uv;
+            *uv = *vv;
+            *vv = tmp_v;
+        }
+
+        vh -= uh;
+        v0 -= u0;
+        *vv -= *uv;
+        *vu -= *uu;
+    }
+}
+
+static inline void gpumath_matrix_vec_mul_half(thread ulong dest[5],
+                                               const thread ulong u[5],
+                                               const thread ulong v[5],
+                                               long m11,
+                                               long m12,
+                                               thread ulong* carry) {
+    ulong t2[5];
+    const ulong c1 = gpumath_imult_c(dest, u, m11);
+    const ulong c2 = gpumath_imult_c(t2, v, m12);
+
+    ulong c;
+    dest[0] = gpumath_add_cc(dest[0], t2[0], c);
+    dest[1] = gpumath_addc_cc(dest[1], t2[1], c);
+    dest[2] = gpumath_addc_cc(dest[2], t2[2], c);
+    dest[3] = gpumath_addc_cc(dest[3], t2[3], c);
+    dest[4] = gpumath_addc_cc(dest[4], t2[4], c);
+    *carry = gpumath_addc(c1, c2, c);
+}
+
+static inline void gpumath_matrix_vec_mul(thread ulong u[5],
+                                          thread ulong v[5],
+                                          long m11,
+                                          long m12,
+                                          long m21,
+                                          long m22) {
+    ulong t1[5];
+    ulong t2[5];
+    ulong t3[5];
+    gpumath_imult(t1, u, m11);
+    gpumath_imult(t2, v, m12);
+    ulong carry;
+    t1[0] = gpumath_add_cc(t1[0], t2[0], carry);
+    t1[1] = gpumath_addc_cc(t1[1], t2[1], carry);
+    t1[2] = gpumath_addc_cc(t1[2], t2[2], carry);
+    t1[3] = gpumath_addc_cc(t1[3], t2[3], carry);
+    t1[4] = gpumath_addc(t1[4], t2[4], carry);
+
+    gpumath_imult(t3, u, m21);
+    gpumath_imult(t2, v, m22);
+    t3[0] = gpumath_add_cc(t3[0], t2[0], carry);
+    t3[1] = gpumath_addc_cc(t3[1], t2[1], carry);
+    t3[2] = gpumath_addc_cc(t3[2], t2[2], carry);
+    t3[3] = gpumath_addc_cc(t3[3], t2[3], carry);
+    t3[4] = gpumath_addc(t3[4], t2[4], carry);
+
+    gpumath_load320(u, t1);
+    gpumath_load320(v, t3);
+}
+
+static inline ulong gpumath_add_mul_p(thread ulong r[5],
+                                      ulong a,
+                                      ulong carry) {
+    const ulong al = a * GPUMATH_REDUCTION;
+    const ulong ah = mulhi(a, GPUMATH_REDUCTION);
+    ulong borrow;
+    r[0] = gpumath_sub_cc(r[0], al, borrow);
+    r[1] = gpumath_subc_cc(r[1], ah, borrow);
+    r[2] = gpumath_subc_cc(r[2], 0ul, borrow);
+    r[3] = gpumath_subc_cc(r[3], 0ul, borrow);
+    r[4] = gpumath_subc_cc(r[4], 0ul, borrow);
+    const ulong final_borrow = borrow;
+    ulong c;
+    r[4] = gpumath_add_cc(r[4], a, c);
+    // Undo the 2^320 wrap introduced when the direct subtraction borrows.
+    return carry + c - final_borrow;
+}
+
+__attribute__((noinline)) static void _ModInv(thread ulong R[5]) {
+    long uu;
+    long uv;
+    long vu;
+    long vv;
+    ulong mr0;
+    ulong ms0;
+    int pos = 4;
+
+    ulong u[5];
+    ulong v[5];
+    ulong r[5];
+    ulong s[5];
+    ulong tr[5];
+    ulong ts[5];
+    ulong carry_r;
+    ulong carry_s;
+
+    u[0] = GPUMATH_P0;
+    u[1] = GPUMATH_PN;
+    u[2] = GPUMATH_PN;
+    u[3] = GPUMATH_PN;
+    u[4] = 0ul;
+    gpumath_load320(v, R);
+    r[0] = 0ul;
+    s[0] = 1ul;
+    r[1] = 0ul;
+    s[1] = 0ul;
+    r[2] = 0ul;
+    s[2] = 0ul;
+    r[3] = 0ul;
+    s[3] = 0ul;
+    r[4] = 0ul;
+    s[4] = 0ul;
+
+    while (true) {
+        gpumath_div_step62(u, v, &pos, &uu, &uv, &vu, &vv);
+        gpumath_matrix_vec_mul(u, v, uu, uv, vu, vv);
+
+        if (gpumath_is_negative(u)) {
+            gpumath_neg320(u);
+            uu = -uu;
+            uv = -uv;
+        }
+        if (gpumath_is_negative(v)) {
+            gpumath_neg320(v);
+            vu = -vu;
+            vv = -vv;
+        }
+
+        gpumath_shift_r62(u);
+        gpumath_shift_r62(v);
+
+        gpumath_matrix_vec_mul_half(tr, r, s, uu, uv, &carry_r);
+        mr0 = (tr[0] * GPUMATH_MM64) & GPUMATH_MSK62;
+        carry_r = gpumath_add_mul_p(tr, mr0, carry_r);
+
+        if (gpumath_is_zero(v)) {
+            gpumath_shift_r62(r, tr, carry_r);
+            break;
+        }
+
+        gpumath_matrix_vec_mul_half(ts, r, s, vu, vv, &carry_s);
+        ms0 = (ts[0] * GPUMATH_MM64) & GPUMATH_MSK62;
+        carry_s = gpumath_add_mul_p(ts, ms0, carry_s);
+
+        gpumath_shift_r62(r, tr, carry_r);
+        gpumath_shift_r62(s, ts, carry_s);
+    }
+
+    if (!gpumath_is_one(u)) {
+        R[0] = 0ul;
+        R[1] = 0ul;
+        R[2] = 0ul;
+        R[3] = 0ul;
+        R[4] = 0ul;
+        return;
+    }
+
+    while (gpumath_is_negative(r)) {
+        gpumath_add_p(r);
+    }
+    while (!gpumath_is_negative(r)) {
+        gpumath_sub_p(r);
+    }
+    gpumath_add_p(r);
+    gpumath_load320(R, r);
+}

@@ -1,0 +1,128 @@
+#ifndef METAL_CRYPTO_HEXSET_RECOVERY_COMMON_METALH
+#define METAL_CRYPTO_HEXSET_RECOVERY_COMMON_METALH
+
+#include "HexsetSeqCommon.metalh"
+
+constant uchar RECOVERY_HEXSET_WILDCARD_NIBBLE = 0xffu;
+
+static inline bool recovery_hexset_materialize_candidate_exact(const device uchar* template_and_counter,
+                                                               const uint digit_count,
+                                                               const device uchar* alphabet,
+                                                               const uint base,
+                                                               const ulong offset,
+                                                               thread uchar* out_exact) {
+    if (template_and_counter == nullptr || digit_count == 0u || (digit_count & 1u) != 0u || base == 0u) {
+        return false;
+    }
+
+    const device uchar* templ = template_and_counter;
+    const device uchar* counter = template_and_counter + digit_count;
+    ulong carry = offset;
+    const int exact_size = int(digit_count >> 1);
+
+    switch (base) {
+        case 1u:
+            if (offset != 0ul) {
+                return false;
+            }
+            for (int byte_idx = exact_size - 1; byte_idx >= 0; --byte_idx) {
+                const uint lo_pos = uint((byte_idx << 1) + 1);
+                const uint hi_pos = uint(byte_idx << 1);
+                const uchar lo_t = templ[lo_pos];
+                const uchar hi_t = templ[hi_pos];
+                const uchar lo = (lo_t == RECOVERY_HEXSET_WILDCARD_NIBBLE) ? alphabet[0] : lo_t;
+                const uchar hi = (hi_t == RECOVERY_HEXSET_WILDCARD_NIBBLE) ? alphabet[0] : hi_t;
+                out_exact[byte_idx] = uchar((hi << 4u) | lo);
+            }
+            return true;
+        case 2u:
+        case 4u:
+        case 8u:
+        case 16u: {
+            const uint shift = (base == 2u) ? 1u : (base == 4u) ? 2u : (base == 8u) ? 3u : 4u;
+            const uint mask = base - 1u;
+            for (int byte_idx = exact_size - 1; byte_idx >= 0; --byte_idx) {
+                const uint lo_pos = uint((byte_idx << 1) + 1);
+                const uint hi_pos = uint(byte_idx << 1);
+
+                uchar lo;
+                const uchar lo_t = templ[lo_pos];
+                if (lo_t == RECOVERY_HEXSET_WILDCARD_NIBBLE) {
+                    uint digit = uint(counter[lo_pos]);
+                    digit += uint(hexset_next_addend_pow2(carry, mask, shift));
+                    if (digit >= base) {
+                        digit -= base;
+                        ++carry;
+                    }
+                    lo = alphabet[digit];
+                } else {
+                    lo = lo_t;
+                }
+
+                uchar hi;
+                const uchar hi_t = templ[hi_pos];
+                if (hi_t == RECOVERY_HEXSET_WILDCARD_NIBBLE) {
+                    uint digit = uint(counter[hi_pos]);
+                    digit += uint(hexset_next_addend_pow2(carry, mask, shift));
+                    if (digit >= base) {
+                        digit -= base;
+                        ++carry;
+                    }
+                    hi = alphabet[digit];
+                } else {
+                    hi = hi_t;
+                }
+
+                out_exact[byte_idx] = uchar((hi << 4u) | lo);
+            }
+            break;
+        }
+        default:
+            for (int byte_idx = exact_size - 1; byte_idx >= 0; --byte_idx) {
+                const uint lo_pos = uint((byte_idx << 1) + 1);
+                const uint hi_pos = uint(byte_idx << 1);
+
+                uchar lo;
+                const uchar lo_t = templ[lo_pos];
+                if (lo_t == RECOVERY_HEXSET_WILDCARD_NIBBLE) {
+                    uint digit = uint(counter[lo_pos]);
+                    digit += uint(hexset_next_addend_generic(carry, base));
+                    if (digit >= base) {
+                        digit -= base;
+                        ++carry;
+                    }
+                    lo = alphabet[digit];
+                } else {
+                    lo = lo_t;
+                }
+
+                uchar hi;
+                const uchar hi_t = templ[hi_pos];
+                if (hi_t == RECOVERY_HEXSET_WILDCARD_NIBBLE) {
+                    uint digit = uint(counter[hi_pos]);
+                    digit += uint(hexset_next_addend_generic(carry, base));
+                    if (digit >= base) {
+                        digit -= base;
+                        ++carry;
+                    }
+                    hi = alphabet[digit];
+                } else {
+                    hi = hi_t;
+                }
+
+                out_exact[byte_idx] = uchar((hi << 4u) | lo);
+            }
+            break;
+    }
+
+    return carry == 0ul;
+}
+
+static inline bool recovery_hexset_candidate_within_exact_bounds(const thread uchar*,
+                                                                 const device uchar*,
+                                                                 const device uchar*,
+                                                                 const uint) {
+    return true;
+}
+
+#endif

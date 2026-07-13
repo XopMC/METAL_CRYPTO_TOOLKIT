@@ -1,0 +1,137 @@
+#ifndef METAL_CRYPTO_HEXSET_SEQ_COMMON_METALH
+#define METAL_CRYPTO_HEXSET_SEQ_COMMON_METALH
+
+#include <metal_stdlib>
+using namespace metal;
+
+static inline uchar hexset_next_addend_generic(thread ulong& carry, const uint base) {
+    const uchar add = uchar(carry % ulong(base));
+    carry /= ulong(base);
+    return add;
+}
+
+static inline uchar hexset_next_addend_pow2(thread ulong& carry, const uint mask, const uint shift) {
+    const uchar add = uchar(carry & ulong(mask));
+    carry >>= shift;
+    return add;
+}
+
+static inline bool hexset_materialize_candidate_exact(const device uchar* start_digits,
+                                                      const uint digit_count,
+                                                      const device uchar* alphabet,
+                                                      const uint base,
+                                                      const ulong offset,
+                                                      thread uchar* out_exact) {
+    if (digit_count == 0u || (digit_count & 1u) != 0u || base == 0u) {
+        return false;
+    }
+
+    if (base == 1u) {
+        if (offset != 0ul) {
+            return false;
+        }
+        const int exact_size = int(digit_count >> 1);
+        const uchar packed = uchar((alphabet[0] << 4u) | alphabet[0]);
+        for (int byte_idx = 0; byte_idx < exact_size; ++byte_idx) {
+            out_exact[byte_idx] = packed;
+        }
+        return true;
+    }
+
+    ulong carry = offset;
+    const int exact_size = int(digit_count >> 1);
+
+    switch (base) {
+        case 2u:
+        case 4u:
+        case 8u:
+        case 16u: {
+            const uint shift = (base == 2u) ? 1u : (base == 4u) ? 2u : (base == 8u) ? 3u : 4u;
+            const uint mask = base - 1u;
+            for (int byte_idx = exact_size - 1; byte_idx >= 0; --byte_idx) {
+                const uint lo_pos = uint((byte_idx << 1) + 1);
+                const uint hi_pos = uint(byte_idx << 1);
+
+                uint lo_digit = uint(start_digits[lo_pos]);
+                lo_digit += uint(hexset_next_addend_pow2(carry, mask, shift));
+                if (lo_digit >= base) {
+                    lo_digit -= base;
+                    ++carry;
+                }
+
+                uint hi_digit = uint(start_digits[hi_pos]);
+                hi_digit += uint(hexset_next_addend_pow2(carry, mask, shift));
+                if (hi_digit >= base) {
+                    hi_digit -= base;
+                    ++carry;
+                }
+
+                out_exact[byte_idx] = uchar((alphabet[hi_digit] << 4u) | alphabet[lo_digit]);
+            }
+            break;
+        }
+        default:
+            for (int byte_idx = exact_size - 1; byte_idx >= 0; --byte_idx) {
+                const uint lo_pos = uint((byte_idx << 1) + 1);
+                const uint hi_pos = uint(byte_idx << 1);
+
+                uint lo_digit = uint(start_digits[lo_pos]);
+                lo_digit += uint(hexset_next_addend_generic(carry, base));
+                if (lo_digit >= base) {
+                    lo_digit -= base;
+                    ++carry;
+                }
+
+                uint hi_digit = uint(start_digits[hi_pos]);
+                hi_digit += uint(hexset_next_addend_generic(carry, base));
+                if (hi_digit >= base) {
+                    hi_digit -= base;
+                    ++carry;
+                }
+
+                out_exact[byte_idx] = uchar((alphabet[hi_digit] << 4u) | alphabet[lo_digit]);
+            }
+            break;
+    }
+
+    return carry == 0ul;
+}
+
+static inline void hexset_zero_pad_left(thread uchar* dst,
+                                        const uint total_size,
+                                        const thread uchar* src_exact,
+                                        const uint exact_size) {
+    const uint pad = (total_size > exact_size) ? (total_size - exact_size) : 0u;
+    for (uint i = 0u; i < pad; ++i) {
+        dst[i] = 0u;
+    }
+    for (uint i = 0u; i < exact_size; ++i) {
+        dst[pad + i] = src_exact[i];
+    }
+}
+
+static inline int hexset_compare_exact_bytes(const thread uchar* lhs,
+                                             const device uchar* rhs,
+                                             const uint exact_size) {
+    for (uint i = 0u; i < exact_size; ++i) {
+        if (lhs[i] != rhs[i]) {
+            return (lhs[i] < rhs[i]) ? -1 : 1;
+        }
+    }
+    return 0;
+}
+
+static inline bool hexset_candidate_within_exact_bounds(const thread uchar* exact_candidate,
+                                                        const device uchar* lower_exact,
+                                                        const device uchar* upper_exact,
+                                                        const uint exact_size) {
+    if (lower_exact != nullptr && hexset_compare_exact_bytes(exact_candidate, lower_exact, exact_size) < 0) {
+        return false;
+    }
+    if (upper_exact != nullptr && hexset_compare_exact_bytes(exact_candidate, upper_exact, exact_size) > 0) {
+        return false;
+    }
+    return true;
+}
+
+#endif

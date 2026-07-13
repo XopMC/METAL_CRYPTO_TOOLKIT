@@ -1,0 +1,382 @@
+#ifndef METAL_CRYPTO_WORKER_BRAIN_COMMON_METALH
+#define METAL_CRYPTO_WORKER_BRAIN_COMMON_METALH
+
+#include "WorkerPrivCommon.metalh"
+#include "HexsetSeqCommon.metalh"
+#include "HexsetRecoveryCommon.metalh"
+
+#ifndef METAL_CRYPTO_TARGET_FC_DECLARED
+#define METAL_CRYPTO_TARGET_FC_DECLARED
+constant bool TFC_COMPRESSED [[function_constant(0)]];
+constant bool TFC_UNCOMPRESSED [[function_constant(1)]];
+constant bool TFC_SEGWIT [[function_constant(2)]];
+constant bool TFC_P2WSH [[function_constant(3)]];
+constant bool TFC_TAPROOT [[function_constant(4)]];
+constant bool TFC_ETHEREUM [[function_constant(5)]];
+constant bool TFC_XPOINT [[function_constant(6)]];
+constant bool TFC_XRP_SECP [[function_constant(7)]];
+constant bool TFC_SUI_SECP [[function_constant(8)]];
+constant bool TFC_IOTA_SECP [[function_constant(9)]];
+constant bool TFC_APTOS_SECP [[function_constant(10)]];
+constant bool TFC_ICP_SECP [[function_constant(11)]];
+constant bool TFC_FIL_SECP [[function_constant(12)]];
+constant bool TFC_XTZ_SECP [[function_constant(13)]];
+constant bool TFC_SECP_ANY [[function_constant(14)]];
+constant bool TFC_ED_ANY [[function_constant(15)]];
+constant bool TFC_SOLANA [[function_constant(16)]];
+constant bool TFC_DOT [[function_constant(17)]];
+constant bool TFC_ADA [[function_constant(18)]];
+constant bool TFC_TON [[function_constant(19)]];
+constant bool TFC_TON_ALL [[function_constant(20)]];
+constant bool TFC_XRP_ED [[function_constant(21)]];
+constant bool TFC_APTOS_ED [[function_constant(22)]];
+constant bool TFC_SUI_ED [[function_constant(23)]];
+constant bool TFC_IOTA_ED [[function_constant(24)]];
+constant bool TFC_ICP_ED [[function_constant(25)]];
+constant bool TFC_XTZ_ED [[function_constant(26)]];
+#endif
+
+constant uint BRAIN_THREAD_STEPS = 16u;
+constant uint BRAIN_PHRASE_BYTES = 512u;
+
+static inline void brain_hexing(const thread uchar* src, uint src_len, thread uchar* dst, uint dst_len) {
+    const thread uchar hex_chars[16] = {
+        '0', '1', '2', '3', '4', '5', '6', '7',
+        '8', '9', 'a', 'b', 'c', 'd', 'e', 'f'
+    };
+    const uint count = min(src_len, dst_len >> 1u);
+    for (uint i = 0u; i < count; ++i) {
+        const uchar v = src[i];
+        dst[i * 2u] = hex_chars[v >> 4u];
+        dst[i * 2u + 1u] = hex_chars[v & 0x0fu];
+    }
+}
+
+static inline void brain_make_found(thread FoundBuffers& found,
+                                    device RuntimeConfig& config,
+                                    device char* foundStrings,
+                                    device uchar* foundPrvKeys,
+                                    device uint* foundHash160,
+                                    device uint* foundLen,
+                                    device uint* foundIter,
+                                    device uchar* foundType,
+                                    device uint* foundDerivations,
+                                    device uint* foundDerivations2,
+                                    device long* foundRound,
+                                    device atomic_uint* resultsCount) {
+    found.foundStrings = foundStrings;
+    found.foundPrvKeys = foundPrvKeys;
+    found.foundHash160 = foundHash160;
+    found.len = foundLen;
+    found.iter = foundIter;
+    found.type = foundType;
+    found.foundDerivations = foundDerivations;
+    found.foundDerivations2 = foundDerivations2;
+    found.pass = nullptr;
+    found.passSize = nullptr;
+    found.round = foundRound;
+    found.seed = nullptr;
+    found.resultsCount = resultsCount;
+    found.maxFounds = config.maxFounds;
+}
+
+static inline void brain_make_found_with_seed(thread FoundBuffers& found,
+                                              device RuntimeConfig& config,
+                                              device char* foundStrings,
+                                              device uchar* foundPrvKeys,
+                                              device uint* foundHash160,
+                                              device uint* foundLen,
+                                              device uint* foundIter,
+                                              device uchar* foundType,
+                                              device uint* foundDerivations,
+                                              device uint* foundDerivations2,
+                                              device long* foundRound,
+                                              device ulong* foundSeed,
+                                              device atomic_uint* resultsCount) {
+    brain_make_found(found, config, foundStrings, foundPrvKeys, foundHash160, foundLen,
+                     foundIter, foundType, foundDerivations, foundDerivations2, foundRound,
+                     resultsCount);
+    found.seed = foundSeed;
+}
+
+static inline void brain_copy_device_phrase(thread char dst[BRAIN_PHRASE_BYTES],
+                                            const device char* src,
+                                            uint len) {
+    const uint copy_len = min(len, BRAIN_PHRASE_BYTES);
+    for (uint i = 0u; i < copy_len; ++i) {
+        dst[i] = src[i];
+    }
+    for (uint i = copy_len; i < BRAIN_PHRASE_BYTES; ++i) {
+        dst[i] = 0;
+    }
+}
+
+static inline void brain_hash_key(const thread char* phrase,
+                                  uint len,
+                                  uchar brain_mode,
+                                  uint iteration,
+                                  bool utf8_local,
+                                  bool raw_mode_enabled,
+                                  thread uchar out_key[32]) {
+    const uint safe_len = min(len, BRAIN_PHRASE_BYTES);
+    switch (brain_mode) {
+        case 1u:
+            sha3_256(phrase, int(safe_len), out_key);
+            for (uint i = 1u; i < iteration; ++i) {
+                if (utf8_local) {
+                    uchar hash_local[64] = { 0 };
+                    brain_hexing(out_key, 32u, hash_local, 64u);
+                    sha3_256(reinterpret_cast<thread char*>(hash_local), 64, out_key);
+                } else {
+                    sha3_256(reinterpret_cast<thread char*>(out_key), 32, out_key);
+                }
+            }
+            break;
+        case 2u:
+            keccak(phrase, int(safe_len), out_key, 32);
+            for (uint i = 1u; i < iteration; ++i) {
+                if (utf8_local) {
+                    uchar hash_local[64] = { 0 };
+                    brain_hexing(out_key, 32u, hash_local, 64u);
+                    keccak(reinterpret_cast<thread char*>(hash_local), 64, out_key, 32);
+                } else {
+                    keccak(reinterpret_cast<thread char*>(out_key), 32, out_key, 32);
+                }
+            }
+            break;
+        case 3u:
+            Blake2b_256(reinterpret_cast<const thread uchar*>(phrase), safe_len, out_key);
+            for (uint i = 1u; i < iteration; ++i) {
+                if (utf8_local) {
+                    uchar hash_local[64] = { 0 };
+                    brain_hexing(out_key, 32u, hash_local, 64u);
+                    Blake2b_256(hash_local, 64u, out_key);
+                } else {
+                    Blake2b_256(out_key, 32u, out_key);
+                }
+            }
+            break;
+        case 4u:
+            if (raw_mode_enabled) {
+                for (uint i = 0u; i < 32u; ++i) {
+                    if (safe_len >= 32u) {
+                        out_key[i] = uchar(phrase[(safe_len - 32u) + i]);
+                    } else {
+                        out_key[i] = (i < (32u - safe_len)) ? 0u : uchar(phrase[i - (32u - safe_len)]);
+                    }
+                }
+                break;
+            }
+            [[fallthrough]];
+        default:
+            SHA256(reinterpret_cast<const thread uchar*>(phrase), safe_len, out_key);
+            for (uint i = 1u; i < iteration; ++i) {
+                if (utf8_local) {
+                    uchar hash_local[64] = { 0 };
+                    brain_hexing(out_key, 32u, hash_local, 64u);
+                    SHA256(hash_local, 64u, out_key);
+                } else {
+                    SHA256(out_key, 32u, out_key);
+                }
+            }
+            break;
+    }
+}
+
+static inline void brain_process_rounds(device bool* isResult,
+                                        device bool* buffResult,
+                                        constant secp256k1_ge_storage* precPtr,
+                                        ulong precPitch,
+                                        thread char phrases[BRAIN_THREAD_STEPS][BRAIN_PHRASE_BYTES],
+                                        thread uint lens[BRAIN_THREAD_STEPS],
+                                        thread uchar prvKeys[BRAIN_THREAD_STEPS * 32u],
+                                        int privKeyIx,
+                                        ulong round,
+                                        uint iteration,
+                                        device RuntimeConfig& config,
+                                        device XorFilterState& filters,
+                                        device FilterStorageState& filter_storage,
+                                        const device uchar* bloom_storage,
+                                        const device uchar* xor_storage,
+                                        const device uchar* xor_un_storage,
+                                        const device uchar* xor_uc_storage,
+                                        const device uchar* xor_hc_storage,
+                                        FoundBuffers found,
+                                        const thread ulong* seedValues,
+                                        bool storeSeed,
+                                        const device SubstratePathDevice* substratePaths) {
+    if (privKeyIx <= 0) {
+        return;
+    }
+    if (round > 0ul) {
+        bump_all_keys(prvKeys, privKeyIx, round, false, nullptr);
+    }
+
+    uchar pubKeys[BRAIN_THREAD_STEPS * 65u];
+    uchar pubKeysED[BRAIN_THREAD_STEPS * 32u];
+
+    const bool secp256_dev = TFC_SECP_ANY && config.secp256 != 0u && config.secpTargetsAny != 0u;
+    const bool ed25519_dev = TFC_ED_ANY && config.ed25519 != 0u && config.edTargetsAny != 0u;
+    const bool compressed = TFC_COMPRESSED && config.compressed != 0u;
+    const bool uncompressed = TFC_UNCOMPRESSED && config.uncompressed != 0u;
+    const bool segwit = TFC_SEGWIT && config.segwit != 0u;
+    const bool p2wsh = TFC_P2WSH && config.p2wsh != 0u;
+    const bool taproot = TFC_TAPROOT && config.taproot != 0u;
+    const bool ethereum = TFC_ETHEREUM && config.ethereum != 0u;
+    const bool xpoint = TFC_XPOINT && config.xpoint != 0u;
+    const bool xrp_secp = TFC_XRP_SECP && config.xrp != 0u;
+    const bool sui_secp = TFC_SUI_SECP && config.sui != 0u;
+    const bool iota_secp = TFC_IOTA_SECP && config.iota != 0u;
+    const bool aptos_secp = TFC_APTOS_SECP && config.aptos != 0u;
+    const bool icp_secp = TFC_ICP_SECP && config.icp != 0u;
+    const bool fil_secp = TFC_FIL_SECP && config.fil != 0u;
+    const bool xtz_secp = TFC_XTZ_SECP && config.xtz != 0u;
+    const bool solana = TFC_SOLANA && config.solana != 0u;
+    const bool ton = TFC_TON && config.ton != 0u;
+    const bool ton_all = TFC_TON_ALL && config.tonAll != 0u;
+    const bool dot = TFC_DOT && config.dot != 0u;
+    const bool aptos_ed = TFC_APTOS_ED && config.aptos != 0u;
+    const bool sui_ed = TFC_SUI_ED && config.sui != 0u;
+    const bool xrp_ed = TFC_XRP_ED && config.xrp != 0u;
+    const bool iota_ed = TFC_IOTA_ED && config.iota != 0u;
+    const bool ada = TFC_ADA && config.ada != 0u;
+    const bool icp_ed = TFC_ICP_ED && config.icp != 0u;
+    const bool xtz_ed = TFC_XTZ_ED && config.xtz != 0u;
+
+    for (ulong i = 0ul; i <= 2ul * round; ++i) {
+        const long current_round = long(i) - long(round);
+
+        if (secp256_dev) {
+            if (i == 0ul) {
+                secp256k1_ec_pubkey_create_serialized_batch_myunsafe(pubKeys,
+                                                                     prvKeys,
+                                                                     privKeyIx,
+                                                                     precPtr,
+                                                                     size_t(precPitch));
+            }
+            uchar tap_hash[32u * BRAIN_THREAD_STEPS];
+            if (taproot) {
+                TweakTaproot_batch(tap_hash, pubKeys, privKeyIx, precPtr, size_t(precPitch));
+            }
+            for (uint pkField = 0u; pkField < BRAIN_THREAD_STEPS && pkField < uint(privKeyIx); ++pkField) {
+                const ulong seed_value = (seedValues == nullptr) ? 0ul : seedValues[pkField];
+                priv_emit_secp_targets_round(isResult, buffResult, phrases[pkField], ulong(lens[pkField]),
+                                             prvKeys, pubKeys, tap_hash, pkField, 0u, current_round,
+                                             iteration, true, compressed, uncompressed, segwit, p2wsh,
+                                             taproot, ethereum, xpoint, xrp_secp, sui_secp,
+                                             aptos_secp, iota_secp, icp_secp, fil_secp, xtz_secp,
+                                             config, filters, filter_storage, bloom_storage,
+                                             xor_storage, xor_un_storage, xor_uc_storage, xor_hc_storage,
+                                             found, storeSeed, seed_value);
+            }
+        }
+
+        if (ed25519_dev) {
+            priv_ed25519_key_to_pub_batch_config(prvKeys, pubKeysED, privKeyIx, config);
+            for (uint pkField = 0u; pkField < BRAIN_THREAD_STEPS && pkField < uint(privKeyIx); ++pkField) {
+                const ulong seed_value = (seedValues == nullptr) ? 0ul : seedValues[pkField];
+                const uint pk4 = pkField * 32u;
+                thread uchar* publ = pubKeysED + pk4;
+                thread uchar* pkey = prvKeys + pk4;
+                const thread uchar* next_key = nullptr;
+                if (pkField < uint(privKeyIx - 1)) {
+                    next_key = prvKeys + pk4 + 32u;
+                }
+                priv_emit_ed_targets_round(isResult, buffResult, phrases[pkField], ulong(lens[pkField]),
+                                           pkey, next_key, publ, 0u, current_round, iteration, true,
+                                           solana, dot, ton, ton_all, xrp_ed, aptos_ed, sui_ed,
+                                           iota_ed, ada, icp_ed, xtz_ed, substratePaths, config,
+                                           filters, filter_storage,
+                                           bloom_storage, xor_storage, xor_un_storage, xor_uc_storage,
+                                           xor_hc_storage, found, storeSeed, seed_value);
+            }
+        }
+
+        if (i < 2ul * round) {
+            int zeroz[32] = { 0 };
+            const int wrapped = bump_all_keys(prvKeys, privKeyIx, 1ul, true, zeroz);
+            if (secp256_dev) {
+                if (wrapped != 0) {
+                    for (int n = 0; n < privKeyIx; ++n) {
+                        if (zeroz[n] != 0) {
+                            thread uchar* dst = pubKeys + uint(zeroz[n] - 1) * 65u;
+                            for (uint k = 0u; k < 65u; ++k) {
+                                dst[k] = PRIV_SECP_G65[k];
+                            }
+                        }
+                    }
+                }
+                priv_pub_add_basepoint_batch(pubKeys, privKeyIx, +1, precPtr);
+            }
+        }
+    }
+}
+
+static inline bool brain_fill_seq_phrase(thread char phrase[BRAIN_PHRASE_BYTES],
+                                         thread uint& len,
+                                         const device uchar* start_point_dev,
+                                         int mode,
+                                         int min_len,
+                                         ulong idx) {
+    uint c[64];
+    uint r[64];
+    uchar toHash[256];
+    loadBE2048toWords(start_point_dev, c);
+    if (mode == 1) {
+        add64to2048_device(c, idx, r);
+    } else {
+        sub64from2048_device(c, idx, r);
+    }
+    len = uint(sizeBE2048_device(r));
+    if (len < uint(min_len)) {
+        len = uint(min_len);
+    }
+    storeWordsToBE2048(r, toHash);
+    for (uint j = 0u; j < min(len, 256u); ++j) {
+        phrase[j] = char(toHash[256u - len + j]);
+    }
+    for (uint j = min(len, 256u); j < BRAIN_PHRASE_BYTES; ++j) {
+        phrase[j] = 0;
+    }
+    return true;
+}
+
+static inline bool brain_fill_hexset_phrase(thread char phrase[BRAIN_PHRASE_BYTES],
+                                            thread uint& len,
+                                            const device uchar* hexset_start_digits,
+                                            const device uchar* hexset_lower_exact,
+                                            const device uchar* hexset_upper_exact,
+                                            const device uchar* hexset_alphabet,
+                                            uint hexset_base,
+                                            uint hexset_size,
+                                            ulong offset,
+                                            bool recovery_mode) {
+    if (hexset_size == 0u || hexset_size > 256u) {
+        return false;
+    }
+    uchar exact[256];
+    bool ok = recovery_mode
+        ? recovery_hexset_materialize_candidate_exact(hexset_start_digits, hexset_size * 2u,
+                                                      hexset_alphabet, hexset_base, offset, exact)
+        : hexset_materialize_candidate_exact(hexset_start_digits, hexset_size * 2u,
+                                             hexset_alphabet, hexset_base, offset, exact);
+    if (!ok) {
+        return false;
+    }
+    bool in_bounds = recovery_mode
+        ? recovery_hexset_candidate_within_exact_bounds(exact, hexset_lower_exact, hexset_upper_exact, hexset_size)
+        : hexset_candidate_within_exact_bounds(exact, hexset_lower_exact, hexset_upper_exact, hexset_size);
+    if (!in_bounds) {
+        return false;
+    }
+    len = hexset_size;
+    for (uint i = 0u; i < hexset_size; ++i) {
+        phrase[i] = char(exact[i]);
+    }
+    for (uint i = hexset_size; i < BRAIN_PHRASE_BYTES; ++i) {
+        phrase[i] = 0;
+    }
+    return true;
+}
+
+#endif

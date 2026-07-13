@@ -1,0 +1,32 @@
+# macOS metadata
+.DS_Store
+._*
+.AppleDouble
+
+# Build products
+/build/
+/bin/
+/METAL_CRYPTO_TOOLKIT
+*.air
+*.metallib
+*.o
+*.d
+
+# Local verification and performance tooling
+/tools/
+/_perf/
+__pycache__/
+*.pyc
+
+# Local inputs, outputs, and logs
+/*.txt
+/*.log
+*.crash
+*.ips
+
+# Release packaging
+/*.tar
+/*.tar.gz
+/*.tgz
+/*.zip
+/*.sha256

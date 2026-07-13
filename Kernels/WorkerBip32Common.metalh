@@ -1,0 +1,681 @@
+#ifndef METAL_CRYPTO_WORKER_BIP32_COMMON_METALH
+#define METAL_CRYPTO_WORKER_BIP32_COMMON_METALH
+
+#include "WorkerMnemonicCommon.metalh"
+
+struct Bip32RuntimeBuffers {
+    device RuntimeConfig* config [[id(0)]];
+    device XorFilterState* filters [[id(1)]];
+    device FilterStorageState* filterStorage [[id(2)]];
+    const device uchar* bloomStorage [[id(3)]];
+    const device uchar* xorStorage [[id(4)]];
+    const device uchar* xorUnStorage [[id(5)]];
+    const device uchar* xorUcStorage [[id(6)]];
+    const device uchar* xorHcStorage [[id(7)]];
+    device char* foundStrings [[id(8)]];
+    device uchar* foundPrvKeys [[id(9)]];
+    device uint* foundHash160 [[id(10)]];
+    device uint* foundLen [[id(11)]];
+    device uint* foundIter [[id(12)]];
+    device uchar* foundType [[id(13)]];
+    device uint* foundDerivations [[id(14)]];
+    device uint* foundDerivations2 [[id(15)]];
+    device char* foundPass [[id(16)]];
+    device ushort* foundPassSize [[id(17)]];
+    device long* foundRound [[id(18)]];
+    device ulong* foundSeed [[id(19)]];
+    device atomic_uint* resultsCount [[id(20)]];
+    const device SubstratePathDevice* substratePaths [[id(21)]];
+};
+
+static inline bool bip32_make_found_from_runtime(thread FoundBuffers& found,
+                                                 const device Bip32RuntimeBuffers& runtime) {
+    if (runtime.config == nullptr || runtime.filters == nullptr || runtime.filterStorage == nullptr) {
+        return false;
+    }
+    der_make_found_buffers(runtime.foundStrings, runtime.foundPrvKeys, runtime.foundHash160,
+                           runtime.foundLen, runtime.foundIter, runtime.foundType,
+                           runtime.foundDerivations, runtime.foundDerivations2,
+                           runtime.foundPass, runtime.foundPassSize, runtime.foundRound,
+                           runtime.foundSeed, runtime.resultsCount, runtime.config->maxFounds,
+                           found);
+    return true;
+}
+
+static inline void bip32_get_child_key_cip1852(const thread extended_private_key_t* master_private,
+                                               const device uint* deriv,
+                                               uint path_len,
+                                               thread uchar out32[32]) {
+    if (path_len == 0u) {
+        mnw_copy_thread_uchar(out32, master_private->key, 32u);
+        return;
+    }
+
+    extended_private_key_t k = *master_private;
+    for (uint i = 0u; i < path_len; ++i) {
+        const uint idx = deriv[i];
+        if ((idx & 0x80000000u) != 0u) {
+            ed25519_bip32_ckd_priv_hardened(&k, &k, idx);
+        } else {
+            ed25519_bip32_ckd_priv_normal(&k, &k, idx);
+        }
+    }
+    mnw_copy_thread_uchar(out32, k.key, 32u);
+}
+
+static inline bool bip32_transform_passphrase(const thread char* input,
+                                              uint input_len,
+                                              uchar bip_mode,
+                                              uint iteration,
+                                              bool utf8_local,
+                                              thread uchar seed[128],
+                                              thread const char*& passphrase,
+                                              thread ulong& passphrase_len) {
+    uint hash_len = 0u;
+    switch (bip_mode) {
+        case 0u:
+            hmac_sha256(reinterpret_cast<const thread uchar*>(input), size_t(input_len),
+                        seed, 32u, seed);
+            for (uint i = 1u; i < iteration; ++i) {
+                hash_len = input_len;
+                if (utf8_local) {
+                    hash_len = input_len * 2u;
+                    uchar hash_local[64] = { 0 };
+                    mnw_hexing(seed, 32u, hash_local, 64u);
+                    mnw_copy_thread_uchar(seed, hash_local, 64u);
+                }
+                hmac_sha256(reinterpret_cast<const thread uchar*>(input), size_t(hash_len),
+                            seed, 32u, seed);
+            }
+            passphrase = reinterpret_cast<const thread char*>(seed);
+            passphrase_len = 32ul;
+            return true;
+        case 1u:
+            SHA256(reinterpret_cast<const thread uchar*>(input), size_t(input_len), seed);
+            for (uint i = 1u; i < iteration; ++i) {
+                hash_len = 32u;
+                if (utf8_local) {
+                    hash_len = 64u;
+                    uchar hash_local[64] = { 0 };
+                    mnw_hexing(seed, 32u, hash_local, 64u);
+                    mnw_copy_thread_uchar(seed, hash_local, 64u);
+                }
+                SHA256(seed, size_t(hash_len), seed);
+            }
+            passphrase = reinterpret_cast<const thread char*>(seed);
+            passphrase_len = 32ul;
+            return true;
+        case 2u:
+            SHA512(reinterpret_cast<const thread uchar*>(input), ulong(input_len), seed);
+            for (uint i = 1u; i < iteration; ++i) {
+                hash_len = 64u;
+                if (utf8_local) {
+                    hash_len = 128u;
+                    uchar hash_local[128] = { 0 };
+                    mnw_hexing(seed, 64u, hash_local, 128u);
+                    mnw_copy_thread_uchar(seed, hash_local, 128u);
+                }
+                SHA512(seed, ulong(hash_len), seed);
+            }
+            passphrase = reinterpret_cast<const thread char*>(seed);
+            passphrase_len = 64ul;
+            return true;
+        case 3u:
+            keccak(input, int(input_len), seed, 32);
+            for (uint i = 1u; i < iteration; ++i) {
+                hash_len = 32u;
+                if (utf8_local) {
+                    hash_len = 64u;
+                    uchar hash_local[64] = { 0 };
+                    mnw_hexing(seed, 32u, hash_local, 64u);
+                    mnw_copy_thread_uchar(seed, hash_local, 64u);
+                }
+                keccak(reinterpret_cast<thread char*>(seed), int(hash_len), seed, 32);
+            }
+            passphrase = reinterpret_cast<const thread char*>(seed);
+            passphrase_len = 32ul;
+            return true;
+        case 4u:
+            sha3_256(input, int(input_len), seed);
+            for (uint i = 1u; i < iteration; ++i) {
+                hash_len = 32u;
+                if (utf8_local) {
+                    hash_len = 64u;
+                    uchar hash_local[64] = { 0 };
+                    mnw_hexing(seed, 32u, hash_local, 64u);
+                    mnw_copy_thread_uchar(seed, hash_local, 64u);
+                }
+                sha3_256(reinterpret_cast<thread char*>(seed), int(hash_len), seed);
+            }
+            passphrase = reinterpret_cast<const thread char*>(seed);
+            passphrase_len = 32ul;
+            return true;
+        case 5u:
+            MD5(reinterpret_cast<const thread uchar*>(input), size_t(input_len), seed);
+            for (uint i = 1u; i < iteration; ++i) {
+                hash_len = 16u;
+                if (utf8_local) {
+                    hash_len = 32u;
+                    uchar hash_local[32] = { 0 };
+                    mnw_hexing(seed, 16u, hash_local, 32u);
+                    mnw_copy_thread_uchar(seed, hash_local, 32u);
+                }
+                MD5(seed, size_t(hash_len), seed);
+            }
+            passphrase = reinterpret_cast<const thread char*>(seed);
+            passphrase_len = 16ul;
+            return true;
+        case 6u:
+            passphrase = input;
+            passphrase_len = ulong(input_len);
+            return true;
+        default:
+            hmac_sha256(reinterpret_cast<const thread uchar*>(input), size_t(input_len),
+                        seed, 32u, seed);
+            for (uint i = 1u; i < iteration; ++i) {
+                hash_len = input_len;
+                if (utf8_local) {
+                    hash_len = input_len * 2u;
+                    uchar hash_local[64] = { 0 };
+                    mnw_hexing(seed, 32u, hash_local, 64u);
+                    mnw_copy_thread_uchar(seed, hash_local, 64u);
+                }
+                hmac_sha256(reinterpret_cast<const thread uchar*>(input), size_t(hash_len),
+                            seed, 32u, seed);
+            }
+            passphrase = reinterpret_cast<const thread char*>(seed);
+            passphrase_len = 32ul;
+            return true;
+    }
+}
+
+static inline void bip32_emit_dot_suri_from_master(device bool* isResult,
+                                                   device bool* buffResult,
+                                                   const thread char* toHash,
+                                                   ulong len,
+                                                   const thread extended_private_key_t* ed_master,
+                                                   uint iter_value,
+                                                   ulong buff_index,
+                                                   bool store_seed,
+                                                   ulong seed_value,
+                                                   device RuntimeConfig& config,
+                                                   const device SubstratePathDevice* substratePaths,
+                                                   device XorFilterState& filters,
+                                                   device FilterStorageState& storage,
+                                                   const device uchar* bloom_storage,
+                                                   const device uchar* xor_storage,
+                                                   const device uchar* xor_un_storage,
+                                                   const device uchar* xor_uc_storage,
+                                                   const device uchar* xor_hc_storage,
+                                                   FoundBuffers found) {
+    if (ed_master == nullptr) {
+        return;
+    }
+    adadot_emit_dot_substrate_from_seed(isResult, buffResult, toHash, len, ed_master->key,
+                                        0l, 0u, nullptr, 0u, buff_index, store_seed,
+                                        seed_value, iter_value, true, config, substratePaths,
+                                        filters, storage, bloom_storage, xor_storage,
+                                        xor_un_storage, xor_uc_storage, xor_hc_storage, found);
+}
+
+static inline void bip32_process_paths(device bool* isResult,
+                                       device bool* buffResult,
+                                       const thread char* toHash,
+                                       ulong len,
+                                       const thread extended_private_key_t* master_private,
+                                       const thread extended_private_key_t* ed25519_master_private,
+                                       const device uint* d_derivations,
+                                       const device uint* derindex,
+                                       uint der_indexes_size,
+                                       uint der_start_index,
+                                       ulong round,
+                                       ulong buff_index,
+                                       bool store_seed,
+                                       ulong seed_value,
+                                       uint iter_value,
+                                       bool store_p2wsh_iter,
+                                       constant secp256k1_ge_storage* precPtr,
+                                       ulong precPitch,
+                                       device RuntimeConfig& config,
+                                       device XorFilterState& filters,
+                                       device FilterStorageState& storage,
+                                       const device uchar* bloom_storage,
+                                       const device uchar* xor_storage,
+                                       const device uchar* xor_un_storage,
+                                       const device uchar* xor_uc_storage,
+                                       const device uchar* xor_hc_storage,
+                                       FoundBuffers found,
+                                       const device SubstratePathDevice* substratePaths) {
+    if (d_derivations == nullptr || derindex == nullptr) {
+        return;
+    }
+
+    const bool run_bip32_paths = (MNW_FC_SECP_ANY || MNW_FC_ED_ANY) &&
+                                 config.secp256 != 0u &&
+                                 config.bipDerivationsEnabled != 0u &&
+                                 target_derivation_type_enabled(config, DERIVATION_TYPE_MASK_BIP32);
+    const bool run_slip0010_paths = MNW_FC_ED_ANY &&
+                                    config.ed25519 != 0u &&
+                                    config.bipDerivationsEnabled != 0u &&
+                                    target_derivation_type_enabled(config, DERIVATION_TYPE_MASK_SLIP0010);
+    const bool run_bip32_ed25519_paths = MNW_FC_ED_ANY &&
+                                         config.ed25519 != 0u &&
+                                         config.bipDerivationsEnabled != 0u &&
+                                         target_derivation_type_enabled(config, DERIVATION_TYPE_MASK_BIP32_ED25519);
+    const bool run_dot_suri_paths = MNW_FC_DOT && config.dot != 0u && config.substratePathCount > 0u;
+    const bool skip_secp_for_solana_only = MNW_FC_SOLANA && config.solana != 0u &&
+                                           (!MNW_FC_SECP_ANY || config.secpTargetsAny == 0u);
+
+    if (run_dot_suri_paths && config.bipDerivationsEnabled == 0u) {
+        bip32_emit_dot_suri_from_master(isResult, buffResult, toHash, len,
+                                        ed25519_master_private, iter_value, buff_index,
+                                        store_seed, seed_value, config, substratePaths,
+                                        filters, storage, bloom_storage, xor_storage,
+                                        xor_un_storage, xor_uc_storage, xor_hc_storage, found);
+    }
+
+    uint processed_se = 0u;
+    uint processed_ed = 0u;
+    uint processed_bip32_ed = 0u;
+    uint c_path = 0u;
+
+    for (uint start_point = der_start_index; start_point < der_indexes_size; ++start_point) {
+        const uint path_len = derindex[start_point];
+
+        if (run_bip32_paths && master_private != nullptr) {
+            const uint current_offset = processed_se;
+            uchar prvKeys[32] = { 0 };
+            der_get_child_key_secp256k1(precPtr, size_t(precPitch), master_private,
+                                        d_derivations + current_offset, path_len, prvKeys);
+            processed_se += path_len;
+
+            uchar bip32_base_key[32] = { 0 };
+            uchar bip32_next_key[32] = { 0 };
+            const thread uchar* bip32_next_key_ptr = nullptr;
+            mnw_copy_thread_uchar(bip32_base_key, prvKeys, 32u);
+            if (MNW_FC_ADA && config.ada != 0u && start_point + 1u < der_indexes_size) {
+                const uint next_len = derindex[start_point + 1u];
+                const uint next_offset = current_offset + path_len;
+                if (!mnw_derivation_path_equal(d_derivations, current_offset, path_len,
+                                               next_offset, next_len)) {
+                    der_get_child_key_secp256k1(precPtr, size_t(precPitch), master_private,
+                                                d_derivations + next_offset, next_len,
+                                                bip32_next_key);
+                    bip32_next_key_ptr = bip32_next_key;
+                }
+            }
+            mnw_emit_ed_targets_from_key(isResult, buffResult, toHash, len, bip32_base_key,
+                                         bip32_next_key_ptr, c_path, round, 0u, nullptr, 0u,
+                                         buff_index, store_seed, seed_value, iter_value, true,
+                                         true, config, substratePaths, filters, storage,
+                                         bloom_storage, xor_storage, xor_un_storage,
+                                         xor_uc_storage, xor_hc_storage, found);
+            if (!skip_secp_for_solana_only) {
+                mnw_emit_secp_targets_from_key(isResult, buffResult, toHash, len, prvKeys, c_path,
+                                               round, 0u, nullptr, 0u, buff_index, store_seed,
+                                               seed_value, iter_value, true, store_p2wsh_iter, precPtr, precPitch,
+                                               config, filters, storage, bloom_storage, xor_storage,
+                                               xor_un_storage, xor_uc_storage, xor_hc_storage, found);
+            }
+        }
+
+        if (run_slip0010_paths && ed25519_master_private != nullptr) {
+            const uint current_offset = processed_ed;
+            uchar sol_priv[32] = { 0 };
+            der_get_child_key_ed25519(ed25519_master_private,
+                                      d_derivations + current_offset,
+                                      path_len, sol_priv);
+            processed_ed += path_len;
+
+            if (!skip_secp_for_solana_only) {
+                uchar slip_base_key[32] = { 0 };
+                mnw_copy_thread_uchar(slip_base_key, sol_priv, 32u);
+                mnw_emit_secp_targets_from_key(isResult, buffResult, toHash, len, slip_base_key,
+                                               c_path, round, 0u, nullptr, 0u, buff_index,
+                                               store_seed, seed_value, iter_value, true, store_p2wsh_iter,
+                                               precPtr, precPitch, config, filters, storage,
+                                               bloom_storage, xor_storage, xor_un_storage,
+                                               xor_uc_storage, xor_hc_storage, found);
+            }
+            mnw_emit_ed_targets_from_key(isResult, buffResult, toHash, len, sol_priv, nullptr,
+                                         c_path, round, 0u, nullptr, 0u, buff_index,
+                                         store_seed, seed_value, iter_value, true, false,
+                                         config, substratePaths, filters, storage,
+                                         bloom_storage, xor_storage, xor_un_storage,
+                                         xor_uc_storage, xor_hc_storage, found);
+        }
+
+        if (c_path == 0u && run_dot_suri_paths && config.bipDerivationsEnabled != 0u) {
+            bip32_emit_dot_suri_from_master(isResult, buffResult, toHash, len,
+                                            ed25519_master_private, iter_value, buff_index,
+                                            store_seed, seed_value, config, substratePaths,
+                                            filters, storage, bloom_storage, xor_storage,
+                                            xor_un_storage, xor_uc_storage, xor_hc_storage,
+                                            found);
+        }
+
+        if (run_bip32_ed25519_paths && ed25519_master_private != nullptr) {
+            const uint current_offset = processed_bip32_ed;
+            uchar cardano_base_key[32] = { 0 };
+            bip32_get_child_key_cip1852(ed25519_master_private,
+                                        d_derivations + current_offset, path_len,
+                                        cardano_base_key);
+            processed_bip32_ed += path_len;
+
+            uchar cardano_next_key[32] = { 0 };
+            const thread uchar* cardano_next_key_ptr = nullptr;
+            if (MNW_FC_ADA && config.ada != 0u && start_point + 1u < der_indexes_size) {
+                const uint next_len = derindex[start_point + 1u];
+                const uint next_offset = current_offset + path_len;
+                if (!mnw_derivation_path_equal(d_derivations, current_offset, path_len,
+                                               next_offset, next_len)) {
+                    bip32_get_child_key_cip1852(ed25519_master_private,
+                                                d_derivations + next_offset, next_len,
+                                                cardano_next_key);
+                    cardano_next_key_ptr = cardano_next_key;
+                }
+            }
+            if (!skip_secp_for_solana_only) {
+                mnw_emit_secp_targets_from_key(isResult, buffResult, toHash, len, cardano_base_key,
+                                               c_path, round, 0u, nullptr, 0u, buff_index,
+                                               store_seed, seed_value, iter_value, true, store_p2wsh_iter,
+                                               precPtr, precPitch, config, filters, storage,
+                                               bloom_storage, xor_storage, xor_un_storage,
+                                               xor_uc_storage, xor_hc_storage, found);
+            }
+            mnw_emit_ed_targets_from_key(isResult, buffResult, toHash, len, cardano_base_key,
+                                         cardano_next_key_ptr, c_path, round, 0u, nullptr, 0u,
+                                         buff_index, store_seed, seed_value, iter_value, true,
+                                         true, config, substratePaths, filters, storage,
+                                         bloom_storage, xor_storage, xor_un_storage,
+                                         xor_uc_storage, xor_hc_storage, found);
+        }
+
+        ++c_path;
+    }
+}
+
+static inline void bip32_process_candidate(device bool* isResult,
+                                           device bool* buffResult,
+                                           const thread char* toHash,
+                                           uint len,
+                                           uchar bip_mode,
+                                           uint iteration,
+                                           const device uint* d_derivations,
+                                           const device uint* derindex,
+                                           uint der_indexes_size,
+                                           uint der_start_index,
+                                           ulong round,
+                                           ulong buff_index,
+                                           bool store_seed,
+                                           ulong seed_value,
+                                           bool store_p2wsh_iter,
+                                           constant secp256k1_ge_storage* precPtr,
+                                           ulong precPitch,
+                                           device RuntimeConfig& config,
+                                           device XorFilterState& filters,
+                                           device FilterStorageState& storage,
+                                           const device uchar* bloom_storage,
+                                           const device uchar* xor_storage,
+                                           const device uchar* xor_un_storage,
+                                           const device uchar* xor_uc_storage,
+                                           const device uchar* xor_hc_storage,
+                                           FoundBuffers found,
+                                           const device SubstratePathDevice* substratePaths) {
+    if (len > 512u) {
+        return;
+    }
+
+    uchar seed[128] = { 0 };
+    thread const char* passphrase = nullptr;
+    ulong passphrase_len = 0ul;
+    if (!bip32_transform_passphrase(toHash, len, bip_mode, iteration,
+                                    config.utf8 != 0u, seed, passphrase,
+                                    passphrase_len)) {
+        return;
+    }
+
+    const bool need_bip32 = (MNW_FC_SECP_ANY || MNW_FC_ED_ANY) &&
+                            config.secp256 != 0u &&
+                            config.bipDerivationsEnabled != 0u &&
+                            target_derivation_type_enabled(config, DERIVATION_TYPE_MASK_BIP32);
+    const bool need_ed = MNW_FC_ED_ANY &&
+                         config.ed25519 != 0u &&
+                         config.bipDerivationsEnabled != 0u &&
+                         target_derivation_type_enabled(config, DERIVATION_TYPE_MASK_SLIP0010 |
+                                                               DERIVATION_TYPE_MASK_BIP32_ED25519);
+    const bool need_dot_suri = MNW_FC_DOT && config.dot != 0u && config.substratePathCount > 0u;
+    const bool need_ed_or_dot = need_ed || need_dot_suri;
+
+    uchar bip32_seed[64] = { 0 };
+    uchar ed_seed[64] = { 0 };
+    thread extended_private_key_t* master_private = nullptr;
+    thread extended_private_key_t* ed25519_master_private = nullptr;
+
+    if (need_ed_or_dot) {
+        if (config.tonMnemonic == 0u) {
+            if (passphrase_len == 64ul) {
+                HMAC_SHA512_ED25519_SEED_64(reinterpret_cast<const thread uchar*>(passphrase), ed_seed);
+            } else {
+                HMAC_SHA512(ed_key, 12ul, reinterpret_cast<const thread uchar*>(passphrase),
+                            passphrase_len, ed_seed);
+            }
+        } else {
+            fastpbkdf2_hmac_sha512(reinterpret_cast<const thread uchar*>(passphrase),
+                                   passphrase_len, ton_salt, 16ul, 100000ul, ed_seed,
+                                   64ul);
+        }
+        ed25519_master_private = reinterpret_cast<thread extended_private_key_t*>(ed_seed);
+    }
+    if (need_bip32) {
+        if (passphrase_len == 64ul) {
+            HMAC_SHA512_BTC_SEED_64(reinterpret_cast<const thread uchar*>(passphrase), bip32_seed);
+        } else {
+            HMAC_SHA512(MNW_BTC_SEED_KEY, 12ul, reinterpret_cast<const thread uchar*>(passphrase),
+                        passphrase_len, bip32_seed);
+        }
+        master_private = reinterpret_cast<thread extended_private_key_t*>(bip32_seed);
+    }
+
+    bip32_process_paths(isResult, buffResult, toHash, ulong(len), master_private,
+                        ed25519_master_private, d_derivations, derindex, der_indexes_size,
+                        der_start_index, round, buff_index, store_seed, seed_value,
+                        iteration, store_p2wsh_iter, precPtr, precPitch, config, filters, storage,
+                        bloom_storage, xor_storage, xor_un_storage, xor_uc_storage,
+                        xor_hc_storage, found, substratePaths);
+}
+
+static inline void bip32_worker_file(device bool* isResult,
+                                     device bool* buffResult,
+                                     constant secp256k1_ge_storage* precPtr,
+                                     ulong precPitch,
+                                     const device char* lines,
+                                     const device uint* indexes,
+                                     uint indexes_size,
+                                     const device uint* d_derivations,
+                                     const device uint* derindex,
+                                     uint der_indexes_size,
+                                     uint der_start_index,
+                                     uchar bip_mode,
+                                     const device uint* iterations,
+                                     uint iterations_size,
+                                     ulong round,
+                                     uint tid,
+                                     device RuntimeConfig& config,
+                                     device XorFilterState& filters,
+                                     device FilterStorageState& storage,
+                                     const device uchar* bloom_storage,
+                                     const device uchar* xor_storage,
+                                     const device uchar* xor_un_storage,
+                                     const device uchar* xor_uc_storage,
+                                     const device uchar* xor_hc_storage,
+                                     FoundBuffers found,
+                                     const device SubstratePathDevice* substratePaths) {
+    if (tid >= indexes_size || lines == nullptr || indexes == nullptr ||
+        iterations == nullptr || iterations_size == 0u) {
+        return;
+    }
+    const uint start = tid == 0u ? 0u : indexes[tid - 1u];
+    const uint end = indexes[tid];
+    if (end < start) {
+        return;
+    }
+    uint len = min(end - start, 512u);
+    char toHash[512] = { 0 };
+    mnw_copy_device_char_to_thread(toHash, lines + start, len);
+
+    for (uint i = 0u; i < iterations_size; ++i) {
+        bip32_process_candidate(isResult, buffResult, toHash, len, bip_mode, iterations[i],
+                                d_derivations, derindex, der_indexes_size, der_start_index,
+                                round, ulong(tid), false, 0ul, false, precPtr, precPitch, config,
+                                filters, storage, bloom_storage, xor_storage, xor_un_storage,
+                                xor_uc_storage, xor_hc_storage, found, substratePaths);
+    }
+}
+
+static inline void bip32_worker_gen(device bool* isResult,
+                                    device bool* buffResult,
+                                    constant secp256k1_ge_storage* precPtr,
+                                    ulong precPitch,
+                                    const device uint* d_derivations,
+                                    const device uint* derindex,
+                                    uint der_indexes_size,
+                                    uint der_start_index,
+                                    uchar bip_mode,
+                                    uint iteration,
+                                    ulong seed_d,
+                                    ulong seed_count,
+                                    bool is_64,
+                                    int entropy_len_i,
+                                    int mode,
+                                    int gen,
+                                    ulong round,
+                                    uint tid,
+                                    device RuntimeConfig& config,
+                                    device XorFilterState& filters,
+                                    device FilterStorageState& storage,
+                                    const device uchar* bloom_storage,
+                                    const device uchar* xor_storage,
+                                    const device uchar* xor_un_storage,
+                                    const device uchar* xor_uc_storage,
+                                    const device uchar* xor_hc_storage,
+                                    FoundBuffers found,
+                                    const device SubstratePathDevice* substratePaths) {
+    if (tid >= seed_count || entropy_len_i <= 0 || entropy_len_i > 512) {
+        return;
+    }
+    const ulong seed_value = seed_d + ulong(tid);
+    uchar entropy[512] = { 0 };
+    const uint entropy_len = uint(entropy_len_i);
+    if (!mnw_entropy_fill(entropy_len, entropy, seed_value, is_64, mode, gen, config.skip64)) {
+        return;
+    }
+
+    char toHash[512] = { 0 };
+    mnw_copy_thread_uchar(reinterpret_cast<thread uchar*>(toHash), entropy, entropy_len);
+    bip32_process_candidate(isResult, buffResult, toHash, entropy_len, bip_mode, iteration,
+                            d_derivations, derindex, der_indexes_size, der_start_index, round,
+                            ulong(tid), true, seed_value, true, precPtr, precPitch, config, filters,
+                            storage, bloom_storage, xor_storage, xor_un_storage, xor_uc_storage,
+                            xor_hc_storage, found, substratePaths);
+}
+
+static inline void bip32_worker_seq(device bool* isResult,
+                                    device bool* buffResult,
+                                    constant secp256k1_ge_storage* precPtr,
+                                    ulong precPitch,
+                                    const device uint* d_derivations,
+                                    const device uint* derindex,
+                                    uint der_indexes_size,
+                                    uint der_start_index,
+                                    int mode,
+                                    const device uchar* start_point,
+                                    int min_len,
+                                    uchar bip_mode,
+                                    uint iteration,
+                                    ulong round,
+                                    uint tid,
+                                    device RuntimeConfig& config,
+                                    device XorFilterState& filters,
+                                    device FilterStorageState& storage,
+                                    const device uchar* bloom_storage,
+                                    const device uchar* xor_storage,
+                                    const device uchar* xor_un_storage,
+                                    const device uchar* xor_uc_storage,
+                                    const device uchar* xor_hc_storage,
+                                    FoundBuffers found,
+                                    const device SubstratePathDevice* substratePaths) {
+    if (start_point == nullptr) {
+        return;
+    }
+    const ulong starter = ulong(tid) * config.seqStep;
+    uchar entropy[512] = { 0 };
+    uint len = 0u;
+    mnw_build_entropy_seq4096(start_point, mode, starter, min_len, entropy, len);
+    char toHash[512] = { 0 };
+    mnw_copy_thread_uchar(reinterpret_cast<thread uchar*>(toHash), entropy, len);
+    bip32_process_candidate(isResult, buffResult, toHash, len, bip_mode, iteration,
+                            d_derivations, derindex, der_indexes_size, der_start_index,
+                            round, starter, false, 0ul, true, precPtr, precPitch, config,
+                            filters, storage, bloom_storage, xor_storage, xor_un_storage,
+                            xor_uc_storage, xor_hc_storage, found, substratePaths);
+}
+
+static inline void bip32_worker_seq_hexset(bool recovery,
+                                           device bool* isResult,
+                                           device bool* buffResult,
+                                           constant secp256k1_ge_storage* precPtr,
+                                           ulong precPitch,
+                                           const device uint* d_derivations,
+                                           const device uint* derindex,
+                                           uint der_indexes_size,
+                                           uint der_start_index,
+                                           const device uchar* hexset_start_digits,
+                                           const device uchar* hexset_lower_exact,
+                                           const device uchar* hexset_upper_exact,
+                                           const device uchar* hexset_alphabet,
+                                           uint hexset_base,
+                                           uint hexset_size,
+                                           ulong gpu_stride,
+                                           uchar bip_mode,
+                                           uint iteration,
+                                           ulong round,
+                                           uint tid,
+                                           device RuntimeConfig& config,
+                                           device XorFilterState& filters,
+                                           device FilterStorageState& storage,
+                                           const device uchar* bloom_storage,
+                                           const device uchar* xor_storage,
+                                           const device uchar* xor_un_storage,
+                                           const device uchar* xor_uc_storage,
+                                           const device uchar* xor_hc_storage,
+                                           FoundBuffers found,
+                                           const device SubstratePathDevice* substratePaths) {
+    if (hexset_size == 0u || hexset_size > 512u || gpu_stride == 0ul) {
+        return;
+    }
+    const ulong starter = ulong(tid) * gpu_stride;
+    uchar exact[512] = { 0 };
+    const bool materialized = recovery
+        ? mnw_recovery_hexset_materialize_candidate_exact(hexset_start_digits, hexset_size * 2u,
+                                                          hexset_alphabet, hexset_base,
+                                                          starter, exact)
+        : mnw_hexset_materialize_candidate_exact(hexset_start_digits, hexset_size * 2u,
+                                                 hexset_alphabet, hexset_base, starter,
+                                                 exact);
+    if (!materialized ||
+        !mnw_hexset_candidate_within_exact_bounds(exact, hexset_lower_exact,
+                                                  hexset_upper_exact, hexset_size, recovery)) {
+        return;
+    }
+
+    char toHash[512] = { 0 };
+    mnw_copy_thread_uchar(reinterpret_cast<thread uchar*>(toHash), exact, hexset_size);
+    bip32_process_candidate(isResult, buffResult, toHash, hexset_size, bip_mode, iteration,
+                            d_derivations, derindex, der_indexes_size, der_start_index,
+                            round, starter, false, 0ul, true, precPtr, precPitch, config, filters,
+                            storage, bloom_storage, xor_storage, xor_un_storage, xor_uc_storage,
+                            xor_hc_storage, found, substratePaths);
+}
+
+#endif

@@ -1,0 +1,127 @@
+#ifndef METAL_CRYPTO_WORKER_PASS_THREAD_COMMON_METALH
+#define METAL_CRYPTO_WORKER_PASS_THREAD_COMMON_METALH
+
+#include "WorkerCommon.metalh"
+#include "WorkerMnemonicCommon.metalh"
+
+constant uint PASS_THREAD_STRIDE_METAL = 128u;
+
+static inline void pass_thread_copy_single_mnemonic(thread char dst[512],
+                                                    thread ulong& len,
+                                                    const device char* src,
+                                                    uint src_len) {
+    len = ulong(min(src_len, 512u));
+    for (uint i = 0u; i < uint(len); ++i) {
+        dst[i] = src[i];
+    }
+    for (uint i = uint(len); i < 512u; ++i) {
+        dst[i] = 0;
+    }
+}
+
+static inline void pass_thread_process_phrase(device bool* isResult,
+                                              device bool* buffResult,
+                                              constant secp256k1_ge_storage* precPtr,
+                                              ulong precPitch,
+                                              const device char* single_mnem,
+                                              uint single_mnem_len,
+                                              const device uint* d_derivations,
+                                              const device uint* derindex,
+                                              uint der_indexes_size,
+                                              uint der_start_index,
+                                              const device char* passwords,
+                                              const device uchar* pass_lengths,
+                                              uint pass_count,
+                                              ulong round,
+                                              uchar m_mode,
+                                              const device uint* iterations,
+                                              uint iterations_size,
+                                              bool is_str,
+                                              const device WorkerRuntimeBuffers& runtime,
+                                              uint tid) {
+    if (tid >= pass_count || single_mnem == nullptr || passwords == nullptr ||
+        pass_lengths == nullptr || iterations == nullptr || iterations_size == 0u) {
+        return;
+    }
+
+    WorkerEnv env;
+    FoundBuffers found;
+    if (!worker_init_env(env, found, isResult, buffResult, precPtr, precPitch, runtime)) {
+        return;
+    }
+
+    const device char* passStart = passwords + ulong(tid) * ulong(PASS_THREAD_STRIDE_METAL);
+    const uint passSize = min(uint(pass_lengths[tid]), PASS_THREAD_STRIDE_METAL);
+
+    for (uint num = 0u; num < iterations_size; ++num) {
+        char toHash[512];
+        ulong len = 0ul;
+        pass_thread_copy_single_mnemonic(toHash, len, single_mnem, single_mnem_len);
+        const uint iter = iterations[num];
+        worker_transform_material(toHash, len, m_mode, iter, (*env.config).utf8 != 0u, is_str);
+        worker_process_candidate(env, toHash, len, d_derivations, derindex, der_indexes_size,
+                                 der_start_index, passStart, passSize, tid, round, ulong(tid),
+                                 false, 0ul, iter, false);
+    }
+}
+
+static inline void pass_thread_process_entropy(device bool* isResult,
+                                               device bool* buffResult,
+                                               constant secp256k1_ge_storage* precPtr,
+                                               ulong precPitch,
+                                               const device char* single_entropy,
+                                               uint single_entropy_len,
+                                               const device uint* d_derivations,
+                                               const device uint* derindex,
+                                               uint der_indexes_size,
+                                               uint der_start_index,
+                                               const device char* passwords,
+                                               const device uchar* pass_lengths,
+                                               uint pass_count,
+                                               bool custom_size,
+                                               const device int* sizes,
+                                               uint sizez_size,
+                                               uchar entropy_mode,
+                                               const device uint* iterations,
+                                               uint iterations_size,
+                                               ulong round,
+                                               const device WorkerRuntimeBuffers& runtime,
+                                               uint tid) {
+    if (tid >= pass_count || single_entropy == nullptr || passwords == nullptr ||
+        pass_lengths == nullptr || iterations == nullptr || iterations_size == 0u) {
+        return;
+    }
+
+    WorkerEnv env;
+    FoundBuffers found;
+    if (!worker_init_env(env, found, isResult, buffResult, precPtr, precPitch, runtime)) {
+        return;
+    }
+
+    uint raw_len = min(single_entropy_len, 512u);
+    uchar raw_entropy[512] = { 0 };
+    for (uint i = 0u; i < raw_len; ++i) {
+        raw_entropy[i] = uchar(single_entropy[i]);
+    }
+
+    const device char* passStart = passwords + ulong(tid) * ulong(PASS_THREAD_STRIDE_METAL);
+    const uint passSize = min(uint(pass_lengths[tid]), PASS_THREAD_STRIDE_METAL);
+    const uint size_count = custom_size ? sizez_size : 1u;
+
+    for (uint num = 0u; num < iterations_size; ++num) {
+        const uint iter = iterations[num];
+        for (uint suz = 0u; suz < size_count; ++suz) {
+            const int custom_len = (custom_size && sizes != nullptr) ? sizes[suz] : int(raw_len);
+            mnw_process_entropy_candidate(isResult, buffResult, raw_entropy, raw_len, true,
+                                          d_derivations, derindex, der_indexes_size, der_start_index,
+                                          passStart, passSize, tid, custom_size, custom_len,
+                                          entropy_mode, iter, round, ulong(tid), precPtr, precPitch,
+                                          *runtime.config, *runtime.filters, *runtime.filterStorage,
+                                          runtime.bloomStorage, runtime.xorStorage, runtime.xorUnStorage,
+                                          runtime.xorUcStorage, runtime.xorHcStorage, found,
+                                          runtime.substratePaths, runtime.customDict);
+        }
+    }
+}
+
+#endif

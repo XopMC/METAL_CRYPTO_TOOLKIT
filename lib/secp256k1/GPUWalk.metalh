@@ -1,0 +1,317 @@
+#ifndef METAL_CRYPTO_SECP256K1_GPU_WALK_METALH
+#define METAL_CRYPTO_SECP256K1_GPU_WALK_METALH
+
+#include <metal_stdlib>
+#include "GPUMath.metalh"
+
+using namespace metal;
+
+#ifndef METAL_VANITY_GROUP_SIZE
+#define METAL_VANITY_GROUP_SIZE 1024
+#endif
+
+constant uint VS_GRP_SIZE = uint(METAL_VANITY_GROUP_SIZE);
+constant uint VS_GRP_HALF = VS_GRP_SIZE / 2u;
+constant uint VS_GRP_TABLE_WORDS = VS_GRP_HALF * 4u;
+
+static inline void gpu_walk_load256_device(thread ulong r[4],
+                                           const device ulong* a) {
+    r[0] = a[0];
+    r[1] = a[1];
+    r[2] = a[2];
+    r[3] = a[3];
+}
+
+static inline void gpu_walk_load256_thread(thread ulong r[4],
+                                           const thread ulong a[4]) {
+    r[0] = a[0];
+    r[1] = a[1];
+    r[2] = a[2];
+    r[3] = a[3];
+}
+
+// VanitySearch-style 1024-point walk with one batch inversion.
+// Gx and Gy are flattened [VS_GRP_HALF][4] tables in little-limb order.
+// For NeedFullY=false, callbacks must only consume py[0] & 1.
+template <bool NeedFullY, typename Fn>
+static inline void vanity_walk_batch_1024_impl(
+    thread ulong sx[4],
+    thread ulong sy[4],
+    const device ulong* Gx,
+    const device ulong* Gy,
+    const device ulong* _2Gnx,
+    const device ulong* _2Gny,
+    bool reverse,
+    thread Fn& fn_process_point)
+{
+    ulong dx[4], px[4], py[4], py_full[4], dy[4];
+    ulong sxn[4], syn[4], sx_gx[4];
+    ulong gx[4], gy[4], two_gnx[4], two_gny[4];
+    uchar odd_py;
+    ulong inverse[5];
+    ulong subp[VS_GRP_HALF][4];
+
+    gpu_walk_load256_device(two_gnx, _2Gnx);
+    gpu_walk_load256_device(two_gny, _2Gny);
+    if (reverse) {
+        ModNeg256(two_gny);
+    }
+
+    // Center of the group: P.
+    gpu_walk_load256_thread(py_full, sy);
+    fn_process_point(sx, py_full, int(VS_GRP_HALF));
+
+    ModSub256(sxn, two_gnx, sx);
+    gpu_walk_load256_thread(subp[VS_GRP_HALF - 1u], sxn);
+    for (int i = int(VS_GRP_HALF) - 1; i > 0; --i) {
+        gpu_walk_load256_device(gx, Gx + uint(i) * 4u);
+        ModSub256(syn, gx, sx);
+        _ModMult(sxn, syn);
+        gpu_walk_load256_thread(subp[uint(i) - 1u], sxn);
+    }
+
+    gpu_walk_load256_device(gx, Gx);
+    ModSub256(inverse, gx, sx);
+    _ModMult(inverse, sxn);
+    inverse[4] = 0ul;
+    _ModInv(inverse);
+
+    ModNeg256(syn, sy);
+    ModNeg256(sxn, sx);
+
+    uint i;
+    for (i = 0u; i < VS_GRP_HALF - 1u; ++i) {
+        gpu_walk_load256_device(gx, Gx + i * 4u);
+        gpu_walk_load256_device(gy, Gy + i * 4u);
+        if (reverse) {
+            ModNeg256(gy);
+        }
+
+        ModSub256(sx_gx, gx, sxn);
+        _ModMult(dx, subp[i], inverse);
+
+        // Positive point: P + (i + 1) * G.
+        ModSub256(dy, gy, sy);
+        _ModMult(dy, dx);
+        _ModSqr(px, dy);
+        ModSub256(px, sx_gx);
+        ModSub256(py, sx, px);
+        _ModMult(py, dy);
+        if (NeedFullY) {
+            ModSub256(py_full, py, sy);
+        } else {
+            odd_py = ModSub256isOdd(py, sy);
+            py_full[0] = (py_full[0] & ~1ul) | ulong(odd_py);
+        }
+        fn_process_point(px, py_full, int(VS_GRP_HALF + i + 1u));
+
+        // Negative point: P - (i + 1) * G.
+        ModSub256(dy, syn, gy);
+        _ModMult(dy, dx);
+        _ModSqr(px, dy);
+        ModSub256(px, sx_gx);
+        ModSub256(py, px, sx);
+        _ModMult(py, dy);
+        if (NeedFullY) {
+            ModNeg256(py_full, py);
+            ModSub256(py_full, py_full, sy);
+        } else {
+            odd_py = ModSub256isOdd(syn, py);
+            py_full[0] = (py_full[0] & ~1ul) | ulong(odd_py);
+        }
+        fn_process_point(px, py_full, int(VS_GRP_HALF - (i + 1u)));
+
+        ModSub256(dx, gx, sx);
+        _ModMult(inverse, dx);
+    }
+
+    // Last negative point: P - 512 * G, pkField = 0.
+    gpu_walk_load256_device(gx, Gx + i * 4u);
+    gpu_walk_load256_device(gy, Gy + i * 4u);
+    if (reverse) {
+        ModNeg256(gy);
+    }
+    _ModMult(dx, subp[i], inverse);
+    ModSub256(dy, syn, gy);
+    _ModMult(dy, dx);
+    _ModSqr(px, dy);
+    ModSub256(px, sx);
+    ModSub256(px, gx);
+    ModSub256(py, px, sx);
+    _ModMult(py, dy);
+    if (NeedFullY) {
+        ModNeg256(py_full, py);
+        ModSub256(py_full, py_full, sy);
+    } else {
+        odd_py = ModSub256isOdd(syn, py);
+        py_full[0] = (py_full[0] & ~1ul) | ulong(odd_py);
+    }
+    fn_process_point(px, py_full, 0);
+
+    // Advance the persistent center to P + 1024 * G.
+    ModSub256(dy, two_gny, sy);
+    ModSub256(dx, gx, sx);
+    _ModMult(inverse, dx);
+    _ModMult(dy, inverse);
+    _ModSqr(px, dy);
+    ModSub256(px, sx);
+    ModSub256(px, two_gnx);
+    ModSub256(py, two_gnx, px);
+    _ModMult(py, dy);
+    ModSub256(py, two_gny);
+
+    gpu_walk_load256_thread(sx, px);
+    gpu_walk_load256_thread(sy, py);
+}
+
+template <typename Fn>
+static inline void vanity_walk_batch_1024_parity(
+    thread ulong sx[4],
+    thread ulong sy[4],
+    const device ulong* Gx,
+    const device ulong* Gy,
+    const device ulong* _2Gnx,
+    const device ulong* _2Gny,
+    bool reverse,
+    thread Fn& fn_process_point)
+{
+    ulong dx[4], px[4], py[4], dy[4];
+    ulong sxn[4], syn[4], sx_gx[4];
+    ulong gx[4], gy[4], two_gnx[4], two_gny[4];
+    uchar odd_py;
+    ulong inverse[5];
+    ulong subp[VS_GRP_HALF][4];
+
+    gpu_walk_load256_device(two_gnx, _2Gnx);
+    gpu_walk_load256_device(two_gny, _2Gny);
+    if (reverse) {
+        ModNeg256(two_gny);
+    }
+
+    fn_process_point(sx, uchar(sy[0] & 1ul), int(VS_GRP_HALF));
+
+    ModSub256(sxn, two_gnx, sx);
+    gpu_walk_load256_thread(subp[VS_GRP_HALF - 1u], sxn);
+    for (int i = int(VS_GRP_HALF) - 1; i > 0; --i) {
+        gpu_walk_load256_device(gx, Gx + uint(i) * 4u);
+        ModSub256(syn, gx, sx);
+        _ModMult(sxn, syn);
+        gpu_walk_load256_thread(subp[uint(i) - 1u], sxn);
+    }
+
+    gpu_walk_load256_device(gx, Gx);
+    ModSub256(inverse, gx, sx);
+    _ModMult(inverse, sxn);
+    inverse[4] = 0ul;
+    _ModInv(inverse);
+
+    ModNeg256(syn, sy);
+    ModNeg256(sxn, sx);
+
+    uint i;
+    for (i = 0u; i < VS_GRP_HALF - 1u; ++i) {
+        gpu_walk_load256_device(gx, Gx + i * 4u);
+        gpu_walk_load256_device(gy, Gy + i * 4u);
+        if (reverse) {
+            ModNeg256(gy);
+        }
+
+        ModSub256(sx_gx, gx, sxn);
+        _ModMult(dx, subp[i], inverse);
+
+        ModSub256(dy, gy, sy);
+        _ModMult(dy, dx);
+        _ModSqr(px, dy);
+        ModSub256(px, sx_gx);
+        ModSub256(py, sx, px);
+        _ModMult(py, dy);
+        odd_py = ModSub256isOdd(py, sy);
+        fn_process_point(px, odd_py, int(VS_GRP_HALF + i + 1u));
+
+        ModSub256(dy, syn, gy);
+        _ModMult(dy, dx);
+        _ModSqr(px, dy);
+        ModSub256(px, sx_gx);
+        ModSub256(py, px, sx);
+        _ModMult(py, dy);
+        odd_py = ModSub256isOdd(syn, py);
+        fn_process_point(px, odd_py, int(VS_GRP_HALF - (i + 1u)));
+
+        ModSub256(dx, gx, sx);
+        _ModMult(inverse, dx);
+    }
+
+    gpu_walk_load256_device(gx, Gx + i * 4u);
+    gpu_walk_load256_device(gy, Gy + i * 4u);
+    if (reverse) {
+        ModNeg256(gy);
+    }
+    _ModMult(dx, subp[i], inverse);
+    ModSub256(dy, syn, gy);
+    _ModMult(dy, dx);
+    _ModSqr(px, dy);
+    ModSub256(px, sx);
+    ModSub256(px, gx);
+    ModSub256(py, px, sx);
+    _ModMult(py, dy);
+    odd_py = ModSub256isOdd(syn, py);
+    fn_process_point(px, odd_py, 0);
+
+    ModSub256(dy, two_gny, sy);
+    ModSub256(dx, gx, sx);
+    _ModMult(inverse, dx);
+    _ModMult(dy, inverse);
+    _ModSqr(px, dy);
+    ModSub256(px, sx);
+    ModSub256(px, two_gnx);
+    ModSub256(py, two_gnx, px);
+    _ModMult(py, dy);
+    ModSub256(py, two_gny);
+
+    gpu_walk_load256_thread(sx, px);
+    gpu_walk_load256_thread(sy, py);
+}
+
+template <typename Fn>
+static inline void vanity_walk_batch_1024_full_y(
+    thread ulong sx[4],
+    thread ulong sy[4],
+    const device ulong* Gx,
+    const device ulong* Gy,
+    const device ulong* _2Gnx,
+    const device ulong* _2Gny,
+    bool reverse,
+    thread Fn& fn_process_point)
+{
+    vanity_walk_batch_1024_impl<true>(sx,
+                                      sy,
+                                      Gx,
+                                      Gy,
+                                      _2Gnx,
+                                      _2Gny,
+                                      reverse,
+                                      fn_process_point);
+}
+
+template <typename Fn>
+static inline void vanity_walk_batch_1024(
+    thread ulong sx[4],
+    thread ulong sy[4],
+    const device ulong* Gx,
+    const device ulong* Gy,
+    const device ulong* _2Gnx,
+    const device ulong* _2Gny,
+    bool reverse,
+    thread Fn& fn_process_point)
+{
+    vanity_walk_batch_1024_full_y(sx,
+                                  sy,
+                                  Gx,
+                                  Gy,
+                                  _2Gnx,
+                                  _2Gny,
+                                  reverse,
+                                  fn_process_point);
+}
+
+#endif

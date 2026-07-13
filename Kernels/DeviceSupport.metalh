@@ -1,0 +1,69 @@
+#ifndef METAL_CRYPTO_DEVICE_SUPPORT_METALH
+#define METAL_CRYPTO_DEVICE_SUPPORT_METALH
+
+#include "../KernelState.metalh"
+
+#define REC_HOST
+#define REC_DEVICE static
+#define REC_CONSTANT constant
+#define REC_SHARED threadgroup
+#define REC_FORCEINLINE inline
+#define REC_NOINLINE
+#define REC_ALIGN(N) __attribute__((aligned(N)))
+
+typedef uchar cmr_u8;
+typedef ushort cmr_u16;
+typedef uint cmr_u32;
+typedef ulong cmr_u64;
+typedef long cmr_i64;
+
+#ifndef NULL
+#define NULL nullptr
+#endif
+
+#ifndef UINT32_MAX
+#define UINT32_MAX 0xffffffffu
+#endif
+
+#ifndef SIZE_MAX
+#define SIZE_MAX ((size_t)-1)
+#endif
+
+#ifndef assert
+#define assert(COND) do { (void)(COND); } while (0)
+#endif
+
+inline cmr_u32 metalBitReverse32(const cmr_u32 value) {
+    return reverse_bits(value);
+}
+
+inline int metalCountLeadingZeros32(const cmr_u32 value) {
+    return int(clz(value));
+}
+
+inline cmr_u64 __umul64hi(const cmr_u64 a, const cmr_u64 b) {
+    return static_cast<cmr_u64>((static_cast<unsigned __int128>(a) * static_cast<unsigned __int128>(b)) >> 64);
+}
+
+inline void device_memcpy(thread uchar* dst, const thread uchar* src, ulong len) {
+    for (ulong i = 0; i < len; ++i) {
+        dst[i] = src[i];
+    }
+}
+
+inline void device_memset(thread uchar* dst, uchar value, ulong len) {
+    for (ulong i = 0; i < len; ++i) {
+        dst[i] = value;
+    }
+}
+
+inline bool device_streq(const thread char* a, const constant char* b) {
+    for (; *a || *b; ++a, ++b) {
+        if (*a != *b) {
+            return false;
+        }
+    }
+    return true;
+}
+
+#endif

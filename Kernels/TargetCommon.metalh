@@ -1,0 +1,170 @@
+#ifndef METAL_CRYPTO_TARGET_COMMON_METALH
+#define METAL_CRYPTO_TARGET_COMMON_METALH
+
+#include "../KernelState.metalh"
+
+#if !defined(METAL_CRYPTO_NO_FUNCTION_CONSTANTS)
+constant uint TARGET_FC_DOT_TYPE_MASK [[function_constant(33)]];
+constant uint TARGET_FC_DERIVATION_TYPE_MASK [[function_constant(34)]];
+#endif
+
+static inline uint target_dot_type_mask(device RuntimeConfig& config) {
+#if defined(METAL_CRYPTO_NO_FUNCTION_CONSTANTS)
+    return config.dotTypeMask;
+#else
+    return is_function_constant_defined(TARGET_FC_DOT_TYPE_MASK)
+        ? TARGET_FC_DOT_TYPE_MASK
+        : config.dotTypeMask;
+#endif
+}
+
+static inline uint target_derivation_type_mask(device RuntimeConfig& config) {
+#if defined(METAL_CRYPTO_NO_FUNCTION_CONSTANTS)
+    return config.derivationTypeMask;
+#else
+    return is_function_constant_defined(TARGET_FC_DERIVATION_TYPE_MASK)
+        ? TARGET_FC_DERIVATION_TYPE_MASK
+        : config.derivationTypeMask;
+#endif
+}
+
+static inline bool metal_type_mask_enabled(uint type_mask, uchar coin_type, uchar first, uchar last) {
+    if (coin_type < first || coin_type > last) {
+        return true;
+    }
+    return (type_mask & (1u << (coin_type - first))) != 0u;
+}
+
+static inline bool ada_type_enabled(device RuntimeConfig& config, uchar coin_type) {
+    return metal_type_mask_enabled(config.adaTypeMask, coin_type, 0x10u, 0x19u);
+}
+
+static inline bool ton_type_enabled_config(device RuntimeConfig& config, uchar coin_type) {
+    return metal_type_mask_enabled(config.tonTypeMask, coin_type, 0x80u, 0x8cu);
+}
+
+static inline bool dot_type_enabled(device RuntimeConfig& config, uchar coin_type) {
+    return metal_type_mask_enabled(target_dot_type_mask(config), coin_type, 0x30u, 0x31u);
+}
+
+static inline bool target_derivation_type_enabled(device RuntimeConfig& config, uint mask) {
+    return ((target_derivation_type_mask(config) & mask) != 0u) &&
+           ((config.derivationTypeMask & mask) != 0u);
+}
+
+static inline bool aptos_type_enabled(device RuntimeConfig& config, uchar coin_type) {
+    return metal_type_mask_enabled(config.aptosTypeMask, coin_type, 0x20u, 0x22u);
+}
+
+static inline bool sui_type_enabled(device RuntimeConfig& config, uchar coin_type) {
+    return metal_type_mask_enabled(config.suiTypeMask, coin_type, 0x70u, 0x71u);
+}
+
+static inline bool xrp_type_enabled(device RuntimeConfig& config, uchar coin_type) {
+    return metal_type_mask_enabled(config.xrpTypeMask, coin_type, 0x90u, 0x91u);
+}
+
+static inline bool iota_type_enabled(device RuntimeConfig& config, uchar coin_type) {
+    return metal_type_mask_enabled(config.iotaTypeMask, coin_type, 0x50u, 0x51u);
+}
+
+static inline bool icp_type_enabled(device RuntimeConfig& config, uchar coin_type) {
+    return metal_type_mask_enabled(config.icpTypeMask, coin_type, 0x52u, 0x53u);
+}
+
+static inline bool fil_type_enabled(device RuntimeConfig& config, uchar coin_type) {
+    return metal_type_mask_enabled(config.filTypeMask, coin_type, 0x41u, 0x42u);
+}
+
+static inline bool xtz_type_enabled(device RuntimeConfig& config, uchar coin_type) {
+    return metal_type_mask_enabled(config.xtzTypeMask, coin_type, 0x92u, 0x93u);
+}
+
+static inline bool target_subtype_enabled(device RuntimeConfig& config, uchar coin_type) {
+    return ada_type_enabled(config, coin_type) &&
+           ton_type_enabled_config(config, coin_type) &&
+           dot_type_enabled(config, coin_type) &&
+           aptos_type_enabled(config, coin_type) &&
+           sui_type_enabled(config, coin_type) &&
+           xrp_type_enabled(config, coin_type) &&
+           iota_type_enabled(config, coin_type) &&
+           icp_type_enabled(config, coin_type) &&
+           fil_type_enabled(config, coin_type) &&
+           xtz_type_enabled(config, coin_type);
+}
+
+static inline bool check_hash_target_prefix(device RuntimeConfig& config, const thread uint hash[5]) {
+    if (config.hashTargetLen > 20u) {
+        return false;
+    }
+    uint diff = 0u;
+    diff |= (hash[0] ^ config.hashTargetWords[0]) & config.hashTargetMasks[0];
+    diff |= (hash[1] ^ config.hashTargetWords[1]) & config.hashTargetMasks[1];
+    diff |= (hash[2] ^ config.hashTargetWords[2]) & config.hashTargetMasks[2];
+    diff |= (hash[3] ^ config.hashTargetWords[3]) & config.hashTargetMasks[3];
+    diff |= (hash[4] ^ config.hashTargetWords[4]) & config.hashTargetMasks[4];
+    return diff == 0u;
+}
+
+static inline bool check_hash_target_prefix_payload(device RuntimeConfig& config,
+                                                    const thread uint* hash,
+                                                    uint payload_len) {
+    const uint target_len = config.hashTargetLen;
+    if (target_len == 0u) {
+        return true;
+    }
+    if (target_len > payload_len || target_len > 32u) {
+        return false;
+    }
+    const uint words = (target_len + 3u) >> 2u;
+    uint diff = 0u;
+    for (uint i = 0u; i < words; ++i) {
+        diff |= (hash[i] ^ config.hashTargetWords[i]) & config.hashTargetMasks[i];
+    }
+    return diff == 0u;
+}
+
+static inline bool check_hash_no_filter(device RuntimeConfig& config, const thread uint hash[5]) {
+    if (config.full != 0u) {
+        return true;
+    }
+    const bool use_hash_target = config.hashTargetEnabled != 0u;
+    if (use_hash_target && !check_hash_target_prefix(config, hash)) {
+        return false;
+    }
+    const bool any_filter = config.useBloom != 0u || config.useXor != 0u ||
+                            config.useXorUn != 0u || config.useXorUc != 0u ||
+                            config.useXorHc != 0u;
+    if (use_hash_target && !any_filter) {
+        return true;
+    }
+    return false;
+}
+
+static inline bool check_hash_payload_no_filter(device RuntimeConfig& config,
+                                                const thread uint* hash,
+                                                uint payload_len) {
+    if (config.full != 0u) {
+        return true;
+    }
+    const bool use_hash_target = config.hashTargetEnabled != 0u;
+    if (use_hash_target && !check_hash_target_prefix_payload(config, hash, payload_len)) {
+        return false;
+    }
+    if (payload_len < 20u) {
+        return use_hash_target;
+    }
+    if (use_hash_target && config.hashTargetLen > 20u) {
+        const bool any_filter = config.useBloom != 0u || config.useXor != 0u ||
+                                config.useXorUn != 0u || config.useXorUc != 0u ||
+                                config.useXorHc != 0u;
+        return !any_filter;
+    }
+    uint hash5[5];
+    for (uint i = 0u; i < 5u; ++i) {
+        hash5[i] = hash[i];
+    }
+    return check_hash_no_filter(config, hash5);
+}
+
+#endif

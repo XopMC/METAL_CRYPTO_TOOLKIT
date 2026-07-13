@@ -1,0 +1,13 @@
+#ifndef METAL_CRYPTO_SET_CURVE_COMMON_METALH
+#define METAL_CRYPTO_SET_CURVE_COMMON_METALH
+
+#include "../KernelState.metalh"
+
+inline bool metal_type_enabled(uint mask, uint coin_type, uint first, uint last) {
+    if (coin_type < first || coin_type > last) {
+        return true;
+    }
+    return (mask & (1u << (coin_type - first))) != 0u;
+}
+
+#endif

@@ -1,0 +1,145 @@
+#ifndef METAL_CRYPTO_WORKER_BYTE_COMMON_METALH
+#define METAL_CRYPTO_WORKER_BYTE_COMMON_METALH
+
+#include "WorkerCommon.metalh"
+
+static inline void byte_hex_phrase(const thread char raw[512],
+                                   ulong raw_len,
+                                   thread char hexed[512],
+                                   thread ulong& hex_len) {
+    const uint n = min(uint(raw_len), 256u);
+    worker_hexing(reinterpret_cast<const thread uchar*>(raw), n,
+                  reinterpret_cast<thread uchar*>(hexed), n * 2u);
+    hex_len = ulong(n * 2u);
+    for (uint i = n * 2u; i < 512u; ++i) {
+        hexed[i] = 0;
+    }
+}
+
+static inline void byte_process_candidate(thread WorkerEnv& env,
+                                          thread char raw[512],
+                                          ulong raw_len,
+                                          thread char save_hex[512],
+                                          ulong save_hex_len,
+                                          const device uint* d_derivations,
+                                          const device uint* derindex,
+                                          uint der_indexes_size,
+                                          uint der_start_index,
+                                          const device char* passStart,
+                                          const thread char* threadPassStart,
+                                          uint passSize,
+                                          uint starter_pass,
+                                          ulong buff_index) {
+    if (d_derivations == nullptr || derindex == nullptr || der_start_index >= der_indexes_size) {
+        return;
+    }
+
+    uchar salt_buf[136] = { 0 };
+    const constant uchar* salt_src = (*env.config).electrum != 0u ? recovery_electrum_salt : recovery_salt;
+    for (uint i = 0u; i < 8u; ++i) {
+        salt_buf[i] = salt_src[i];
+    }
+    const uint pass_copy = min(passSize, 128u);
+    if (threadPassStart != nullptr) {
+        for (uint i = 0u; i < pass_copy; ++i) {
+            salt_buf[8u + i] = uchar(threadPassStart[i]);
+        }
+    } else if (passStart != nullptr) {
+        for (uint i = 0u; i < pass_copy; ++i) {
+            salt_buf[8u + i] = uchar(passStart[i]);
+        }
+    }
+    const ulong salt_len = ulong(8u + pass_copy);
+
+    uchar seed64[64] = { 0 };
+    fastpbkdf2_hmac_sha512(reinterpret_cast<thread uchar*>(raw),
+                           raw_len,
+                           salt_buf,
+                           salt_len,
+                           (*env.config).pbkdf2Iterations,
+                           seed64,
+                           64ul);
+
+    const bool run_bip32_paths =
+        (*env.config).secp256 != 0u &&
+        (*env.config).bipDerivationsEnabled != 0u &&
+        (((*env.config).derivationTypeMask & WORKER_DERIVATION_TYPE_MASK_BIP32) != 0u);
+    const bool run_slip0010_paths =
+        (*env.config).ed25519 != 0u &&
+        (*env.config).bipDerivationsEnabled != 0u &&
+        (((*env.config).derivationTypeMask & WORKER_DERIVATION_TYPE_MASK_SLIP0010) != 0u);
+    const bool run_bip32_ed25519_paths =
+        (*env.config).ed25519 != 0u &&
+        (*env.config).bipDerivationsEnabled != 0u &&
+        (((*env.config).derivationTypeMask & WORKER_DERIVATION_TYPE_MASK_BIP32_ED25519) != 0u);
+
+    extended_private_key_t master_private;
+    extended_private_key_t ed25519_master_private;
+    if (run_bip32_paths || run_bip32_ed25519_paths) {
+        worker_btc_seed64_to_extended(seed64, master_private);
+    }
+    if (run_slip0010_paths || run_bip32_ed25519_paths) {
+        worker_ed_seed64_to_extended(seed64, ed25519_master_private);
+    }
+
+    uint offset = worker_derivation_offset(derindex, der_start_index);
+    for (uint path_index = der_start_index; path_index < der_indexes_size; ++path_index) {
+        const uint path_len = derindex[path_index];
+        const uint c_path = path_index - der_start_index;
+        const device uint* path = d_derivations + offset;
+
+        if (run_bip32_paths) {
+            uchar secp_key[32] = { 0 };
+            der_get_child_key_secp256k1(env.precPtr, size_t(env.precPitch), &master_private, path, path_len, secp_key);
+            uchar next_key[32] = { 0 };
+            bool has_next = false;
+            worker_get_next_secp_key(env, master_private, d_derivations, derindex, offset,
+                                     path_len, path_index, der_indexes_size, next_key, has_next);
+            if ((*env.config).edTargetsAny != 0u || (*env.config).dot != 0u || (*env.config).ada != 0u) {
+                worker_emit_ed_targets_from_key(env, save_hex, save_hex_len, secp_key,
+                                                has_next ? next_key : nullptr, c_path, c_path,
+                                                ushort(starter_pass), passStart, passSize,
+                                                buff_index, 0ul, false, 0ul, 0u, false, true);
+            }
+            worker_emit_secp_targets_from_key(env, save_hex, save_hex_len, secp_key,
+                                              c_path, c_path, ushort(starter_pass), passStart,
+                                              passSize, buff_index, 0ul, false, 0ul, 0u, false);
+        }
+
+        if (run_slip0010_paths) {
+            uchar ed_key32[32] = { 0 };
+            der_get_child_key_ed25519(&ed25519_master_private, path, path_len, ed_key32);
+            if ((*env.config).secpTargetsAny != 0u) {
+                worker_emit_secp_targets_from_key(env, save_hex, save_hex_len, ed_key32,
+                                                  c_path, c_path, ushort(starter_pass), passStart,
+                                                  passSize, buff_index, 0ul, false, 0ul, 0u, false);
+            }
+            worker_emit_ed_targets_from_key(env, save_hex, save_hex_len, ed_key32, nullptr,
+                                            c_path, c_path, ushort(starter_pass), passStart,
+                                            passSize, buff_index, 0ul, false, 0ul, 0u, false, false);
+        }
+
+        if (run_bip32_ed25519_paths) {
+            uchar ed_bip32_key[32] = { 0 };
+            der_get_child_key_ed25519(&ed25519_master_private, path, path_len,
+                                      ed_bip32_key);
+            uchar next_key[32] = { 0 };
+            bool has_next = false;
+            worker_get_next_secp_key(env, master_private, d_derivations, derindex, offset,
+                                     path_len, path_index, der_indexes_size, next_key, has_next);
+            if ((*env.config).secpTargetsAny != 0u) {
+                worker_emit_secp_targets_from_key(env, save_hex, save_hex_len, ed_bip32_key,
+                                                  c_path, c_path, ushort(starter_pass), passStart,
+                                                  passSize, buff_index, 0ul, false, 0ul, 0u, false);
+            }
+            worker_emit_ed_targets_from_key(env, save_hex, save_hex_len, ed_bip32_key,
+                                            has_next ? next_key : nullptr, c_path, c_path,
+                                            ushort(starter_pass), passStart, passSize, buff_index,
+                                            0ul, false, 0ul, 0u, false, true);
+        }
+
+        offset += path_len;
+    }
+}
+
+#endif

@@ -1,0 +1,116 @@
+#ifndef METAL_CRYPTO_PROFANITY_RECOVERY_COMMON_METALH
+#define METAL_CRYPTO_PROFANITY_RECOVERY_COMMON_METALH
+
+#include <metal_stdlib>
+#include "../lib/secp256k1/secp256k1.metalh"
+#include "ProfanityCommon.metalh"
+
+using namespace metal;
+
+constant uint PROFANITY_THREAD_STEPS = 32u;
+
+static inline void profanity_copy_pubkey_bytes(const device uchar* target_pubkey,
+                                               uint offset,
+                                               thread uchar out32[32]) {
+    for (uint i = 0u; i < 32u; ++i) {
+        out32[i] = target_pubkey[offset + i];
+    }
+}
+
+static inline bool profanity_target_pubkey_to_ge(const device uchar* target_pubkey,
+                                                 uint target_len,
+                                                 thread secp256k1_ge* out) {
+    if (target_len == 65u && target_pubkey[0] == 0x04u) {
+        uchar xbytes[32];
+        uchar ybytes[32];
+        profanity_copy_pubkey_bytes(target_pubkey, 1u, xbytes);
+        profanity_copy_pubkey_bytes(target_pubkey, 33u, ybytes);
+        secp256k1_fe_set_b32(&out->x, xbytes);
+        secp256k1_fe_set_b32(&out->y, ybytes);
+        out->infinity = 0;
+        return true;
+    }
+    if (target_len == 33u && (target_pubkey[0] == 0x02u || target_pubkey[0] == 0x03u)) {
+        uchar xbytes[32];
+        profanity_copy_pubkey_bytes(target_pubkey, 1u, xbytes);
+        secp256k1_fe x;
+        secp256k1_fe_set_b32(&x, xbytes);
+        return secp256k1_ge_set_xo_var(out, &x, target_pubkey[0] == 0x03u) != 0;
+    }
+    return false;
+}
+
+static inline bool profanity_pubkey_matches_target(const thread uchar pub65[65],
+                                                   const device uchar* target_pubkey,
+                                                   uint target_len) {
+    if (target_len == 65u) {
+        for (int i = 0; i < 65; ++i) {
+            if (pub65[i] != target_pubkey[i]) {
+                return false;
+            }
+        }
+        return true;
+    }
+    if (target_len == 33u) {
+        if (target_pubkey[0] != uchar(0x02u + (pub65[64] & 1u))) {
+            return false;
+        }
+        for (int i = 0; i < 32; ++i) {
+            if (pub65[i + 1] != target_pubkey[i + 1]) {
+                return false;
+            }
+        }
+        return true;
+    }
+    return false;
+}
+
+static inline ulong profanity_atomic_add_count(device atomic_uint* counter, uint value) {
+    const uint low = atomic_fetch_add_explicit(counter, value, memory_order_relaxed);
+    if (low + value < low) {
+        atomic_fetch_add_explicit(counter + 1, 1u, memory_order_relaxed);
+    }
+    const uint high = atomic_load_explicit(counter + 1, memory_order_relaxed);
+    return (ulong(high) << 32u) | ulong(low);
+}
+
+static inline void profanity_copy_thread_to_device(device uchar* dst,
+                                                   const thread uchar* src,
+                                                   uint len) {
+    for (uint i = 0u; i < len; ++i) {
+        dst[i] = src[i];
+    }
+}
+
+static inline void profanity_recovery_emit_verified(device bool* isResult,
+                                                    device bool* buffResult,
+                                                    uint seed32,
+                                                    ulong lane_id,
+                                                    ulong round,
+                                                    const thread uchar priv[32],
+                                                    const thread uchar x32[32],
+                                                    device ProfanityVerifiedResult* profanity_results,
+                                                    device atomic_uint* profanity_count,
+                                                    uint max_founds) {
+    (void)isResult;
+    (void)buffResult;
+    if (profanity_results == nullptr || profanity_count == nullptr) {
+        return;
+    }
+    const ulong ridx = profanity_atomic_add_count(profanity_count, 1u);
+    if (ridx < ulong(max_founds)) {
+        device ProfanityVerifiedResult& out = profanity_results[ridx];
+        profanity_copy_thread_to_device(out.priv, priv, 32u);
+        profanity_copy_thread_to_device(out.x32, x32, 32u);
+        profanity_copy_thread_to_device(out.payload, x32, 32u);
+        out.lane_id = lane_id;
+        out.round = round;
+        out.seed32 = seed32;
+        out.type = 0x05u;
+        out.payload_len = 32u;
+        out.reserved[0] = 0u;
+        out.reserved[1] = 0u;
+    }
+}
+
+#endif

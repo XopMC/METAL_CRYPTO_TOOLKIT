@@ -1,0 +1,351 @@
+#ifndef METAL_CRYPTO_WORKER_ARMORY_COMMON_METALH
+#define METAL_CRYPTO_WORKER_ARMORY_COMMON_METALH
+
+#include "WorkerCommon.metalh"
+#include "HexsetRecoveryCommon.metalh"
+#include "PrngCommon.metalh"
+
+using namespace metal;
+
+static inline int armory_easy16_nibble(uchar c) {
+    if (c >= uchar('A') && c <= uchar('Z')) {
+        c = uchar(c + (uchar('a') - uchar('A')));
+    }
+    switch (c) {
+        case uchar('a'): return 0;
+        case uchar('s'): return 1;
+        case uchar('d'): return 2;
+        case uchar('f'): return 3;
+        case uchar('g'): return 4;
+        case uchar('h'): return 5;
+        case uchar('j'): return 6;
+        case uchar('k'): return 7;
+        case uchar('w'): return 8;
+        case uchar('e'): return 9;
+        case uchar('r'): return 10;
+        case uchar('t'): return 11;
+        case uchar('u'): return 12;
+        case uchar('i'): return 13;
+        case uchar('o'): return 14;
+        case uchar('n'): return 15;
+        default: return -1;
+    }
+}
+
+static inline int armory_easy16_to_bytes(const thread char* s,
+                                         int len,
+                                         thread uchar* out,
+                                         int out_cap,
+                                         bool strip_checksum) {
+    int out_i = 0;
+    int hi = -1;
+    int line_pos = 0;
+    for (int i = 0; i < len; ++i) {
+        const uchar c = uchar(s[i]);
+        if (c <= 0x20u) {
+            continue;
+        }
+        const int v = armory_easy16_nibble(c);
+        if (v < 0) {
+            return -1;
+        }
+        if (hi < 0) {
+            hi = v;
+            continue;
+        }
+        const uchar b = uchar((hi << 4) | v);
+        hi = -1;
+        if (!strip_checksum) {
+            if (out_i >= out_cap) {
+                return -3;
+            }
+            out[out_i++] = b;
+        } else {
+            if (line_pos < 16) {
+                if (out_i >= out_cap) {
+                    return -3;
+                }
+                out[out_i++] = b;
+            }
+            ++line_pos;
+            if (line_pos == 18) {
+                line_pos = 0;
+            }
+        }
+    }
+    if (hi >= 0) {
+        return -2;
+    }
+    if (strip_checksum && line_pos != 0) {
+        return -4;
+    }
+    return out_i;
+}
+
+static inline void armory_make_found(thread FoundBuffers& found,
+                                     device RuntimeConfig& config,
+                                     device char* foundStrings,
+                                     device uchar* foundPrvKeys,
+                                     device uint* foundHash160,
+                                     device uint* foundLen,
+                                     device uint* foundIter,
+                                     device uchar* foundType,
+                                     device uint* foundDerivations,
+                                     device uint* foundDerivations2,
+                                     device long* foundRound,
+                                     device ulong* foundSeed,
+                                     device atomic_uint* resultsCount) {
+    worker_make_found_buffers(found, config, foundStrings, foundPrvKeys, foundHash160,
+                              foundLen, foundIter, foundType, foundDerivations,
+                              foundDerivations2, nullptr, nullptr, foundRound, foundSeed,
+                              resultsCount);
+}
+
+static inline void armory_init_env(thread WorkerEnv& env,
+                                   device bool* isResult,
+                                   device bool* buffResult,
+                                   constant secp256k1_ge_storage* precPtr,
+                                   ulong precPitch,
+                                   device RuntimeConfig& config,
+                                   device XorFilterState& filters,
+                                   device FilterStorageState& filter_storage,
+                                   const device uchar* bloom_storage,
+                                   const device uchar* xor_storage,
+                                   const device uchar* xor_un_storage,
+                                   const device uchar* xor_uc_storage,
+                                   const device uchar* xor_hc_storage,
+                                   FoundBuffers found,
+                                   const device SubstratePathDevice* substratePaths) {
+    env.isResult = isResult;
+    env.buffResult = buffResult;
+    env.precPtr = precPtr;
+    env.precPitch = precPitch;
+    env.config = &config;
+    env.filters = &filters;
+    env.filterStorage = &filter_storage;
+    env.bloomStorage = bloom_storage;
+    env.xorStorage = xor_storage;
+    env.xorUnStorage = xor_un_storage;
+    env.xorUcStorage = xor_uc_storage;
+    env.xorHcStorage = xor_hc_storage;
+    env.found = found;
+    env.substratePaths = substratePaths;
+    env.useFoundLenOverride = false;
+    env.foundLenOverride = 0ul;
+}
+
+static inline bool armory_read_indexed_line(const device char* lines,
+                                            const device uint* indexes,
+                                            uint indexes_size,
+                                            uint tid,
+                                            thread char out[512],
+                                            thread ulong& len) {
+    if (tid >= indexes_size) {
+        return false;
+    }
+    const uint start = (tid == 0u) ? 0u : indexes[tid - 1u];
+    const uint end = indexes[tid];
+    const uint n = min(end - start, 512u);
+    for (uint i = 0u; i < n; ++i) {
+        out[i] = lines[start + i];
+    }
+    len = ulong(n);
+    return true;
+}
+
+static inline bool armory_entropy_fill(int entropy_len,
+                                       thread char out[512],
+                                       ulong seed_l,
+                                       bool is_64,
+                                       int mode,
+                                       int gen,
+                                       ulong skip64) {
+    if (entropy_len < 0 || entropy_len > 512) {
+        return false;
+    }
+    if (is_64) {
+        uchar tmp[512];
+        if (!prng64_entropy_fill(entropy_len, tmp, seed_l, mode, gen, skip64)) {
+            return false;
+        }
+        for (int i = 0; i < entropy_len; ++i) {
+            out[i] = char(tmp[i]);
+        }
+        return true;
+    }
+    if (seed_l > 0xfffffffful) {
+        return false;
+    }
+    uchar tmp[512];
+    if (!prng32_entropy_fill(entropy_len, tmp, uint(seed_l), mode, gen, skip64)) {
+        return false;
+    }
+    for (int i = 0; i < entropy_len; ++i) {
+        out[i] = char(tmp[i]);
+    }
+    return true;
+}
+
+static inline bool armory_easy16_materialize_root(thread char source[512],
+                                                  ulong source_len,
+                                                  thread uchar rootkey[65],
+                                                  thread uchar chaincode[32]) {
+    for (uint i = 0u; i < 65u; ++i) {
+        rootkey[i] = 0u;
+    }
+    for (uint i = 0u; i < 32u; ++i) {
+        chaincode[i] = 0u;
+    }
+    const int key_len = armory_easy16_to_bytes(source, int(source_len), rootkey, 64, true);
+    if (key_len < 32) {
+        return false;
+    }
+    if (key_len < 64) {
+        armory_to_chain(rootkey, chaincode);
+    } else {
+        for (uint i = 0u; i < 32u; ++i) {
+            chaincode[i] = rootkey[32u + i];
+        }
+    }
+    return true;
+}
+
+static inline void armory_apply_root_mode(thread char toHash[512],
+                                          thread ulong& len,
+                                          uchar mode,
+                                          uint iteration,
+                                          bool utf8,
+                                          bool is_str,
+                                          bool external_root_input,
+                                          device RuntimeConfig& config) {
+    if (iteration == 0u) {
+        iteration = 1u;
+    }
+    const bool do_unhex = (mode == 0x00u && external_root_input) || config.isHex != 0u;
+    if (do_unhex && mode != 0x07u) {
+        priv_unhex(reinterpret_cast<thread uchar*>(toHash), uint(len),
+                   reinterpret_cast<thread uchar*>(toHash), uint(len / 2ul));
+        len = len / 2ul;
+    }
+    worker_transform_material(toHash, len, mode, iteration, utf8, is_str);
+}
+
+static inline void armory_root_materialize(thread char toHash[512],
+                                           ulong len,
+                                           thread uchar rootkey[65],
+                                           thread uchar chaincode[32]) {
+    for (uint i = 0u; i < 65u; ++i) {
+        rootkey[i] = 0u;
+    }
+    for (uint i = 0u; i < 32u; ++i) {
+        chaincode[i] = 0u;
+    }
+    if (len < 64ul) {
+        if (len < 32ul) {
+            const uint off = 32u - uint(len);
+            for (uint i = 0u; i < uint(len); ++i) {
+                rootkey[off + i] = uchar(toHash[i]);
+            }
+        } else {
+            for (uint i = 0u; i < 32u; ++i) {
+                rootkey[i] = uchar(toHash[i]);
+            }
+        }
+        armory_to_chain(rootkey, chaincode);
+    } else {
+        for (uint i = 0u; i < 32u; ++i) {
+            rootkey[i] = uchar(toHash[i]);
+            chaincode[i] = uchar(toHash[32u + i]);
+        }
+    }
+}
+
+static inline void armory_make_root_save_blob(thread char out[512],
+                                              const thread uchar rootkey[65],
+                                              const thread uchar chaincode[32],
+                                              const thread char* source,
+                                              ulong source_len) {
+    for (uint i = 0u; i < 32u; ++i) {
+        out[i] = char(rootkey[i]);
+        out[32u + i] = char(chaincode[i]);
+    }
+    const uint n = min(uint(source_len), 448u);
+    for (uint i = 0u; i < n; ++i) {
+        out[64u + i] = source[i];
+    }
+}
+
+static inline void armory_process_root_and_chain(thread WorkerEnv& env,
+                                                 const thread char* source,
+                                                 ulong source_len,
+                                                 thread uchar rootkey[65],
+                                                 thread uchar chaincode[32],
+                                                 uint child,
+                                                 ulong round,
+                                                 ulong buff_index,
+                                                 bool store_seed,
+                                                 ulong seed_value,
+                                                 uint iter_value,
+                                                 bool store_iter,
+                                                 bool root_save_layout) {
+    uchar prvKeys[32] = { 0 };
+    uchar rootPub[65] = { 0x04u };
+    for (uint i = 0u; i < 32u; ++i) {
+        prvKeys[i] = rootkey[i];
+    }
+    secp256k1_ec_pubkey_create(reinterpret_cast<thread secp256k1_pubkey*>(rootPub + 1),
+                               prvKeys, env.precPtr, size_t(env.precPitch));
+
+    char root_save[512];
+    const thread char* emit_source = source;
+    ulong emit_len = source_len;
+    const bool prev_use_found_len_override = env.useFoundLenOverride;
+    const ulong prev_found_len_override = env.foundLenOverride;
+    if (root_save_layout) {
+        armory_make_root_save_blob(root_save, rootkey, chaincode, source, source_len);
+        emit_source = root_save;
+        emit_len = min(512ul, 64ul + source_len);
+        env.useFoundLenOverride = true;
+        env.foundLenOverride = source_len;
+    }
+
+    for (uint current_child = 0u; current_child <= child; ++current_child) {
+        uchar d_hash[32] = { 0 };
+        SHA256(rootPub, 65u, d_hash);
+        SHA256(d_hash, 32u, d_hash);
+        for (uint k = 0u; k < 32u; ++k) {
+            d_hash[k] ^= chaincode[k];
+        }
+        secp256k1_scalar sa;
+        secp256k1_scalar sb;
+        secp256k1_scalar sr;
+        secp256k1_scalar_set_b32(&sa, d_hash, nullptr);
+        secp256k1_scalar_set_b32(&sb, prvKeys, nullptr);
+        secp256k1_scalar_mul(&sr, &sa, &sb);
+        secp256k1_scalar_get_b32(prvKeys, &sr);
+
+        uchar pubKeys[65] = { 0x04u };
+        secp256k1_ec_pubkey_create(reinterpret_cast<thread secp256k1_pubkey*>(pubKeys + 1),
+                                   prvKeys, env.precPtr, size_t(env.precPitch));
+        for (uint i = 1u; i < 65u; ++i) {
+            rootPub[i] = pubKeys[i];
+        }
+
+        if ((*env.config).secp256 != 0u) {
+            worker_emit_secp_targets_from_key(env, emit_source, emit_len, prvKeys,
+                                              current_child, current_child, 0u, nullptr, 0u,
+                                              buff_index, round, store_seed, seed_value,
+                                              iter_value, store_iter);
+        }
+        if ((*env.config).ed25519 != 0u) {
+            worker_emit_ed_targets_from_key(env, emit_source, emit_len, prvKeys, nullptr,
+                                            current_child, current_child, 0u, nullptr, 0u,
+                                            buff_index, round, store_seed, seed_value,
+                                            iter_value, store_iter, false);
+        }
+    }
+    env.useFoundLenOverride = prev_use_found_len_override;
+    env.foundLenOverride = prev_found_len_override;
+}
+
+#endif

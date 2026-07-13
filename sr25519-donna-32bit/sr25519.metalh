@@ -1,0 +1,2973 @@
+#ifndef METAL_CRYPTO_SR25519_METALH
+#define METAL_CRYPTO_SR25519_METALH
+
+#include "../Kernels/DeviceSupport.metalh"
+#include "merlin.h"
+#include "ristretto255.h"
+#include "sha2.h"
+#include "sr25519.h"
+#include "sr25519-hash.h"
+#include "sr25519-randombytes.h"
+#include "vrf.h"
+#include"ed25519-donna/modm-donna-32bit.h"
+#include "ed25519-donna/curve25519-donna-32bit.h"
+#include "ed25519-donna/curve25519-donna-helpers.h"
+#include "ed25519-donna/ed25519-donna-impl-base.h"
+
+#ifdef memcpy
+#undef memcpy
+#endif
+#ifdef memset
+#undef memset
+#endif
+
+#define SR_THREAD thread
+#define SR_THREAD_CONST const thread
+#define SR_CONSTANT_CONST const constant
+#define SR_LIT_U8(VALUE) reinterpret_cast<const constant uchar*>(VALUE)
+
+static inline void sr_memcpy(thread void* dst, const thread void* src, const ulong len) {
+    thread uchar* out = reinterpret_cast<thread uchar*>(dst);
+    const thread uchar* in = reinterpret_cast<const thread uchar*>(src);
+    for (ulong i = 0; i < len; ++i) {
+        out[i] = in[i];
+    }
+}
+
+static inline void sr_memcpy(thread void* dst, const constant void* src, const ulong len) {
+    thread uchar* out = reinterpret_cast<thread uchar*>(dst);
+    const constant uchar* in = reinterpret_cast<const constant uchar*>(src);
+    for (ulong i = 0; i < len; ++i) {
+        out[i] = in[i];
+    }
+}
+
+static inline void sr_memset(thread void* dst, const uchar value, const ulong len) {
+    thread uchar* out = reinterpret_cast<thread uchar*>(dst);
+    for (ulong i = 0; i < len; ++i) {
+        out[i] = value;
+    }
+}
+
+#define memcpy(DST, SRC, LEN) sr_memcpy((DST), (SRC), ulong(LEN))
+#define memset(DST, VALUE, LEN) sr_memset((DST), uchar(VALUE), ulong(LEN))
+
+
+//merlin_impl
+
+/******** The Keccak-f[1600] permutation ********/
+
+/*** Constants. ***/
+static constant uchar rho_dev[24] = { 1,  3,  6,  10, 15, 21, 28, 36, 45, 55, 2,  14, 27, 41, 56, 8,  25, 43, 62, 18, 39, 61, 20, 44 };
+static constant uchar pi_dev[24] = { 10, 7,  11, 17, 18, 3, 5,  16, 8,  21, 24, 4, 15, 23, 19, 13, 12, 2, 20, 14, 22, 9,  6,  1 };
+static constant ulong RC_dev[24] = {
+    1ULL,
+    0x8082ULL,
+    0x800000000000808aULL,
+    0x8000000080008000ULL,
+    0x808bULL,
+    0x80000001ULL,
+    0x8000000080008081ULL,
+    0x8000000000008009ULL,
+    0x8aULL,
+    0x88ULL,
+    0x80008009ULL,
+    0x8000000aULL,
+    0x8000808bULL,
+    0x800000000000008bULL,
+    0x8000000000008089ULL,
+    0x8000000000008003ULL,
+    0x8000000000008002ULL,
+    0x8000000000000080ULL,
+    0x800aULL,
+    0x800000008000000aULL,
+    0x8000000080008081ULL,
+    0x8000000000008080ULL,
+    0x80000001ULL,
+    0x8000000080008008ULL
+};
+
+/*** Helper macros to unroll the permutation. ***/
+#define rol(x, s) (((x) << s) | ((x) >> (64 - s)))
+#define REPEAT6(e) e e e e e e
+#define REPEAT24(e) REPEAT6(e e e e)
+#define REPEAT5(e) e e e e e
+#define FOR5(v, s, e)                           \
+    v = 0;                                      \
+    REPEAT5(e; v += s;)
+
+/*** Keccak-f[1600] ***/
+static inline void keccakf_dev(thread void* state) {
+    thread ulong* a = (thread ulong*)state;
+    ulong b[5] = { 0 };
+    ulong t = 0;
+    uchar x, y;
+    int i;
+
+    for (i = 0; i < 24; i++) {
+        /* Theta */
+        FOR5(x, 1, b[x] = 0; FOR5(y, 5, b[x] ^= a[x + y];))
+            FOR5(x, 1, FOR5(y, 5, a[y + x] ^= b[(x + 4) % 5] ^ rol(b[(x + 1) % 5], 1);))
+            /* Rho and pi_dev */
+            t = a[1];
+        x = 0;
+        REPEAT24(b[0] = a[pi_dev[x]]; a[pi_dev[x]] = rol(t, rho_dev[x]); t = b[0]; x++;)
+            /* Chi */
+            FOR5(y, 5,
+                FOR5(x, 1, b[x] = a[y + x];)
+                FOR5(x, 1, a[y + x] = b[x] ^ ((~b[(x + 1) % 5]) & b[(x + 2) % 5]);))
+            /* Iota */
+            a[0] ^= RC_dev[i];
+    }
+}
+
+/******** A Strobe-128 context; internal functions. ********/
+
+#define STROBE_R 166
+
+#define FLAG_I (1)
+#define FLAG_A (1 << 1)
+#define FLAG_C (1 << 2)
+#define FLAG_T (1 << 3)
+#define FLAG_M (1 << 4)
+#define FLAG_K (1 << 5)
+
+// Device helper: strobe128_run_f.
+static inline void strobe128_run_f(thread merlin_strobe128* ctx) {
+    ctx->state_bytes[ctx->pos] ^= ctx->pos_begin;
+    ctx->state_bytes[ctx->pos + 1] ^= 0x04;
+    ctx->state_bytes[STROBE_R + 1] ^= 0x80;
+    keccakf_dev(ctx->state);
+    ctx->pos = 0;
+    ctx->pos_begin = 0;
+}
+
+static inline void strobe128_absorb(thread merlin_strobe128* ctx,
+    const thread uchar* data,
+    ulong data_len) {
+    ulong i;
+    for (i = 0; i < data_len; ++i) {
+        ctx->state_bytes[ctx->pos] ^= data[i];
+        ctx->pos += 1;
+        if (ctx->pos == STROBE_R) {
+            strobe128_run_f(ctx);
+        }
+    }
+}
+
+static inline void strobe128_absorb(thread merlin_strobe128* ctx,
+    const constant uchar* data,
+    ulong data_len) {
+    ulong i;
+    for (i = 0; i < data_len; ++i) {
+        ctx->state_bytes[ctx->pos] ^= data[i];
+        ctx->pos += 1;
+        if (ctx->pos == STROBE_R) {
+            strobe128_run_f(ctx);
+        }
+    }
+}
+
+static inline void strobe128_overwrite(thread merlin_strobe128* ctx,
+    const thread uchar* data,
+    ulong data_len) {
+    ulong i;
+    for (i = 0; i < data_len; ++i) {
+        ctx->state_bytes[ctx->pos] = data[i];
+        ctx->pos += 1;
+        if (ctx->pos == STROBE_R) {
+            strobe128_run_f(ctx);
+        }
+    }
+}
+
+// Device helper: strobe128_squeeze.
+static inline void strobe128_squeeze(thread merlin_strobe128* ctx, thread uchar* data, ulong data_len) {
+    ulong i;
+    for (i = 0; i < data_len; ++i) {
+        data[i] = ctx->state_bytes[ctx->pos];
+        ctx->state_bytes[ctx->pos] = 0;
+        ctx->pos += 1;
+        if (ctx->pos == STROBE_R) {
+            strobe128_run_f(ctx);
+        }
+    }
+}
+
+static inline void strobe128_begin_op(thread merlin_strobe128* ctx,
+    uchar flags,
+    uchar more) {
+    if (more) {
+        /* Changing flags while continuing is illegal */
+        assert(ctx->cur_flags == flags);
+        return;
+    }
+
+    /* T flag is not supported */
+    assert(!(flags & FLAG_T));
+
+    uchar old_begin = ctx->pos_begin;
+    ctx->pos_begin = ctx->pos + 1;
+    ctx->cur_flags = flags;
+
+    uchar data[2] = { old_begin, flags };
+    strobe128_absorb(ctx, data, 2);
+
+    /* Force running the permutation if C or K is set. */
+    uchar force_f = 0 != (flags & (FLAG_C | FLAG_K));
+
+    if (force_f && ctx->pos != 0) {
+        strobe128_run_f(ctx);
+    }
+}
+
+/******** A Strobe-128 context; external (to Strobe) functions. ********/
+
+static inline void strobe128_meta_ad(thread merlin_strobe128* ctx,
+    const thread uchar* data,
+    ulong data_len,
+    uchar more) {
+    strobe128_begin_op(ctx, FLAG_M | FLAG_A, more);
+    strobe128_absorb(ctx, data, data_len);
+}
+
+static inline void strobe128_meta_ad(thread merlin_strobe128* ctx,
+    const constant uchar* data,
+    ulong data_len,
+    uchar more) {
+    strobe128_begin_op(ctx, FLAG_M | FLAG_A, more);
+    strobe128_absorb(ctx, data, data_len);
+}
+
+static inline void strobe128_ad(thread merlin_strobe128* ctx,
+    const thread uchar* data,
+    ulong data_len,
+    uchar more) {
+    strobe128_begin_op(ctx, FLAG_A, more);
+    strobe128_absorb(ctx, data, data_len);
+}
+
+static inline void strobe128_ad(thread merlin_strobe128* ctx,
+    const constant uchar* data,
+    ulong data_len,
+    uchar more) {
+    strobe128_begin_op(ctx, FLAG_A, more);
+    strobe128_absorb(ctx, data, data_len);
+}
+
+static inline void strobe128_prf(thread merlin_strobe128* ctx,
+    thread uchar* data,
+    ulong data_len,
+    uchar more) {
+    strobe128_begin_op(ctx, FLAG_I | FLAG_A | FLAG_C, more);
+    strobe128_squeeze(ctx, data, data_len);
+}
+
+static inline void strobe128_key(thread merlin_strobe128* ctx,
+    const thread uchar* data,
+    ulong data_len,
+    uchar more) {
+    strobe128_begin_op(ctx, FLAG_C | FLAG_A, more);
+    strobe128_overwrite(ctx, data, data_len);
+}
+
+static inline void strobe128_init(thread merlin_strobe128* ctx,
+    const thread uchar* label,
+    ulong label_len) {
+    uchar init[18] = { 1,  168, 1,  0,   1,  96, 83, 84, 82,
+                        79, 66,  69, 118, 49, 46, 48, 46, 50 };
+    memset(ctx->state_bytes, 0, 200);
+    memcpy(ctx->state_bytes, init, 18);
+    keccakf_dev(ctx->state);
+    ctx->pos = 0;
+    ctx->pos_begin = 0;
+    ctx->cur_flags = 0;
+
+    strobe128_meta_ad(ctx, label, label_len, 0);
+}
+
+/******** The Merlin transcript functions. ********/
+
+static inline void merlin_transcript_init(thread merlin_transcript* mctx, const constant uchar* label, ulong label_len) {
+    uchar merlin_label[] = "Merlin v1.0";
+    strobe128_init(&mctx->sctx, merlin_label, 11);
+    merlin_transcript_commit_bytes(mctx, SR_LIT_U8("dom-sep"), 7, label, label_len);
+}
+
+// Device helper: merlin_transcript_commit_bytes.
+static inline void merlin_transcript_commit_bytes(thread merlin_transcript* mctx, const constant uchar* label, ulong label_len, const thread uchar* message, ulong message_len) {
+    ulong message_len_bytes = message_len;
+    strobe128_meta_ad(&mctx->sctx, label, label_len, 0);
+    strobe128_meta_ad(&mctx->sctx, (thread uchar*)&message_len_bytes, 4, 1);
+    strobe128_ad(&mctx->sctx, message, message_len, 0);
+}
+
+static inline void merlin_transcript_commit_bytes(thread merlin_transcript* mctx, const constant uchar* label, ulong label_len, const constant uchar* message, ulong message_len) {
+    ulong message_len_bytes = message_len;
+    strobe128_meta_ad(&mctx->sctx, label, label_len, 0);
+    strobe128_meta_ad(&mctx->sctx, (thread uchar*)&message_len_bytes, 4, 1);
+    strobe128_ad(&mctx->sctx, message, message_len, 0);
+}
+
+// Device helper: merlin_transcript_challenge_bytes.
+static inline void merlin_transcript_challenge_bytes(thread merlin_transcript* mctx, const constant uchar* label, ulong label_len, thread uchar* buffer, ulong buffer_len) {
+    ulong buffer_len_bytes = buffer_len;
+    strobe128_meta_ad(&mctx->sctx, label, label_len, 0);
+    strobe128_meta_ad(&mctx->sctx, (thread uchar*)&buffer_len_bytes, 4, 1);
+    strobe128_prf(&mctx->sctx, buffer, buffer_len, 0);
+}
+
+// Device helper: merlin_commit_witness_bytes.
+static inline void merlin_commit_witness_bytes(thread merlin_transcript* mctx, thread uchar* dest, ulong dest_len, const constant uchar* label, ulong label_len, const thread uchar* witness, ulong witness_len) {
+    merlin_rng mrng = { 0 };
+    merlin_rng_init(&mrng, mctx);
+    merlin_rng_commit_witness_bytes(&mrng, label, label_len, witness, witness_len);
+
+    uchar entropy[32] = { 0 };
+    sr25519_randombytes(entropy, 32);
+    merlin_rng_finalize(&mrng, entropy);
+    merlin_rng_random_bytes(&mrng, dest, dest_len);
+}
+
+// Device helper: merlin_rng_init.
+static inline void merlin_rng_init(thread merlin_rng* mrng, const thread merlin_transcript* mctx) {
+    memcpy(&mrng->sctx, &mctx->sctx, sizeof(merlin_strobe128));
+    mrng->finalized = 0;
+}
+
+// Device helper: merlin_rng_commit_witness_bytes.
+static inline void merlin_rng_commit_witness_bytes(thread merlin_rng* mrng, const constant uchar* label, ulong label_len, const thread uchar* witness, ulong witness_len) {
+    assert(!mrng->finalized);
+    ulong witness_len_bytes = witness_len;
+    strobe128_meta_ad(&mrng->sctx, label, label_len, 0);
+    strobe128_meta_ad(&mrng->sctx, (thread uchar*)&witness_len_bytes, 4, 1);
+    strobe128_key(&mrng->sctx, witness, witness_len, 0);
+}
+
+// Device helper: merlin_rng_finalize.
+static inline void merlin_rng_finalize(thread merlin_rng* mrng, const thread uchar entropy[32]) {
+    assert(!mrng->finalized);
+    strobe128_meta_ad(&mrng->sctx, SR_LIT_U8("rng"), 3, 0);
+    strobe128_key(&mrng->sctx, entropy, 32, 0);
+    mrng->finalized = 1;
+}
+
+// Device helper: merlin_rng_random_bytes.
+static inline void merlin_rng_random_bytes(thread merlin_rng* mrng, thread uchar* buffer, ulong buffer_len) {
+    assert(mrng->finalized);
+    ulong buffer_len_bytes = buffer_len;
+    strobe128_meta_ad(&mrng->sctx, (thread uchar*)&buffer_len_bytes, 4, 0);
+    strobe128_prf(&mrng->sctx, buffer, buffer_len, 0);
+}
+
+// Device helper: merlin_rng_wipe.
+static inline void merlin_rng_wipe(thread merlin_rng* mrng) {
+
+    memset(&mrng->sctx, 0, sizeof(merlin_strobe128));
+
+}
+
+
+//ristretto255_impl
+
+
+
+
+
+
+static constant bignum25519 one = { 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 };
+static constant bignum25519 zero = { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
+static constant bignum25519 MINUS_ONE = {
+    67108844, 33554431, 67108863, 33554431, 67108863, 33554431, 67108863, 33554431, 67108863, 33554431
+};
+static constant bignum25519 SQRT_M1 = {
+    34513072, 25610706,  9377949, 3500415, 12389472,
+    33281959, 41962654, 31548777,  326685, 11406482
+};
+static constant bignum25519 EDWARDS_D = {
+    56195235, 13857412, 51736253,  6949390,   114729,
+    24766616, 60832955, 30306712, 48412415, 21499315
+};
+static constant bignum25519 INVSQRT_A_MINUS_D = {
+  6111466,  4156064, 39310137, 12243467, 41204824,
+  120896, 20826367, 26493656,  6093567, 31568420
+};
+static constant bignum25519 EDWARDS_D_MINUS_ONE_SQUARED = {
+  15551776, 22456977, 53683765, 23429360, 55212328, 10178283, 40474537, 4729243, 61826754, 23438029
+};
+static constant bignum25519 ONE_MINUS_EDWARDS_D_SQUARED = {
+  6275446, 16937061, 44170319, 29780721, 11667076, 7397348, 39186143, 1766194, 42675006, 672202
+};
+static constant bignum25519 SQRT_AD_MINUS_ONE = {
+  24849947, 33400850, 43495378, 6347714, 46036536, 32887293, 41837720, 18186727, 66238516, 14525638
+};
+
+static inline void sr_copy_bignum25519(thread bignum25519 out, const constant bignum25519 in) {
+    for (uint i = 0; i < 10; ++i) {
+        out[i] = in[i];
+    }
+}
+
+static inline void curve25519_copy(thread bignum25519 out, const constant bignum25519 in) {
+    sr_copy_bignum25519(out, in);
+}
+
+static inline void curve25519_add_reduce(thread bignum25519 out, const constant bignum25519 a, const thread bignum25519 b) {
+    bignum25519 local_a = { 0 };
+    sr_copy_bignum25519(local_a, a);
+    curve25519_add_reduce(out, local_a, b);
+}
+
+static inline void curve25519_add_reduce(thread bignum25519 out, const thread bignum25519 a, const constant bignum25519 b) {
+    bignum25519 local_b = { 0 };
+    sr_copy_bignum25519(local_b, b);
+    curve25519_add_reduce(out, a, local_b);
+}
+
+static inline void curve25519_sub_reduce(thread bignum25519 out, const constant bignum25519 a, const thread bignum25519 b) {
+    bignum25519 local_a = { 0 };
+    sr_copy_bignum25519(local_a, a);
+    curve25519_sub_reduce(out, local_a, b);
+}
+
+static inline void curve25519_sub_reduce(thread bignum25519 out, const thread bignum25519 a, const constant bignum25519 b) {
+    bignum25519 local_b = { 0 };
+    sr_copy_bignum25519(local_b, b);
+    curve25519_sub_reduce(out, a, local_b);
+}
+
+static inline void curve25519_neg(thread bignum25519 out, const constant bignum25519 a) {
+    bignum25519 local_a = { 0 };
+    sr_copy_bignum25519(local_a, a);
+    curve25519_neg(out, local_a);
+}
+
+static inline void curve25519_mul(thread bignum25519 out, const constant bignum25519 a, const thread bignum25519 b) {
+    bignum25519 local_a = { 0 };
+    sr_copy_bignum25519(local_a, a);
+    curve25519_mul(out, local_a, b);
+}
+
+static inline void curve25519_mul(thread bignum25519 out, const thread bignum25519 a, const constant bignum25519 b) {
+    bignum25519 local_b = { 0 };
+    sr_copy_bignum25519(local_b, b);
+    curve25519_mul(out, a, local_b);
+}
+
+static inline void curve25519_move_conditional_bytes(thread uint8_t out[96], const thread uint8_t in[96], uint32_t flag) {
+    const uint32_t nb = flag - 1, b = ~nb;
+    for (int i = 0; i < 96; ++i) {
+        out[i] = static_cast<uint8_t>((out[i] & nb) | (in[i] & b));
+    }
+}
+
+
+static inline uchar uchar_ct_eq(const uchar a, const uchar b);
+static inline uchar bignum25519_is_negative(thread unsigned char bytes[32]);
+
+/**
+ * Check if two bytes are equal in constant time.
+ *
+ * Returns 1 iff the bytes are equals and 0 otherwise.
+ */
+static inline uchar uchar_ct_eq(const unsigned char a, const unsigned char b) {
+    unsigned char x = ~(a ^ b);
+
+    x &= x >> 4;
+    x &= x >> 2;
+    x &= x >> 1;
+
+    return (uchar)x;
+}
+
+/**
+ * Check if two 32 bytes arrays are equal in constant time.
+ *
+ * Returns 1 iff the bytes are equals and 0 otherwise.
+ */
+static inline uchar uint8_32_ct_eq(const thread unsigned char a[32], const thread unsigned char b[32]) {
+    unsigned char x = 1;
+    unsigned char i;
+
+    for (i = 0; i < 32; i++) {
+        x &= uchar_ct_eq(a[i], b[i]);
+    }
+
+    return (uchar)x;
+}
+
+/**
+ * Check if two field elements are equal in constant time.
+ *
+ * Returns 1 iff the elements are equals and 0 otherwise.
+ */
+static inline uchar bignum25519_ct_eq(const thread bignum25519 a, const thread bignum25519 b) {
+    unsigned char c[32] = { 0 };
+    unsigned char d[32] = { 0 };
+
+    curve25519_contract(c, a);
+    curve25519_contract(d, b);
+
+    uchar result = uint8_32_ct_eq(c, d);
+
+    return result;
+}
+
+static inline uchar bignum25519_ct_eq(const constant bignum25519 a, const thread bignum25519 b) {
+    bignum25519 local_a = { 0 };
+    sr_copy_bignum25519(local_a, a);
+    return bignum25519_ct_eq(local_a, b);
+}
+
+/**
+ * Ascertain if a field element (encoded as bytes) is negative.
+ *
+ * Returns 1 iff the element is negative and 0 otherwise.
+ */
+static inline uchar bignum25519_is_negative(thread unsigned char bytes[32]) {
+    uchar low_bit_is_set = bytes[0] & 1;
+
+    return low_bit_is_set;
+}
+
+// Device helper: curve25519_sqrt_ratio_i.
+static inline uchar curve25519_sqrt_ratio_i(thread bignum25519 out, const thread bignum25519 u, const thread bignum25519 v) {
+    bignum25519 tmp = { 0 }, v3 = { 0 }, v7 = { 0 }, r = { 0 }, r_prime = { 0 }, r_negative = { 0 }, check = { 0 }, i = { 0 }, u_neg = { 0 }, u_neg_i = { 0 };
+    unsigned char r_bytes[32] = { 0 };
+    uchar r_is_negative;
+    uchar correct_sign_sqrt;
+    uchar flipped_sign_sqrt;
+    uchar flipped_sign_sqrt_i;
+    uchar was_nonzero_square;
+    uchar should_rotate;
+
+    curve25519_square(tmp, v);      // v²
+    curve25519_mul(v3, tmp, v);     // v³
+    curve25519_square(tmp, v3);      // v⁶
+    curve25519_mul(v7, tmp, v);     // v⁷
+    curve25519_mul(tmp, u, v7);     // u*v^7
+    curve25519_pow_two252m3(r, tmp); // (u*v^7)^{(p-5)/8}
+    curve25519_mul(r, r, u);        // (u)*(u*v^7)^{(p-5)/8}
+    curve25519_mul(r, r, v3);        // (u)*(u*v^7)^{(p-5)/8}
+    curve25519_square(tmp, r);       // tmp = r^2
+    curve25519_mul(check, v, tmp);  // check = r^2 * v
+
+    curve25519_neg(u_neg, u);
+    curve25519_mul(u_neg_i, u_neg, SQRT_M1);
+
+    correct_sign_sqrt = bignum25519_ct_eq(check, u);
+    flipped_sign_sqrt = bignum25519_ct_eq(check, u_neg);
+    flipped_sign_sqrt_i = bignum25519_ct_eq(check, u_neg_i);
+
+    curve25519_mul(r_prime, r, SQRT_M1);
+    should_rotate = flipped_sign_sqrt | flipped_sign_sqrt_i;
+    curve25519_swap_conditional(r, r_prime, should_rotate);
+
+    // Choose the non-negative square root
+    curve25519_contract(r_bytes, r);
+    r_is_negative = bignum25519_is_negative(r_bytes);
+    curve25519_neg(r_negative, r);
+    curve25519_swap_conditional(r, r_negative, r_is_negative);
+
+    was_nonzero_square = correct_sign_sqrt | flipped_sign_sqrt;
+
+    curve25519_copy(out, r);
+
+    return was_nonzero_square;
+}
+
+static inline uchar curve25519_sqrt_ratio_i(thread bignum25519 out, const constant bignum25519 u, const thread bignum25519 v) {
+    bignum25519 local_u = { 0 };
+    sr_copy_bignum25519(local_u, u);
+    return curve25519_sqrt_ratio_i(out, local_u, v);
+}
+
+/**
+ * Calculate either `sqrt(1/v)` for a field element `v`.
+ *
+ * Returns:
+ *  - 1 and stores `+sqrt(1/v)` in `out` if `v` was a non-zero square,
+ *  - 0 and stores `0` in `out` if `v` was zero,
+ *  - 0 and stores `+sqrt(i/v)` in `out` if `v` was a non-zero non-square.
+ */
+static inline uchar curve25519_invsqrt(thread bignum25519 out, const thread bignum25519 v) {
+    return curve25519_sqrt_ratio_i(out, one, v);
+}
+
+/**
+ * Attempt to decompress `bytes` to a Ristretto group `element`.
+ *
+ * Returns 0 if the point could not be decoded and 1 otherwise.
+ */
+static inline int ristretto_decode(thread ge25519* element, const thread unsigned char bytes[32]) {
+    bignum25519 s = { 0 }, ss = { 0 };
+    bignum25519 u1 = { 0 }, u1_sqr = { 0 }, u2 = { 0 }, u2_sqr = { 0 };
+    bignum25519 v = { 0 }, i = { 0 }, minus_d = { 0 }, dx = { 0 }, dy = { 0 }, x = { 0 }, y = { 0 }, t = { 0 };
+    bignum25519 tmp = { 0 };
+    unsigned char s_bytes_check[32] = { 0 };
+    unsigned char x_bytes[32] = { 0 };
+    unsigned char t_bytes[32] = { 0 };
+    uchar s_encoding_is_canonical;
+    uchar s_is_negative;
+    uchar x_is_negative;
+    uchar t_is_negative;
+    uchar y_is_zero;
+    uchar ok;
+
+    // Step 1: Check that the encoding of the field element is canonical
+    curve25519_expand(s, bytes);
+    curve25519_contract(s_bytes_check, s);
+
+    s_encoding_is_canonical = uint8_32_ct_eq(bytes, s_bytes_check);
+    s_is_negative = bignum25519_is_negative(s_bytes_check);
+
+    // Bail out if the field element encoding was non-canonical or negative
+    if (s_encoding_is_canonical == 0 || s_is_negative == 1) {
+        return 0;
+    }
+
+    // Step 2: Compute (X:Y:Z:T)
+    // XXX can we eliminate these reductions
+    curve25519_square(ss, s);
+    curve25519_sub_reduce(u1, one, ss);    //  1 + as², where a = -1, d = -121665/121666
+    curve25519_add_reduce(u2, one, ss);    //  1 - as²
+    curve25519_square(u1_sqr, u1);         // (1 + as²)²
+    curve25519_square(u2_sqr, u2);         // (1 - as²)²
+    curve25519_neg(minus_d, EDWARDS_D);    // -d               // XXX store as const?
+    curve25519_mul(tmp, minus_d, u1_sqr);  // ad(1+as²)²
+    curve25519_sub_reduce(v, tmp, u2_sqr); // ad(1+as²)² - (1-as²)²
+    curve25519_mul(tmp, v, u2_sqr);        // v = (ad(1+as²)² - (1-as²)²)(1-as²)²
+
+    ok = curve25519_invsqrt(i, tmp);       // i = 1/sqrt{(ad(1+as²)² - (1-as²)²)(1-as²)²}
+
+    // Step 3: Calculate x and y denominators, then compute x.
+    curve25519_mul(dx, i, u2);             // 1/sqrt(v)
+    curve25519_mul(tmp, dx, v);            // v/sqrt(v)
+    curve25519_mul(dy, i, tmp);            // 1/(1-as²)
+    curve25519_add_reduce(tmp, s, s);      // 2s
+    curve25519_mul(x, tmp, dx);            // x = |2s/sqrt(v)| = +sqrt(4s²/(ad(1+as²)² - (1-as²)²))
+    curve25519_contract(x_bytes, x);
+
+    // Step 4: Conditionally negate x if it's negative.
+    x_is_negative = bignum25519_is_negative(x_bytes);
+
+    curve25519_neg(tmp, x);
+    curve25519_swap_conditional(x, tmp, x_is_negative);
+
+    // Step 5: Compute y = (1-as²)/(1+as²) and t = {(1+as²)sqrt(4s²/(ad(1+as²)²-(1-as²)²))}/(1-as²)
+    curve25519_mul(y, u1, dy);
+    curve25519_mul(t, x, y);
+    curve25519_contract(t_bytes, t);
+
+    t_is_negative = bignum25519_is_negative(t_bytes);
+    y_is_zero = bignum25519_ct_eq(zero, y);
+
+    if (ok == 0 || t_is_negative == 1 || y_is_zero == 1) {
+        return 0;
+    }
+
+    curve25519_copy(element->x, x);
+    curve25519_copy(element->y, y);
+    curve25519_copy(element->z, one);
+    curve25519_copy(element->t, t);
+
+    return 1;
+}
+
+// Device helper: ristretto_encode.
+static inline void ristretto_encode(thread unsigned char bytes[32], const thread ge25519 element) {
+    bignum25519 u1 = { 0 }, u2 = { 0 }, u22 = { 0 }, i1 = { 0 }, i2 = { 0 }, z_inv = { 0 }, den_inv = { 0 }, ix = { 0 }, iy = { 0 }, invsqrt = { 0 }, tmp1 = { 0 }, tmp2 = { 0 };
+    bignum25519 x = { 0 }, y = { 0 }, y_neg = { 0 }, s = { 0 }, s_neg = { 0 };
+    bignum25519 enchanted_denominator = { 0 };
+    unsigned char contracted[32] = { 0 };
+    uchar x_zinv_is_negative;
+    uchar s_is_negative;
+    uchar rotate;
+
+    curve25519_add_reduce(tmp1, element.z, element.y);
+    curve25519_sub_reduce(tmp2, element.z, element.y);
+    curve25519_mul(u1, tmp1, tmp2);
+    curve25519_mul(u2, element.x, element.y);
+
+    curve25519_square(u22, u2);
+    curve25519_mul(tmp1, u1, u22);
+
+    // This is always square so we don't need to check the return value
+    int ok = curve25519_invsqrt(invsqrt, tmp1);
+
+    curve25519_mul(i1, invsqrt, u1);
+    curve25519_mul(i2, invsqrt, u2);
+    curve25519_mul(tmp1, i2, element.t);
+    curve25519_mul(z_inv, tmp1, i1);
+    curve25519_mul(ix, element.x, SQRT_M1);
+    curve25519_mul(iy, element.y, SQRT_M1);
+    curve25519_mul(enchanted_denominator, i1, INVSQRT_A_MINUS_D);
+    curve25519_mul(tmp1, element.t, z_inv);
+    curve25519_contract(contracted, tmp1);
+
+    rotate = bignum25519_is_negative(contracted);
+
+    curve25519_copy(x, element.x);
+    curve25519_copy(y, element.y);
+
+    // Rotate into the distinguished Jacobi quartic quadrant
+    curve25519_swap_conditional(x, iy, rotate);
+    curve25519_swap_conditional(y, ix, rotate);
+    curve25519_swap_conditional(i2, enchanted_denominator, rotate);
+
+    // Next we torque the points to be non-negative
+
+    // Conditionally flip the sign of y to be positive
+    curve25519_mul(tmp1, x, z_inv);
+    curve25519_contract(contracted, tmp1);
+
+    x_zinv_is_negative = bignum25519_is_negative(contracted);
+
+    curve25519_neg(y_neg, y);
+    curve25519_swap_conditional(y, y_neg, x_zinv_is_negative);
+
+    curve25519_sub_reduce(tmp1, element.z, y);
+    curve25519_mul(s, i2, tmp1);
+    curve25519_contract(contracted, s);
+
+    // Conditionally flip the sign of s to be positive
+    s_is_negative = bignum25519_is_negative(contracted);
+
+    curve25519_neg(s_neg, s);
+    curve25519_swap_conditional(s, s_neg, s_is_negative);
+
+    // Output the compressed form of s
+    curve25519_contract(bytes, s);
+}
+
+/**
+ * Test equality of two `ristretto_point_t`s in constant time.
+ *
+ * Returns 1 if the two points are equal, and 0 otherwise.
+ */
+static inline int ristretto_ct_eq(const thread ge25519* a, const thread ge25519* b) {
+    bignum25519 x1y2 = { 0 }, y1x2 = { 0 }, x1x2 = { 0 }, y1y2 = { 0 };
+    uchar check_one, check_two;
+
+    curve25519_mul(x1y2, a->x, b->y);
+    curve25519_mul(y1x2, a->y, b->x);
+    curve25519_mul(x1x2, a->x, b->x);
+    curve25519_mul(y1y2, a->y, b->y);
+
+    check_one = bignum25519_ct_eq(x1y2, y1x2);
+    check_two = bignum25519_ct_eq(x1x2, y1y2);
+
+    return check_one | check_two;
+}
+
+// Device helper: elligator_ristretto_flavor.
+static inline void elligator_ristretto_flavor(thread ge25519* P, const thread bignum25519 r0) {
+    bignum25519 r = { 0 }, r02 = { 0 }, rOne = { 0 }, Ns = { 0 }, d_mul_r = { 0 }, c_min_d_mul_r = { 0 }, r_add_d = { 0 }, D = { 0 }, s = { 0 }, s_prime = { 0 }, s_prime_neg = { 0 }, c = { 0 }, r_min_one = { 0 }, c_mul_r_min_one = { 0 }, c_mul_r_min_one_mul_d = { 0 }, Nt = { 0 }, s2 = { 0 }, s_add_s = { 0 }, x = { 0 }, y = { 0 }, z = { 0 }, t = { 0 }, px = { 0 }, py = { 0 }, pz = { 0 }, pt = { 0 };
+
+    curve25519_copy(c, MINUS_ONE);
+    curve25519_square(r02, r0);
+    curve25519_mul(r, r02, SQRT_M1);
+    curve25519_add_reduce(rOne, r, one);
+    curve25519_mul(Ns, rOne, ONE_MINUS_EDWARDS_D_SQUARED);
+    curve25519_mul(d_mul_r, EDWARDS_D, r);
+    curve25519_sub_reduce(c_min_d_mul_r, c, d_mul_r);
+    curve25519_add_reduce(r_add_d, r, EDWARDS_D);
+    curve25519_mul(D, c_min_d_mul_r, r_add_d);
+    uchar Ns_D_is_sq = curve25519_sqrt_ratio_i(s, Ns, D);
+    curve25519_mul(s_prime, s, r0);
+    int8_t s_prime_is_pos = !bignum25519_is_negative((thread uchar*)s_prime);
+    curve25519_neg(s_prime_neg, s_prime);
+    curve25519_swap_conditional(s_prime, s_prime_neg, s_prime_is_pos);
+    curve25519_swap_conditional(s, s_prime, !Ns_D_is_sq);
+    curve25519_move_conditional_bytes((thread uchar*)c, (thread uchar*)r, !Ns_D_is_sq);
+    curve25519_sub_reduce(r_min_one, r, one);
+    curve25519_mul(c_mul_r_min_one, c, r_min_one);
+    curve25519_mul(c_mul_r_min_one_mul_d, c_mul_r_min_one, EDWARDS_D_MINUS_ONE_SQUARED);
+    curve25519_sub_reduce(Nt, c_mul_r_min_one_mul_d, D);
+    curve25519_square(s2, s);
+
+    curve25519_add_reduce(s_add_s, s, s);
+
+    curve25519_mul(x, s_add_s, D);
+    curve25519_sub_reduce(y, one, s2);
+    curve25519_mul(z, Nt, SQRT_AD_MINUS_ONE);
+    curve25519_add_reduce(t, one, s2);
+
+    curve25519_mul(px, x, t);
+    curve25519_mul(py, y, z);
+    curve25519_mul(pz, z, t);
+    curve25519_mul(pt, x, y);
+
+    curve25519_copy(P->x, px);
+    curve25519_copy(P->y, py);
+    curve25519_copy(P->z, pz);
+    curve25519_copy(P->t, pt);
+}
+
+// Device helper: ristretto_from_uniform_bytes.
+static inline void ristretto_from_uniform_bytes(thread ge25519* element, const unsigned char bytes[64]) {
+    uchar r_1_bytes[32] = { 0 };
+    memcpy(r_1_bytes, bytes, 32);
+    bignum25519 r_1 = { 0 };
+    curve25519_expand(r_1, r_1_bytes);
+    ge25519 R_1 = { 0 };
+    elligator_ristretto_flavor(&R_1, r_1);
+
+    uchar r_2_bytes[32] = { 0 };
+    memcpy(r_2_bytes, bytes + 32, 32);
+    bignum25519 r_2 = { 0 };
+    curve25519_expand(r_2, r_2_bytes);
+    ge25519 R_2 = { 0 };
+    elligator_ristretto_flavor(&R_2, r_2);
+
+    ge25519_add(element, &R_1, &R_2);
+}
+
+/*
+    scalarmults
+*/
+
+static inline void ge25519_set_neutral(thread ge25519* r)
+{
+    memset(r, 0, sizeof(ge25519));
+    r->y[0] = 1;
+    r->z[0] = 1;
+}
+
+// Device helper: ge25519_cmove_stride4b.
+static inline void ge25519_cmove_stride4b(thread long* r, thread long* p, thread long* pos, thread long* n, int stride) {
+    long x0 = p[0], x1 = p[1], x2 = p[2], x3 = p[3], y0 = 0, y1 = 0, y2 = 0, y3 = 0;
+    for (p += stride; p < n; p += stride) {
+        volatile int flag = (p == pos);
+        y0 = p[0];
+        y1 = p[1];
+        y2 = p[2];
+        y3 = p[3];
+        x0 = flag ? y0 : x0;
+        x1 = flag ? y1 : x1;
+        x2 = flag ? y2 : x2;
+        x3 = flag ? y3 : x3;
+    }
+    r[0] = x0;
+    r[1] = x1;
+    r[2] = x2;
+    r[3] = x3;
+}
+#define HAS_CMOVE_STRIDE4B
+
+// Device helper: ge25519_move_conditional_pniels_array.
+static inline void ge25519_move_conditional_pniels_array(thread ge25519_pniels* r, const thread ge25519_pniels* p, int pos, int n) {
+#ifdef HAS_CMOVE_STRIDE4B
+    ulong i = 0;
+    for (i = 0; i < sizeof(ge25519_pniels) / sizeof(long); i += 4) {
+        ge25519_cmove_stride4b(((thread long*)r) + i,
+            ((thread long*)p) + i,
+            ((thread long*)(p + pos)) + i,
+            ((thread long*)(p + n)) + i,
+            sizeof(ge25519_pniels) / sizeof(long));
+    }
+#else
+    ulong i = 0;
+    for (i = 0; i < n; i++) {
+        ge25519_move_conditional_pniels(r, p + i, pos == i);
+    }
+#endif
+}
+
+/* computes [s1]p1, constant time */
+static inline void ge25519_scalarmult_tg(thread ge25519* r, const thread ge25519* p1, const bignum256modm s1) {
+    signed char slide1[64] = { 0 };
+    ge25519_pniels pre1[9] = { 0 };
+    ge25519_pniels pre = { 0 };
+    ge25519 d1 = { 0 };
+    ge25519_p1p1 t = { 0 };
+    int i = 0;
+
+    contract256_window4_modm(slide1, s1);
+
+    ge25519_full_to_pniels(pre1 + 1, p1);
+    ge25519_double(&d1, p1);
+
+    ge25519_set_neutral(r);
+    ge25519_full_to_pniels(pre1, r);
+
+    ge25519_full_to_pniels(pre1 + 2, &d1);
+    for (i = 1; i < 7; i++) {
+        ge25519_pnielsadd(&pre1[i + 2], &d1, &pre1[i]);
+    }
+
+    for (i = 63; i >= 0; i--) {
+        int k = abs(slide1[i]);
+        ge25519_double_partial(r, r);
+        ge25519_double_partial(r, r);
+        ge25519_double_partial(r, r);
+        ge25519_double_p1p1(&t, r);
+        ge25519_move_conditional_pniels_array(&pre, pre1, k, 9);
+        ge25519_p1p1_to_full(r, &t);
+        ge25519_pnielsadd_p1p1(&t, r, &pre, (unsigned char)slide1[i] >> 7);
+        ge25519_p1p1_to_partial(r, &t);
+    }
+    curve25519_mul(r->t, t.x, t.y);
+}
+
+//sha2_impl
+
+
+
+
+/*
+ * ASSERT NOTE:
+ * Some sanity checking code is included using assert().  On my FreeBSD
+ * system, this additional code can be removed by compiling with NDEBUG
+ * defined.  Check your own systems manpage on assert() to see how to
+ * compile WITHOUT the sanity checking code on your system.
+ *
+ * UNROLLED TRANSFORM LOOP NOTE:
+ * You can define SHA2_UNROLL_TRANSFORM to use the unrolled transform
+ * loop version for the hash transform rounds (defined using macros
+ * later in this file).  Either define on the command line, for example:
+ *
+ *   cc -DSHA2_UNROLL_TRANSFORM -o sha2 sha2.c sha2prog.c
+ *
+ * or define below:
+ *
+ *   #define SHA2_UNROLL_TRANSFORM
+ *
+ */
+
+ /*** SHA-256/384/512 Machine Architecture Definitions *****************/
+ /*
+  * BYTE_ORDER NOTE:
+  *
+  * Please make sure that your system defines BYTE_ORDER.  If your
+  * architecture is little-endian, make sure it also defines
+  * LITTLE_ENDIAN and that the two (BYTE_ORDER and LITTLE_ENDIAN) are
+  * equivilent.
+  *
+  * If your system does not define the above, then you can do so by
+  * hand like this:
+  *
+  *   #define LITTLE_ENDIAN 1234
+  *   #define BIG_ENDIAN    4321
+  *
+  * And for little-endian machines, add:
+  *
+  *   #define BYTE_ORDER LITTLE_ENDIAN
+  *
+  * Or for big-endian machines:
+  *
+  *   #define BYTE_ORDER BIG_ENDIAN
+  *
+  * The FreeBSD machine this was written on defines BYTE_ORDER
+  * appropriately by including <sys/types.h> (which in turn includes
+  * <machine/endian.h> where the appropriate definitions are actually
+  * made).
+  */
+
+#if !defined(BYTE_ORDER) || (BYTE_ORDER != LITTLE_ENDIAN && BYTE_ORDER != BIG_ENDIAN)
+#error Define BYTE_ORDER to be equal to either LITTLE_ENDIAN or BIG_ENDIAN
+#endif
+
+typedef uchar  sha2_byte;	/* Exactly 1 byte */
+typedef uint sha2_word32;	/* Exactly 4 bytes */
+typedef ulong sha2_word64;	/* Exactly 8 bytes */
+
+/*** SHA-256/384/512 Various Length Definitions ***********************/
+/* NOTE: Most of these are in sha2.h */
+#define   SHA1_SHORT_BLOCK_LENGTH	(SHA1_BLOCK_LENGTH - 8)
+#define SHA256_SHORT_BLOCK_LENGTH	(SHA256_BLOCK_LENGTH - 8)
+#define SHA512_SHORT_BLOCK_LENGTH	(SHA512_BLOCK_LENGTH - 16)
+#define SHA2_UNROLL_TRANSFORM
+/*
+ * Macro for incrementally adding the unsigned 64-bit integer n to the
+ * unsigned 128-bit integer (represented using a two-element array of
+ * 64-bit words):
+ */
+#define ADDINC128(w,n)	{ \
+    (w)[0] += (sha2_word64)(n); \
+    if ((w)[0] < (n)) { \
+        (w)[1]++; \
+    } \
+}
+
+#define MEMCPY_BCOPY(d,s,l)	memcpy((d), (s), (l))
+
+ /*** THE SIX LOGICAL FUNCTIONS ****************************************/
+ /*
+  * Bit shifting and rotation (used by the six SHA-XYZ logical functions:
+  *
+  *   NOTE:  In the original SHA-256/384/512 document, the shift-right
+  *   function was named R and the rotate-right function was called S.
+  *   (See: http://csrc.nist.gov/cryptval/shs/sha256-384-512.pdf on the
+  *   web.)
+  *
+  *   The newer NIST FIPS 180-2 document uses a much clearer naming
+  *   scheme, SHR for shift-right, ROTR for rotate-right, and ROTL for
+  *   rotate-left.  (See:
+  *   http://csrc.nist.gov/publications/fips/fips180-2/fips180-2.pdf
+  *   on the web.)
+  *
+  *   WARNING: These macros must be used cautiously, since they reference
+  *   supplied parameters sometimes more than once, and thus could have
+  *   unexpected side-effects if used without taking this into account.
+  */
+
+  /* Shift-right (used in SHA-256, SHA-384, and SHA-512): */
+#define SHR(b,x)        ((x) >> (b))
+/* 32-bit Rotate-right (used in SHA-256): */
+#define ROTR32(b,x)	(((x) >> (b)) | ((x) << (32 - (b))))
+/* 64-bit Rotate-right (used in SHA-384 and SHA-512): */
+#define ROTR64(b,x)	(((x) >> (b)) | ((x) << (64 - (b))))
+/* 32-bit Rotate-left (used in SHA-1): */
+#define ROTL32(b,x)	(((x) << (b)) | ((x) >> (32 - (b))))
+
+/* Two of six logical functions used in SHA-1, SHA-256, SHA-384, and SHA-512: */
+#define Ch(x,y,z)	(((x) & (y)) ^ ((~(x)) & (z)))
+#define Maj(x,y,z)	(((x) & (y)) ^ ((x) & (z)) ^ ((y) & (z)))
+
+/* Function used in SHA-1: */
+#define Parity(x,y,z)	((x) ^ (y) ^ (z))
+
+/* Four of six logical functions used in SHA-256: */
+#define Sigma0_256(x)	(ROTR32(2,  (x)) ^ ROTR32(13, (x)) ^ ROTR32(22, (x)))
+#define Sigma1_256(x)	(ROTR32(6,  (x)) ^ ROTR32(11, (x)) ^ ROTR32(25, (x)))
+#define sigma0_256(x)	(ROTR32(7,  (x)) ^ ROTR32(18, (x)) ^ SHR(3 ,   (x)))
+#define sigma1_256(x)	(ROTR32(17, (x)) ^ ROTR32(19, (x)) ^ SHR(10,   (x)))
+
+/* Four of six logical functions used in SHA-384 and SHA-512: */
+#define Sigma0_512(x)	(ROTR64(28, (x)) ^ ROTR64(34, (x)) ^ ROTR64(39, (x)))
+#define Sigma1_512(x)	(ROTR64(14, (x)) ^ ROTR64(18, (x)) ^ ROTR64(41, (x)))
+#define sigma0_512(x)	(ROTR64( 1, (x)) ^ ROTR64( 8, (x)) ^ SHR( 7,   (x)))
+#define sigma1_512(x)	(ROTR64(19, (x)) ^ ROTR64(61, (x)) ^ SHR( 6,   (x)))
+
+/*** INTERNAL FUNCTION PROTOTYPES *************************************/
+/* NOTE: These should not be accessed directly from outside this
+ * library -- they are intended for private internal visibility/use
+ * only.
+ */
+static inline void sha512_Last(thread SHA512_CTX*);
+
+/*** SHA-XYZ INITIAL HASH VALUES AND CONSTANTS ************************/
+
+/* Hash constant words K for SHA-1: */
+#define K1_0_TO_19	0x5a827999UL
+#define K1_20_TO_39	0x6ed9eba1UL
+#define K1_40_TO_59	0x8f1bbcdcUL
+#define K1_60_TO_79	0xca62c1d6UL
+
+/* Initial hash value H for SHA-1: */
+static constant sha2_word32 sha1_initial_hash_value[SHA1_DIGEST_LENGTH / sizeof(sha2_word32)] = {
+    0x67452301UL,
+    0xefcdab89UL,
+    0x98badcfeUL,
+    0x10325476UL,
+    0xc3d2e1f0UL
+};
+
+/* Hash constant words K for SHA-256: */
+static constant sha2_word32 K256[64] = {
+    0x428a2f98UL, 0x71374491UL, 0xb5c0fbcfUL, 0xe9b5dba5UL,
+    0x3956c25bUL, 0x59f111f1UL, 0x923f82a4UL, 0xab1c5ed5UL,
+    0xd807aa98UL, 0x12835b01UL, 0x243185beUL, 0x550c7dc3UL,
+    0x72be5d74UL, 0x80deb1feUL, 0x9bdc06a7UL, 0xc19bf174UL,
+    0xe49b69c1UL, 0xefbe4786UL, 0x0fc19dc6UL, 0x240ca1ccUL,
+    0x2de92c6fUL, 0x4a7484aaUL, 0x5cb0a9dcUL, 0x76f988daUL,
+    0x983e5152UL, 0xa831c66dUL, 0xb00327c8UL, 0xbf597fc7UL,
+    0xc6e00bf3UL, 0xd5a79147UL, 0x06ca6351UL, 0x14292967UL,
+    0x27b70a85UL, 0x2e1b2138UL, 0x4d2c6dfcUL, 0x53380d13UL,
+    0x650a7354UL, 0x766a0abbUL, 0x81c2c92eUL, 0x92722c85UL,
+    0xa2bfe8a1UL, 0xa81a664bUL, 0xc24b8b70UL, 0xc76c51a3UL,
+    0xd192e819UL, 0xd6990624UL, 0xf40e3585UL, 0x106aa070UL,
+    0x19a4c116UL, 0x1e376c08UL, 0x2748774cUL, 0x34b0bcb5UL,
+    0x391c0cb3UL, 0x4ed8aa4aUL, 0x5b9cca4fUL, 0x682e6ff3UL,
+    0x748f82eeUL, 0x78a5636fUL, 0x84c87814UL, 0x8cc70208UL,
+    0x90befffaUL, 0xa4506cebUL, 0xbef9a3f7UL, 0xc67178f2UL
+};
+
+/* Initial hash value H for SHA-256: */
+static constant sha2_word32 sha256_initial_hash_value[8] = {
+    0x6a09e667UL,
+    0xbb67ae85UL,
+    0x3c6ef372UL,
+    0xa54ff53aUL,
+    0x510e527fUL,
+    0x9b05688cUL,
+    0x1f83d9abUL,
+    0x5be0cd19UL
+};
+
+/* Hash constant words K for SHA-384 and SHA-512: */
+static constant sha2_word64 K512[80] = {
+    0x428a2f98d728ae22ULL, 0x7137449123ef65cdULL,
+    0xb5c0fbcfec4d3b2fULL, 0xe9b5dba58189dbbcULL,
+    0x3956c25bf348b538ULL, 0x59f111f1b605d019ULL,
+    0x923f82a4af194f9bULL, 0xab1c5ed5da6d8118ULL,
+    0xd807aa98a3030242ULL, 0x12835b0145706fbeULL,
+    0x243185be4ee4b28cULL, 0x550c7dc3d5ffb4e2ULL,
+    0x72be5d74f27b896fULL, 0x80deb1fe3b1696b1ULL,
+    0x9bdc06a725c71235ULL, 0xc19bf174cf692694ULL,
+    0xe49b69c19ef14ad2ULL, 0xefbe4786384f25e3ULL,
+    0x0fc19dc68b8cd5b5ULL, 0x240ca1cc77ac9c65ULL,
+    0x2de92c6f592b0275ULL, 0x4a7484aa6ea6e483ULL,
+    0x5cb0a9dcbd41fbd4ULL, 0x76f988da831153b5ULL,
+    0x983e5152ee66dfabULL, 0xa831c66d2db43210ULL,
+    0xb00327c898fb213fULL, 0xbf597fc7beef0ee4ULL,
+    0xc6e00bf33da88fc2ULL, 0xd5a79147930aa725ULL,
+    0x06ca6351e003826fULL, 0x142929670a0e6e70ULL,
+    0x27b70a8546d22ffcULL, 0x2e1b21385c26c926ULL,
+    0x4d2c6dfc5ac42aedULL, 0x53380d139d95b3dfULL,
+    0x650a73548baf63deULL, 0x766a0abb3c77b2a8ULL,
+    0x81c2c92e47edaee6ULL, 0x92722c851482353bULL,
+    0xa2bfe8a14cf10364ULL, 0xa81a664bbc423001ULL,
+    0xc24b8b70d0f89791ULL, 0xc76c51a30654be30ULL,
+    0xd192e819d6ef5218ULL, 0xd69906245565a910ULL,
+    0xf40e35855771202aULL, 0x106aa07032bbd1b8ULL,
+    0x19a4c116b8d2d0c8ULL, 0x1e376c085141ab53ULL,
+    0x2748774cdf8eeb99ULL, 0x34b0bcb5e19b48a8ULL,
+    0x391c0cb3c5c95a63ULL, 0x4ed8aa4ae3418acbULL,
+    0x5b9cca4f7763e373ULL, 0x682e6ff3d6b2b8a3ULL,
+    0x748f82ee5defb2fcULL, 0x78a5636f43172f60ULL,
+    0x84c87814a1f0ab72ULL, 0x8cc702081a6439ecULL,
+    0x90befffa23631e28ULL, 0xa4506cebde82bde9ULL,
+    0xbef9a3f7b2c67915ULL, 0xc67178f2e372532bULL,
+    0xca273eceea26619cULL, 0xd186b8c721c0c207ULL,
+    0xeada7dd6cde0eb1eULL, 0xf57d4f7fee6ed178ULL,
+    0x06f067aa72176fbaULL, 0x0a637dc5a2c898a6ULL,
+    0x113f9804bef90daeULL, 0x1b710b35131c471bULL,
+    0x28db77f523047d84ULL, 0x32caab7b40c72493ULL,
+    0x3c9ebe0a15c9bebcULL, 0x431d67c49c100d4cULL,
+    0x4cc5d4becb3e42b6ULL, 0x597f299cfc657e2aULL,
+    0x5fcb6fab3ad6faecULL, 0x6c44198c4a475817ULL
+};
+
+/* Initial hash value H for SHA-512 */
+static constant sha2_word64 sha512_initial_hash_value[8] = {
+    0x6a09e667f3bcc908ULL,
+    0xbb67ae8584caa73bULL,
+    0x3c6ef372fe94f82bULL,
+    0xa54ff53a5f1d36f1ULL,
+    0x510e527fade682d1ULL,
+    0x9b05688c2b3e6c1fULL,
+    0x1f83d9abfb41bd6bULL,
+    0x5be0cd19137e2179ULL
+};
+
+/*
+ * Constant used by SHA256/384/512_End() functions for converting the
+ * digest to a readable hexadecimal character string:
+ */
+static constant char sha2_hex_digits[] = "0123456789abcdef";
+
+/*** SHA-1: ***********************************************************/
+static inline void sha1_Init(thread SHA1_CTX* context) {
+    MEMCPY_BCOPY(context->state, sha1_initial_hash_value, SHA1_DIGEST_LENGTH);
+    memset(context->buffer, 0, SHA1_BLOCK_LENGTH);
+    context->bitcount = 0;
+}
+
+#ifdef SHA2_UNROLL_TRANSFORM
+
+/* Unrolled SHA-1 round macros: */
+
+#define ROUND1_0_TO_15(a,b,c,d,e)				\
+    (e) = ROTL32(5, (a)) + Ch((b), (c), (d)) + (e) +	\
+         K1_0_TO_19 + ( W1[j] = *data++ );		\
+    (b) = ROTL32(30, (b));	\
+    j++;
+
+#define ROUND1_16_TO_19(a,b,c,d,e)	\
+    T1 = W1[(j+13)&0x0f] ^ W1[(j+8)&0x0f] ^ W1[(j+2)&0x0f] ^ W1[j&0x0f];	\
+    (e) = ROTL32(5, a) + Ch(b,c,d) + e + K1_0_TO_19 + ( W1[j&0x0f] = ROTL32(1, T1) );	\
+    (b) = ROTL32(30, b);	\
+    j++;
+
+#define ROUND1_20_TO_39(a,b,c,d,e)	\
+    T1 = W1[(j+13)&0x0f] ^ W1[(j+8)&0x0f] ^ W1[(j+2)&0x0f] ^ W1[j&0x0f];	\
+    (e) = ROTL32(5, a) + Parity(b,c,d) + e + K1_20_TO_39 + ( W1[j&0x0f] = ROTL32(1, T1) );	\
+    (b) = ROTL32(30, b);	\
+    j++;
+
+#define ROUND1_40_TO_59(a,b,c,d,e)	\
+    T1 = W1[(j+13)&0x0f] ^ W1[(j+8)&0x0f] ^ W1[(j+2)&0x0f] ^ W1[j&0x0f];	\
+    (e) = ROTL32(5, a) + Maj(b,c,d) + e + K1_40_TO_59 + ( W1[j&0x0f] = ROTL32(1, T1) );	\
+    (b) = ROTL32(30, b);	\
+    j++;
+
+#define ROUND1_60_TO_79(a,b,c,d,e)	\
+    T1 = W1[(j+13)&0x0f] ^ W1[(j+8)&0x0f] ^ W1[(j+2)&0x0f] ^ W1[j&0x0f];	\
+    (e) = ROTL32(5, a) + Parity(b,c,d) + e + K1_60_TO_79 + ( W1[j&0x0f] = ROTL32(1, T1) );	\
+    (b) = ROTL32(30, b);	\
+    j++;
+
+// Device helper: sha1_Transform.
+static inline void sha1_Transform(const thread sha2_word32* state_in, const thread sha2_word32* data, thread sha2_word32* state_out) {
+    sha2_word32	a = 0, b = 0, c = 0, d = 0, e = 0;
+    sha2_word32	T1 = 0;
+    sha2_word32	W1[16] = { 0 };
+    int	j = 0;
+
+    /* Initialize registers with the prev. intermediate value */
+    a = state_in[0];
+    b = state_in[1];
+    c = state_in[2];
+    d = state_in[3];
+    e = state_in[4];
+
+    j = 0;
+
+    /* Rounds 0 to 15 unrolled: */
+    ROUND1_0_TO_15(a, b, c, d, e);
+    ROUND1_0_TO_15(e, a, b, c, d);
+    ROUND1_0_TO_15(d, e, a, b, c);
+    ROUND1_0_TO_15(c, d, e, a, b);
+    ROUND1_0_TO_15(b, c, d, e, a);
+    ROUND1_0_TO_15(a, b, c, d, e);
+    ROUND1_0_TO_15(e, a, b, c, d);
+    ROUND1_0_TO_15(d, e, a, b, c);
+    ROUND1_0_TO_15(c, d, e, a, b);
+    ROUND1_0_TO_15(b, c, d, e, a);
+    ROUND1_0_TO_15(a, b, c, d, e);
+    ROUND1_0_TO_15(e, a, b, c, d);
+    ROUND1_0_TO_15(d, e, a, b, c);
+    ROUND1_0_TO_15(c, d, e, a, b);
+    ROUND1_0_TO_15(b, c, d, e, a);
+    ROUND1_0_TO_15(a, b, c, d, e);
+
+    /* Rounds 16 to 19 unrolled: */
+    ROUND1_16_TO_19(e, a, b, c, d);
+    ROUND1_16_TO_19(d, e, a, b, c);
+    ROUND1_16_TO_19(c, d, e, a, b);
+    ROUND1_16_TO_19(b, c, d, e, a);
+
+    /* Rounds 20 to 39 unrolled: */
+    ROUND1_20_TO_39(a, b, c, d, e);
+    ROUND1_20_TO_39(e, a, b, c, d);
+    ROUND1_20_TO_39(d, e, a, b, c);
+    ROUND1_20_TO_39(c, d, e, a, b);
+    ROUND1_20_TO_39(b, c, d, e, a);
+    ROUND1_20_TO_39(a, b, c, d, e);
+    ROUND1_20_TO_39(e, a, b, c, d);
+    ROUND1_20_TO_39(d, e, a, b, c);
+    ROUND1_20_TO_39(c, d, e, a, b);
+    ROUND1_20_TO_39(b, c, d, e, a);
+    ROUND1_20_TO_39(a, b, c, d, e);
+    ROUND1_20_TO_39(e, a, b, c, d);
+    ROUND1_20_TO_39(d, e, a, b, c);
+    ROUND1_20_TO_39(c, d, e, a, b);
+    ROUND1_20_TO_39(b, c, d, e, a);
+    ROUND1_20_TO_39(a, b, c, d, e);
+    ROUND1_20_TO_39(e, a, b, c, d);
+    ROUND1_20_TO_39(d, e, a, b, c);
+    ROUND1_20_TO_39(c, d, e, a, b);
+    ROUND1_20_TO_39(b, c, d, e, a);
+
+    /* Rounds 40 to 59 unrolled: */
+    ROUND1_40_TO_59(a, b, c, d, e);
+    ROUND1_40_TO_59(e, a, b, c, d);
+    ROUND1_40_TO_59(d, e, a, b, c);
+    ROUND1_40_TO_59(c, d, e, a, b);
+    ROUND1_40_TO_59(b, c, d, e, a);
+    ROUND1_40_TO_59(a, b, c, d, e);
+    ROUND1_40_TO_59(e, a, b, c, d);
+    ROUND1_40_TO_59(d, e, a, b, c);
+    ROUND1_40_TO_59(c, d, e, a, b);
+    ROUND1_40_TO_59(b, c, d, e, a);
+    ROUND1_40_TO_59(a, b, c, d, e);
+    ROUND1_40_TO_59(e, a, b, c, d);
+    ROUND1_40_TO_59(d, e, a, b, c);
+    ROUND1_40_TO_59(c, d, e, a, b);
+    ROUND1_40_TO_59(b, c, d, e, a);
+    ROUND1_40_TO_59(a, b, c, d, e);
+    ROUND1_40_TO_59(e, a, b, c, d);
+    ROUND1_40_TO_59(d, e, a, b, c);
+    ROUND1_40_TO_59(c, d, e, a, b);
+    ROUND1_40_TO_59(b, c, d, e, a);
+
+    /* Rounds 60 to 79 unrolled: */
+    ROUND1_60_TO_79(a, b, c, d, e);
+    ROUND1_60_TO_79(e, a, b, c, d);
+    ROUND1_60_TO_79(d, e, a, b, c);
+    ROUND1_60_TO_79(c, d, e, a, b);
+    ROUND1_60_TO_79(b, c, d, e, a);
+    ROUND1_60_TO_79(a, b, c, d, e);
+    ROUND1_60_TO_79(e, a, b, c, d);
+    ROUND1_60_TO_79(d, e, a, b, c);
+    ROUND1_60_TO_79(c, d, e, a, b);
+    ROUND1_60_TO_79(b, c, d, e, a);
+    ROUND1_60_TO_79(a, b, c, d, e);
+    ROUND1_60_TO_79(e, a, b, c, d);
+    ROUND1_60_TO_79(d, e, a, b, c);
+    ROUND1_60_TO_79(c, d, e, a, b);
+    ROUND1_60_TO_79(b, c, d, e, a);
+    ROUND1_60_TO_79(a, b, c, d, e);
+    ROUND1_60_TO_79(e, a, b, c, d);
+    ROUND1_60_TO_79(d, e, a, b, c);
+    ROUND1_60_TO_79(c, d, e, a, b);
+    ROUND1_60_TO_79(b, c, d, e, a);
+
+    /* Compute the current intermediate hash value */
+    state_out[0] = state_in[0] + a;
+    state_out[1] = state_in[1] + b;
+    state_out[2] = state_in[2] + c;
+    state_out[3] = state_in[3] + d;
+    state_out[4] = state_in[4] + e;
+
+    /* Clean up */
+    a = b = c = d = e = T1 = 0;
+}
+
+#else  /* SHA2_UNROLL_TRANSFORM */
+
+// sha1_Transform: computes 1 transform.
+static inline void sha1_Transform(const thread sha2_word32* state_in, const thread sha2_word32* data, thread sha2_word32* state_out) {
+    sha2_word32	a = 0, b = 0, c = 0, d = 0, e = 0;
+    sha2_word32	T1 = 0;
+    sha2_word32	W1[16] = { 0 };
+    int	j = 0;
+
+    /* Initialize registers with the prev. intermediate value */
+    a = state_in[0];
+    b = state_in[1];
+    c = state_in[2];
+    d = state_in[3];
+    e = state_in[4];
+    j = 0;
+    do {
+        T1 = ROTL32(5, a) + Ch(b, c, d) + e + K1_0_TO_19 + (W1[j] = *data++);
+        e = d;
+        d = c;
+        c = ROTL32(30, b);
+        b = a;
+        a = T1;
+        j++;
+    } while (j < 16);
+
+    do {
+        T1 = W1[(j + 13) & 0x0f] ^ W1[(j + 8) & 0x0f] ^ W1[(j + 2) & 0x0f] ^ W1[j & 0x0f];
+        T1 = ROTL32(5, a) + Ch(b, c, d) + e + K1_0_TO_19 + (W1[j & 0x0f] = ROTL32(1, T1));
+        e = d;
+        d = c;
+        c = ROTL32(30, b);
+        b = a;
+        a = T1;
+        j++;
+    } while (j < 20);
+
+    do {
+        T1 = W1[(j + 13) & 0x0f] ^ W1[(j + 8) & 0x0f] ^ W1[(j + 2) & 0x0f] ^ W1[j & 0x0f];
+        T1 = ROTL32(5, a) + Parity(b, c, d) + e + K1_20_TO_39 + (W1[j & 0x0f] = ROTL32(1, T1));
+        e = d;
+        d = c;
+        c = ROTL32(30, b);
+        b = a;
+        a = T1;
+        j++;
+    } while (j < 40);
+
+    do {
+        T1 = W1[(j + 13) & 0x0f] ^ W1[(j + 8) & 0x0f] ^ W1[(j + 2) & 0x0f] ^ W1[j & 0x0f];
+        T1 = ROTL32(5, a) + Maj(b, c, d) + e + K1_40_TO_59 + (W1[j & 0x0f] = ROTL32(1, T1));
+        e = d;
+        d = c;
+        c = ROTL32(30, b);
+        b = a;
+        a = T1;
+        j++;
+    } while (j < 60);
+
+    do {
+        T1 = W1[(j + 13) & 0x0f] ^ W1[(j + 8) & 0x0f] ^ W1[(j + 2) & 0x0f] ^ W1[j & 0x0f];
+        T1 = ROTL32(5, a) + Parity(b, c, d) + e + K1_60_TO_79 + (W1[j & 0x0f] = ROTL32(1, T1));
+        e = d;
+        d = c;
+        c = ROTL32(30, b);
+        b = a;
+        a = T1;
+        j++;
+    } while (j < 80);
+
+    /* Compute the current intermediate hash value */
+    state_out[0] = state_in[0] + a;
+    state_out[1] = state_in[1] + b;
+    state_out[2] = state_in[2] + c;
+    state_out[3] = state_in[3] + d;
+    state_out[4] = state_in[4] + e;
+
+    /* Clean up */
+    a = b = c = d = e = T1 = 0;
+}
+
+#endif /* SHA2_UNROLL_TRANSFORM */
+
+// Device helper: sha1_Update.
+static inline void sha1_Update(thread SHA1_CTX* context, const thread sha2_byte* data, ulong len) {
+    unsigned int freespace = 0, usedspace = 0;
+
+    if (len == 0) {
+        /* Calling with no data is valid - we do nothing */
+        return;
+    }
+
+    usedspace = (context->bitcount >> 3) % SHA1_BLOCK_LENGTH;
+    if (usedspace > 0) {
+        /* Calculate how much free space is available in the buffer */
+        freespace = SHA1_BLOCK_LENGTH - usedspace;
+
+        if (len >= freespace) {
+            /* Fill the buffer completely and process it */
+            MEMCPY_BCOPY(((thread uchar*)context->buffer) + usedspace, data, freespace);
+            context->bitcount += freespace << 3;
+            len -= freespace;
+            data += freespace;
+#if BYTE_ORDER == LITTLE_ENDIAN
+            /* Convert TO host byte order */
+            for (int j = 0; j < 16; j++) {
+                REVERSE32(context->buffer[j], context->buffer[j]);
+            }
+#endif
+            sha1_Transform(context->state, context->buffer, context->state);
+        }
+        else {
+            /* The buffer is not yet full */
+            MEMCPY_BCOPY(((thread uchar*)context->buffer) + usedspace, data, len);
+            context->bitcount += len << 3;
+            /* Clean up: */
+            usedspace = freespace = 0;
+            return;
+        }
+    }
+    while (len >= SHA1_BLOCK_LENGTH) {
+        /* Process as many complete blocks as we can */
+        MEMCPY_BCOPY(context->buffer, data, SHA1_BLOCK_LENGTH);
+#if BYTE_ORDER == LITTLE_ENDIAN
+        /* Convert TO host byte order */
+        for (int j = 0; j < 16; j++) {
+            REVERSE32(context->buffer[j], context->buffer[j]);
+        }
+#endif
+        sha1_Transform(context->state, context->buffer, context->state);
+        context->bitcount += SHA1_BLOCK_LENGTH << 3;
+        len -= SHA1_BLOCK_LENGTH;
+        data += SHA1_BLOCK_LENGTH;
+    }
+    if (len > 0) {
+        /* There's left-overs, so save 'em */
+        MEMCPY_BCOPY(context->buffer, data, len);
+        context->bitcount += len << 3;
+    }
+    /* Clean up: */
+    usedspace = freespace = 0;
+}
+
+// Device helper: sha1_Final.
+static inline void sha1_Final(thread SHA1_CTX* context, sha2_byte digest[]) {
+    unsigned int usedspace = 0;
+
+    /* If no digest buffer is passed, we don't bother doing this: */
+    if (digest != (thread sha2_byte*)0) {
+        usedspace = (context->bitcount >> 3) % SHA1_BLOCK_LENGTH;
+        /* Begin padding with a 1 bit: */
+        ((thread uchar*)context->buffer)[usedspace++] = 0x80;
+
+        if (usedspace > SHA1_SHORT_BLOCK_LENGTH) {
+            memset(((thread uchar*)context->buffer) + usedspace, 0, SHA1_BLOCK_LENGTH - usedspace);
+
+#if BYTE_ORDER == LITTLE_ENDIAN
+            /* Convert TO host byte order */
+            for (int j = 0; j < 16; j++) {
+                REVERSE32(context->buffer[j], context->buffer[j]);
+            }
+#endif
+            /* Do second-to-last transform: */
+            sha1_Transform(context->state, context->buffer, context->state);
+
+            /* And prepare the last transform: */
+            usedspace = 0;
+        }
+        /* Set-up for the last transform: */
+        memset(((thread uchar*)context->buffer) + usedspace, 0, SHA1_SHORT_BLOCK_LENGTH - usedspace);
+
+#if BYTE_ORDER == LITTLE_ENDIAN
+        /* Convert TO host byte order */
+        for (int j = 0; j < 14; j++) {
+            REVERSE32(context->buffer[j], context->buffer[j]);
+        }
+#endif
+        /* Set the bit count: */
+        context->buffer[14] = context->bitcount >> 32;
+        context->buffer[15] = context->bitcount & 0xffffffff;
+
+        /* Final transform: */
+        sha1_Transform(context->state, context->buffer, context->state);
+
+#if BYTE_ORDER == LITTLE_ENDIAN
+        /* Convert FROM host byte order */
+        for (int j = 0; j < 5; j++) {
+            REVERSE32(context->state[j], context->state[j]);
+        }
+#endif
+        MEMCPY_BCOPY(digest, context->state, SHA1_DIGEST_LENGTH);
+    }
+
+    /* Clean up state data: */
+    memset(context, 0, sizeof(SHA1_CTX));
+    usedspace = 0;
+}
+
+// Device helper: sha1_End.
+static inline thread char* sha1_End(thread SHA1_CTX* context, thread char buffer[]) {
+    sha2_byte digest[SHA1_DIGEST_LENGTH] = { 0 };
+    thread sha2_byte* d = digest;
+    int	i = 0;
+
+    if (buffer != (thread char*)0) {
+        sha1_Final(context, digest);
+
+        for (i = 0; i < SHA1_DIGEST_LENGTH; i++) {
+            *buffer++ = sha2_hex_digits[(*d & 0xf0) >> 4];
+            *buffer++ = sha2_hex_digits[*d & 0x0f];
+            d++;
+        }
+        *buffer = (char)0;
+    }
+    else {
+        memset(context, 0, sizeof(SHA1_CTX));
+    }
+    memset(digest, 0, SHA1_DIGEST_LENGTH);
+    return buffer;
+}
+
+// Device helper: sha1_Raw.
+static inline void sha1_Raw(const thread sha2_byte* data, ulong len, uchar digest[SHA1_DIGEST_LENGTH]) {
+    SHA1_CTX context = { 0 };
+    sha1_Init(&context);
+    sha1_Update(&context, data, len);
+    sha1_Final(&context, digest);
+}
+
+// Device helper: sha1_Data.
+static inline thread char* sha1_Data(const thread sha2_byte* data, ulong len, char digest[SHA1_DIGEST_STRING_LENGTH]) {
+    SHA1_CTX context = { 0 };
+
+    sha1_Init(&context);
+    sha1_Update(&context, data, len);
+    return sha1_End(&context, digest);
+}
+
+/*** SHA-256: *********************************************************/
+static inline void sha256_Init(thread SHA256_CTX* context) {
+    if (context == (thread SHA256_CTX*)0) {
+        return;
+    }
+    MEMCPY_BCOPY(context->state, sha256_initial_hash_value, SHA256_DIGEST_LENGTH);
+    memset(context->buffer, 0, SHA256_BLOCK_LENGTH);
+    context->bitcount = 0;
+}
+
+#ifdef SHA2_UNROLL_TRANSFORM
+
+/* Unrolled SHA-256 round macros: */
+
+#define ROUND256_0_TO_15(a,b,c,d,e,f,g,h)	\
+    T1 = (h) + Sigma1_256(e) + Ch((e), (f), (g)) + \
+         K256[j] + (W256[j] = *data++); \
+    (d) += T1; \
+    (h) = T1 + Sigma0_256(a) + Maj((a), (b), (c)); \
+    j++
+
+#define ROUND256(a,b,c,d,e,f,g,h)	\
+    s0 = W256[(j+1)&0x0f]; \
+    s0 = sigma0_256(s0); \
+    s1 = W256[(j+14)&0x0f]; \
+    s1 = sigma1_256(s1); \
+    T1 = (h) + Sigma1_256(e) + Ch((e), (f), (g)) + K256[j] + \
+         (W256[j&0x0f] += s1 + W256[(j+9)&0x0f] + s0); \
+    (d) += T1; \
+    (h) = T1 + Sigma0_256(a) + Maj((a), (b), (c)); \
+    j++
+
+// Device helper: sha256_Transform.
+static inline void sha256_Transform(const thread sha2_word32* state_in, const thread sha2_word32* data, thread sha2_word32* state_out) {
+    sha2_word32	a = 0, b = 0, c = 0, d = 0, e = 0, f = 0, g = 0, h = 0, s0 = 0, s1 = 0;
+    sha2_word32	T1 = 0;
+    sha2_word32 W256[16] = { 0 };
+    int j = 0;
+
+    /* Initialize registers with the prev. intermediate value */
+    a = state_in[0];
+    b = state_in[1];
+    c = state_in[2];
+    d = state_in[3];
+    e = state_in[4];
+    f = state_in[5];
+    g = state_in[6];
+    h = state_in[7];
+
+    j = 0;
+    do {
+        /* Rounds 0 to 15 (unrolled): */
+        ROUND256_0_TO_15(a, b, c, d, e, f, g, h);
+        ROUND256_0_TO_15(h, a, b, c, d, e, f, g);
+        ROUND256_0_TO_15(g, h, a, b, c, d, e, f);
+        ROUND256_0_TO_15(f, g, h, a, b, c, d, e);
+        ROUND256_0_TO_15(e, f, g, h, a, b, c, d);
+        ROUND256_0_TO_15(d, e, f, g, h, a, b, c);
+        ROUND256_0_TO_15(c, d, e, f, g, h, a, b);
+        ROUND256_0_TO_15(b, c, d, e, f, g, h, a);
+    } while (j < 16);
+
+    /* Now for the remaining rounds to 64: */
+    do {
+        ROUND256(a, b, c, d, e, f, g, h);
+        ROUND256(h, a, b, c, d, e, f, g);
+        ROUND256(g, h, a, b, c, d, e, f);
+        ROUND256(f, g, h, a, b, c, d, e);
+        ROUND256(e, f, g, h, a, b, c, d);
+        ROUND256(d, e, f, g, h, a, b, c);
+        ROUND256(c, d, e, f, g, h, a, b);
+        ROUND256(b, c, d, e, f, g, h, a);
+    } while (j < 64);
+
+    /* Compute the current intermediate hash value */
+    state_out[0] = state_in[0] + a;
+    state_out[1] = state_in[1] + b;
+    state_out[2] = state_in[2] + c;
+    state_out[3] = state_in[3] + d;
+    state_out[4] = state_in[4] + e;
+    state_out[5] = state_in[5] + f;
+    state_out[6] = state_in[6] + g;
+    state_out[7] = state_in[7] + h;
+
+    /* Clean up */
+    a = b = c = d = e = f = g = h = T1 = 0;
+}
+
+#else /* SHA2_UNROLL_TRANSFORM */
+
+// sha256_Transform: computes 256 transform.
+static inline void sha256_Transform(const thread sha2_word32* state_in, const thread sha2_word32* data, thread sha2_word32* state_out) {
+    sha2_word32	a = 0, b = 0, c = 0, d = 0, e = 0, f = 0, g = 0, h = 0, s0 = 0, s1 = 0;
+    sha2_word32	T1 = 0, T2 = 0, W256[16] = { 0 };
+    int j = 0;
+
+    /* Initialize registers with the prev. intermediate value */
+    a = state_in[0];
+    b = state_in[1];
+    c = state_in[2];
+    d = state_in[3];
+    e = state_in[4];
+    f = state_in[5];
+    g = state_in[6];
+    h = state_in[7];
+
+    j = 0;
+    do {
+        /* Apply the SHA-256 compression function to update a..h with copy */
+        T1 = h + Sigma1_256(e) + Ch(e, f, g) + K256[j] + (W256[j] = *data++);
+        T2 = Sigma0_256(a) + Maj(a, b, c);
+        h = g;
+        g = f;
+        f = e;
+        e = d + T1;
+        d = c;
+        c = b;
+        b = a;
+        a = T1 + T2;
+
+        j++;
+    } while (j < 16);
+
+    do {
+        /* Part of the message block expansion: */
+        s0 = W256[(j + 1) & 0x0f];
+        s0 = sigma0_256(s0);
+        s1 = W256[(j + 14) & 0x0f];
+        s1 = sigma1_256(s1);
+
+        /* Apply the SHA-256 compression function to update a..h */
+        T1 = h + Sigma1_256(e) + Ch(e, f, g) + K256[j] +
+            (W256[j & 0x0f] += s1 + W256[(j + 9) & 0x0f] + s0);
+        T2 = Sigma0_256(a) + Maj(a, b, c);
+        h = g;
+        g = f;
+        f = e;
+        e = d + T1;
+        d = c;
+        c = b;
+        b = a;
+        a = T1 + T2;
+
+        j++;
+    } while (j < 64);
+
+    /* Compute the current intermediate hash value */
+    state_out[0] = state_in[0] + a;
+    state_out[1] = state_in[1] + b;
+    state_out[2] = state_in[2] + c;
+    state_out[3] = state_in[3] + d;
+    state_out[4] = state_in[4] + e;
+    state_out[5] = state_in[5] + f;
+    state_out[6] = state_in[6] + g;
+    state_out[7] = state_in[7] + h;
+
+    /* Clean up */
+    a = b = c = d = e = f = g = h = T1 = T2 = 0;
+}
+
+#endif /* SHA2_UNROLL_TRANSFORM */
+
+// Device helper: sha256_Update.
+static inline void sha256_Update(thread SHA256_CTX* context, const thread sha2_byte* data, ulong len) {
+    unsigned int freespace = 0, usedspace = 0;
+
+    if (len == 0) {
+        /* Calling with no data is valid - we do nothing */
+        return;
+    }
+
+    usedspace = (context->bitcount >> 3) % SHA256_BLOCK_LENGTH;
+    if (usedspace > 0) {
+        /* Calculate how much free space is available in the buffer */
+        freespace = SHA256_BLOCK_LENGTH - usedspace;
+
+        if (len >= freespace) {
+            /* Fill the buffer completely and process it */
+            MEMCPY_BCOPY(((thread uchar*)context->buffer) + usedspace, data, freespace);
+            context->bitcount += freespace << 3;
+            len -= freespace;
+            data += freespace;
+#if BYTE_ORDER == LITTLE_ENDIAN
+            /* Convert TO host byte order */
+            for (int j = 0; j < 16; j++) {
+                REVERSE32(context->buffer[j], context->buffer[j]);
+            }
+#endif
+            sha256_Transform(context->state, context->buffer, context->state);
+        }
+        else {
+            /* The buffer is not yet full */
+            MEMCPY_BCOPY(((thread uchar*)context->buffer) + usedspace, data, len);
+            context->bitcount += len << 3;
+            /* Clean up: */
+            usedspace = freespace = 0;
+            return;
+        }
+    }
+    while (len >= SHA256_BLOCK_LENGTH) {
+        /* Process as many complete blocks as we can */
+        MEMCPY_BCOPY(context->buffer, data, SHA256_BLOCK_LENGTH);
+#if BYTE_ORDER == LITTLE_ENDIAN
+        /* Convert TO host byte order */
+        for (int j = 0; j < 16; j++) {
+            REVERSE32(context->buffer[j], context->buffer[j]);
+        }
+#endif
+        sha256_Transform(context->state, context->buffer, context->state);
+        context->bitcount += SHA256_BLOCK_LENGTH << 3;
+        len -= SHA256_BLOCK_LENGTH;
+        data += SHA256_BLOCK_LENGTH;
+    }
+    if (len > 0) {
+        /* There's left-overs, so save 'em */
+        MEMCPY_BCOPY(context->buffer, data, len);
+        context->bitcount += len << 3;
+    }
+    /* Clean up: */
+    usedspace = freespace = 0;
+}
+
+// Device helper: sha256_Final.
+static inline void sha256_Final(thread SHA256_CTX* context, sha2_byte digest[]) {
+    unsigned int usedspace = 0;
+
+    /* If no digest buffer is passed, we don't bother doing this: */
+    if (digest != (thread sha2_byte*)0) {
+        usedspace = (context->bitcount >> 3) % SHA256_BLOCK_LENGTH;
+        /* Begin padding with a 1 bit: */
+        ((thread uchar*)context->buffer)[usedspace++] = 0x80;
+
+        if (usedspace > SHA256_SHORT_BLOCK_LENGTH) {
+            memset(((thread uchar*)context->buffer) + usedspace, 0, SHA256_BLOCK_LENGTH - usedspace);
+
+#if BYTE_ORDER == LITTLE_ENDIAN
+            /* Convert TO host byte order */
+            for (int j = 0; j < 16; j++) {
+                REVERSE32(context->buffer[j], context->buffer[j]);
+            }
+#endif
+            /* Do second-to-last transform: */
+            sha256_Transform(context->state, context->buffer, context->state);
+
+            /* And prepare the last transform: */
+            usedspace = 0;
+        }
+        /* Set-up for the last transform: */
+        memset(((thread uchar*)context->buffer) + usedspace, 0, SHA256_SHORT_BLOCK_LENGTH - usedspace);
+
+#if BYTE_ORDER == LITTLE_ENDIAN
+        /* Convert TO host byte order */
+        for (int j = 0; j < 14; j++) {
+            REVERSE32(context->buffer[j], context->buffer[j]);
+        }
+#endif
+        /* Set the bit count: */
+        context->buffer[14] = context->bitcount >> 32;
+        context->buffer[15] = context->bitcount & 0xffffffff;
+
+        /* Final transform: */
+        sha256_Transform(context->state, context->buffer, context->state);
+
+#if BYTE_ORDER == LITTLE_ENDIAN
+        /* Convert FROM host byte order */
+        for (int j = 0; j < 8; j++) {
+            REVERSE32(context->state[j], context->state[j]);
+        }
+#endif
+        MEMCPY_BCOPY(digest, context->state, SHA256_DIGEST_LENGTH);
+    }
+
+    /* Clean up state data: */
+    memset(context, 0, sizeof(SHA256_CTX));
+    usedspace = 0;
+}
+
+// Device helper: sha256_End.
+static inline thread char* sha256_End(thread SHA256_CTX* context, thread char buffer[]) {
+    sha2_byte digest[SHA256_DIGEST_LENGTH] = { 0 };
+    thread sha2_byte* d = digest;
+    int	i = 0;
+
+    if (buffer != (thread char*)0) {
+        sha256_Final(context, digest);
+
+        for (i = 0; i < SHA256_DIGEST_LENGTH; i++) {
+            *buffer++ = sha2_hex_digits[(*d & 0xf0) >> 4];
+            *buffer++ = sha2_hex_digits[*d & 0x0f];
+            d++;
+        }
+        *buffer = (char)0;
+    }
+    else {
+        memset(context, 0, sizeof(SHA256_CTX));
+    }
+    memset(digest, 0, SHA256_DIGEST_LENGTH);
+    return buffer;
+}
+
+// Device helper: sha256_Raw.
+static inline void sha256_Raw(const thread sha2_byte* data, ulong len, uchar digest[SHA256_DIGEST_LENGTH]) {
+    SHA256_CTX context = { 0 };
+    sha256_Init(&context);
+    sha256_Update(&context, data, len);
+    sha256_Final(&context, digest);
+}
+
+// Device helper: sha256_Data.
+static inline thread char* sha256_Data(const thread sha2_byte* data, ulong len, char digest[SHA256_DIGEST_STRING_LENGTH]) {
+    SHA256_CTX context = { 0 };
+
+    sha256_Init(&context);
+    sha256_Update(&context, data, len);
+    return sha256_End(&context, digest);
+}
+
+
+/*** SHA-512: *********************************************************/
+static inline void sha512_Init(thread SHA512_CTX* context) {
+    if (context == (thread SHA512_CTX*)0) {
+        return;
+    }
+    MEMCPY_BCOPY(context->state, sha512_initial_hash_value, SHA512_DIGEST_LENGTH);
+    memset(context->buffer, 0, SHA512_BLOCK_LENGTH);
+    context->bitcount[0] = context->bitcount[1] = 0;
+}
+
+#ifdef SHA2_UNROLL_TRANSFORM
+
+/* Unrolled SHA-512 round macros: */
+#define ROUND512_0_TO_15(a,b,c,d,e,f,g,h)	\
+    T1 = (h) + Sigma1_512(e) + Ch((e), (f), (g)) + \
+             K512[j] + (W512[j] = *data++); \
+    (d) += T1; \
+    (h) = T1 + Sigma0_512(a) + Maj((a), (b), (c)); \
+    j++
+
+#define ROUND512(a,b,c,d,e,f,g,h)	\
+    s0 = W512[(j+1)&0x0f]; \
+    s0 = sigma0_512(s0); \
+    s1 = W512[(j+14)&0x0f]; \
+    s1 = sigma1_512(s1); \
+    T1 = (h) + Sigma1_512(e) + Ch((e), (f), (g)) + K512[j] + \
+             (W512[j&0x0f] += s1 + W512[(j+9)&0x0f] + s0); \
+    (d) += T1; \
+    (h) = T1 + Sigma0_512(a) + Maj((a), (b), (c)); \
+    j++
+
+// Device helper: sha512_Transform.
+static inline void sha512_Transform(const thread sha2_word64* state_in, const thread sha2_word64* data, thread sha2_word64* state_out) {
+    sha2_word64	a = 0, b = 0, c = 0, d = 0, e = 0, f = 0, g = 0, h = 0, s0 = 0, s1 = 0;
+    sha2_word64	T1 = 0, W512[16] = { 0 };
+    int	j = 0;
+
+    /* Initialize registers with the prev. intermediate value */
+    a = state_in[0];
+    b = state_in[1];
+    c = state_in[2];
+    d = state_in[3];
+    e = state_in[4];
+    f = state_in[5];
+    g = state_in[6];
+    h = state_in[7];
+
+    j = 0;
+    do {
+        ROUND512_0_TO_15(a, b, c, d, e, f, g, h);
+        ROUND512_0_TO_15(h, a, b, c, d, e, f, g);
+        ROUND512_0_TO_15(g, h, a, b, c, d, e, f);
+        ROUND512_0_TO_15(f, g, h, a, b, c, d, e);
+        ROUND512_0_TO_15(e, f, g, h, a, b, c, d);
+        ROUND512_0_TO_15(d, e, f, g, h, a, b, c);
+        ROUND512_0_TO_15(c, d, e, f, g, h, a, b);
+        ROUND512_0_TO_15(b, c, d, e, f, g, h, a);
+    } while (j < 16);
+
+    /* Now for the remaining rounds up to 79: */
+    do {
+        ROUND512(a, b, c, d, e, f, g, h);
+        ROUND512(h, a, b, c, d, e, f, g);
+        ROUND512(g, h, a, b, c, d, e, f);
+        ROUND512(f, g, h, a, b, c, d, e);
+        ROUND512(e, f, g, h, a, b, c, d);
+        ROUND512(d, e, f, g, h, a, b, c);
+        ROUND512(c, d, e, f, g, h, a, b);
+        ROUND512(b, c, d, e, f, g, h, a);
+    } while (j < 80);
+
+    /* Compute the current intermediate hash value */
+    state_out[0] = state_in[0] + a;
+    state_out[1] = state_in[1] + b;
+    state_out[2] = state_in[2] + c;
+    state_out[3] = state_in[3] + d;
+    state_out[4] = state_in[4] + e;
+    state_out[5] = state_in[5] + f;
+    state_out[6] = state_in[6] + g;
+    state_out[7] = state_in[7] + h;
+
+    /* Clean up */
+    a = b = c = d = e = f = g = h = T1 = 0;
+}
+
+#else /* SHA2_UNROLL_TRANSFORM */
+
+// sha512_Transform: computes 512 transform.
+static inline void sha512_Transform(const thread sha2_word64* state_in, const thread sha2_word64* data, thread sha2_word64* state_out) {
+    sha2_word64	a = 0, b = 0, c = 0, d = 0, e = 0, f = 0, g = 0, h = 0, s0 = 0, s1 = 0;
+    sha2_word64	T1 = 0, T2 = 0, W512[16] = { 0 };
+    int j = 0;
+
+    /* Initialize registers with the prev. intermediate value */
+    a = state_in[0];
+    b = state_in[1];
+    c = state_in[2];
+    d = state_in[3];
+    e = state_in[4];
+    f = state_in[5];
+    g = state_in[6];
+    h = state_in[7];
+
+    j = 0;
+    do {
+        /* Apply the SHA-512 compression function to update a..h with copy */
+        T1 = h + Sigma1_512(e) + Ch(e, f, g) + K512[j] + (W512[j] = *data++);
+        T2 = Sigma0_512(a) + Maj(a, b, c);
+        h = g;
+        g = f;
+        f = e;
+        e = d + T1;
+        d = c;
+        c = b;
+        b = a;
+        a = T1 + T2;
+
+        j++;
+    } while (j < 16);
+
+    do {
+        /* Part of the message block expansion: */
+        s0 = W512[(j + 1) & 0x0f];
+        s0 = sigma0_512(s0);
+        s1 = W512[(j + 14) & 0x0f];
+        s1 = sigma1_512(s1);
+
+        /* Apply the SHA-512 compression function to update a..h */
+        T1 = h + Sigma1_512(e) + Ch(e, f, g) + K512[j] +
+            (W512[j & 0x0f] += s1 + W512[(j + 9) & 0x0f] + s0);
+        T2 = Sigma0_512(a) + Maj(a, b, c);
+        h = g;
+        g = f;
+        f = e;
+        e = d + T1;
+        d = c;
+        c = b;
+        b = a;
+        a = T1 + T2;
+
+        j++;
+    } while (j < 80);
+
+    /* Compute the current intermediate hash value */
+    state_out[0] = state_in[0] + a;
+    state_out[1] = state_in[1] + b;
+    state_out[2] = state_in[2] + c;
+    state_out[3] = state_in[3] + d;
+    state_out[4] = state_in[4] + e;
+    state_out[5] = state_in[5] + f;
+    state_out[6] = state_in[6] + g;
+    state_out[7] = state_in[7] + h;
+
+    /* Clean up */
+    a = b = c = d = e = f = g = h = T1 = T2 = 0;
+}
+
+#endif /* SHA2_UNROLL_TRANSFORM */
+
+// Device helper: sha512_Update.
+static inline void sha512_Update(thread SHA512_CTX* context, const thread sha2_byte* data, ulong len) {
+    unsigned int freespace = 0, usedspace = 0;
+
+    if (len == 0) {
+        /* Calling with no data is valid - we do nothing */
+        return;
+    }
+
+    usedspace = (context->bitcount[0] >> 3) % SHA512_BLOCK_LENGTH;
+    if (usedspace > 0) {
+        /* Calculate how much free space is available in the buffer */
+        freespace = SHA512_BLOCK_LENGTH - usedspace;
+
+        if (len >= freespace) {
+            /* Fill the buffer completely and process it */
+            MEMCPY_BCOPY(((thread uchar*)context->buffer) + usedspace, data, freespace);
+            ADDINC128(context->bitcount, freespace << 3);
+            len -= freespace;
+            data += freespace;
+#if BYTE_ORDER == LITTLE_ENDIAN
+            /* Convert TO host byte order */
+            for (int j = 0; j < 16; j++) {
+                REVERSE64(context->buffer[j], context->buffer[j]);
+            }
+#endif
+            sha512_Transform(context->state, context->buffer, context->state);
+        }
+        else {
+            /* The buffer is not yet full */
+            MEMCPY_BCOPY(((thread uchar*)context->buffer) + usedspace, data, len);
+            ADDINC128(context->bitcount, len << 3);
+            /* Clean up: */
+            usedspace = freespace = 0;
+            return;
+        }
+    }
+    while (len >= SHA512_BLOCK_LENGTH) {
+        /* Process as many complete blocks as we can */
+        MEMCPY_BCOPY(context->buffer, data, SHA512_BLOCK_LENGTH);
+#if BYTE_ORDER == LITTLE_ENDIAN
+        /* Convert TO host byte order */
+        for (int j = 0; j < 16; j++) {
+            REVERSE64(context->buffer[j], context->buffer[j]);
+        }
+#endif
+        sha512_Transform(context->state, context->buffer, context->state);
+        ADDINC128(context->bitcount, SHA512_BLOCK_LENGTH << 3);
+        len -= SHA512_BLOCK_LENGTH;
+        data += SHA512_BLOCK_LENGTH;
+    }
+    if (len > 0) {
+        /* There's left-overs, so save 'em */
+        MEMCPY_BCOPY(context->buffer, data, len);
+        ADDINC128(context->bitcount, len << 3);
+    }
+    /* Clean up: */
+    usedspace = freespace = 0;
+}
+
+// Device helper: sha512_Last.
+static inline void sha512_Last(thread SHA512_CTX* context) {
+    unsigned int usedspace = 0;
+
+    usedspace = (context->bitcount[0] >> 3) % SHA512_BLOCK_LENGTH;
+    /* Begin padding with a 1 bit: */
+    ((thread uchar*)context->buffer)[usedspace++] = 0x80;
+
+    if (usedspace > SHA512_SHORT_BLOCK_LENGTH) {
+        memset(((thread uchar*)context->buffer) + usedspace, 0, SHA512_BLOCK_LENGTH - usedspace);
+
+#if BYTE_ORDER == LITTLE_ENDIAN
+        /* Convert TO host byte order */
+        for (int j = 0; j < 16; j++) {
+            REVERSE64(context->buffer[j], context->buffer[j]);
+        }
+#endif
+        /* Do second-to-last transform: */
+        sha512_Transform(context->state, context->buffer, context->state);
+
+        /* And prepare the last transform: */
+        usedspace = 0;
+    }
+    /* Set-up for the last transform: */
+    memset(((thread uchar*)context->buffer) + usedspace, 0, SHA512_SHORT_BLOCK_LENGTH - usedspace);
+
+#if BYTE_ORDER == LITTLE_ENDIAN
+    /* Convert TO host byte order */
+    for (int j = 0; j < 14; j++) {
+        REVERSE64(context->buffer[j], context->buffer[j]);
+    }
+#endif
+    /* Store the length of input data (in bits): */
+    context->buffer[14] = context->bitcount[1];
+    context->buffer[15] = context->bitcount[0];
+
+    /* Final transform: */
+    sha512_Transform(context->state, context->buffer, context->state);
+}
+
+// Device helper: sha512_Final.
+static inline void sha512_Final(thread SHA512_CTX* context, sha2_byte digest[]) {
+    /* If no digest buffer is passed, we don't bother doing this: */
+    if (digest != (thread sha2_byte*)0) {
+        sha512_Last(context);
+
+        /* Save the hash data for output: */
+#if BYTE_ORDER == LITTLE_ENDIAN
+        /* Convert FROM host byte order */
+        for (int j = 0; j < 8; j++) {
+            REVERSE64(context->state[j], context->state[j]);
+        }
+#endif
+        MEMCPY_BCOPY(digest, context->state, SHA512_DIGEST_LENGTH);
+    }
+
+    /* Zero out state data */
+    memset(context, 0, sizeof(SHA512_CTX));
+}
+
+// Device helper: sha512_End.
+static inline thread char* sha512_End(thread SHA512_CTX* context, thread char buffer[]) {
+    sha2_byte digest[SHA512_DIGEST_LENGTH] = { 0 };
+    thread sha2_byte* d = digest;
+    int	i = 0;
+
+    if (buffer != (thread char*)0) {
+        sha512_Final(context, digest);
+
+        for (i = 0; i < SHA512_DIGEST_LENGTH; i++) {
+            *buffer++ = sha2_hex_digits[(*d & 0xf0) >> 4];
+            *buffer++ = sha2_hex_digits[*d & 0x0f];
+            d++;
+        }
+        *buffer = (char)0;
+    }
+    else {
+        memset(context, 0, sizeof(SHA512_CTX));
+    }
+    memset(digest, 0, SHA512_DIGEST_LENGTH);
+    return buffer;
+}
+
+// Device helper: sha512_Raw.
+static inline void sha512_Raw(const thread sha2_byte* data, ulong len, uchar digest[SHA512_DIGEST_LENGTH]) {
+    SHA512_CTX	context = { 0 };
+    sha512_Init(&context);
+    sha512_Update(&context, data, len);
+    sha512_Final(&context, digest);
+}
+
+// Device helper: sha512_Data.
+static inline thread char* sha512_Data(const thread sha2_byte* data, ulong len, char digest[SHA512_DIGEST_STRING_LENGTH]) {
+    SHA512_CTX	context = { 0 };
+
+    sha512_Init(&context);
+    sha512_Update(&context, data, len);
+    return sha512_End(&context, digest);
+}
+
+
+//sr25519_impl
+
+
+static inline int memcmp_dev(const thread void* s1, const thread void* s2, ulong n) {
+    const thread unsigned thread char* p1 = static_cast<const thread unsigned thread char*>(s1);
+    const thread unsigned thread char* p2 = static_cast<const thread unsigned thread char*>(s2);
+    for (ulong i = 0; i < n; ++i) {
+        if (p1[i] < p2[i])  return -1;
+        if (p1[i] > p2[i])  return  1;
+    }
+    return 0;
+}
+
+// Device helper: divide_scalar_bytes_by_cofactor.
+static inline void divide_scalar_bytes_by_cofactor(thread uchar* scalar, ulong scalar_len) {
+    uchar low = 0;
+
+    for (int i = scalar_len - 1; i >= 0; i--) {
+        uchar r = scalar[i] & 7;
+        scalar[i] >>= 3;
+        scalar[i] += low;
+        low = r << 5;
+    }
+}
+
+// Device helper: multiply_scalar_bytes_by_cofactor.
+static inline void multiply_scalar_bytes_by_cofactor(thread uchar* scalar, ulong scalar_len) {
+    uchar high = 0;
+
+    for (int i = 0; i < scalar_len; i++) {
+        uchar r = scalar[i] & (7 << 5);
+        scalar[i] <<= 3;
+        scalar[i] += high;
+        high = r >> 5;
+    }
+}
+
+// Device helper: expand_ed25519.
+static inline void expand_ed25519(sr25519_secret_key_key key, sr25519_secret_key_nonce nonce, sr25519_mini_secret_key mini_secret_key) {
+    uchar hash[64] = { 0 };
+    sr25519_hash(hash, mini_secret_key, 32);
+    memcpy(key, hash, 32);
+    key[0] &= 248;
+    key[31] &= 63;
+    key[31] |= 64;
+    divide_scalar_bytes_by_cofactor(key, 32);
+    key[31] &= 0b1111111;
+    memcpy(nonce, hash + 32, 32);
+}
+
+// Device helper: expand_ed25519_key.
+static inline void expand_ed25519_key(sr25519_secret_key_key key, sr25519_mini_secret_key mini_secret_key) {
+    uchar hash[64] = { 0 };
+    sr25519_hash(hash, mini_secret_key, 32);
+    memcpy(key, hash, 32);
+    key[0] &= 248;
+    key[31] &= 63;
+    key[31] |= 64;
+    divide_scalar_bytes_by_cofactor(key, 32);
+    key[31] &= 0b1111111;
+}
+
+// Device helper: expand_uniform.
+static inline void expand_uniform(sr25519_secret_key_key key, sr25519_secret_key_nonce nonce, sr25519_mini_secret_key mini_secret_key) {
+    merlin_transcript t = { 0 };
+
+    merlin_transcript_init(&t, SR_LIT_U8("ExpandSecretKeys"), 16);
+    merlin_transcript_commit_bytes(&t, SR_LIT_U8("mini"), 4, mini_secret_key, 32);
+
+    bignum256modm scalar = { 0 };
+    uchar scalar_bytes[64] = { 0 };
+    merlin_transcript_challenge_bytes(&t, SR_LIT_U8("sk"), 2, scalar_bytes, 64);
+    expand256_modm(scalar, scalar_bytes, 64);
+    contract256_modm(key, scalar);
+    merlin_transcript_challenge_bytes(&t, SR_LIT_U8("no"), 2, nonce, 32);
+}
+
+// Device helper: hard_derive_mini_secret_key.
+static inline void hard_derive_mini_secret_key(sr25519_mini_secret_key key_out, sr25519_chain_code chain_code_out, const sr25519_mini_secret_key key_in, const sr25519_chain_code chain_code_in) {
+    merlin_transcript t = { 0 };
+
+    merlin_transcript_init(&t, SR_LIT_U8("SchnorrRistrettoHDKD"), 20);
+    merlin_transcript_commit_bytes(&t, SR_LIT_U8("sign-bytes"), 10, SR_LIT_U8(""), 0);
+    if (chain_code_in != NULL) merlin_transcript_commit_bytes(&t, SR_LIT_U8("chain-code"), 10, chain_code_in, 32);
+    merlin_transcript_commit_bytes(&t, SR_LIT_U8("secret-key"), 10, key_in, 32);
+    merlin_transcript_challenge_bytes(&t, SR_LIT_U8("HDKD-hard"), 9, key_out, 32);
+    merlin_transcript_challenge_bytes(&t, SR_LIT_U8("HDKD-chaincode"), 14, chain_code_out, 32);
+}
+
+static inline void hard_derive_mini_secret_key_no_chain_code(sr25519_mini_secret_key key_out, const sr25519_mini_secret_key key_in, const sr25519_chain_code chain_code_in) {
+    merlin_transcript t = { 0 };
+
+    merlin_transcript_init(&t, SR_LIT_U8("SchnorrRistrettoHDKD"), 20);
+    merlin_transcript_commit_bytes(&t, SR_LIT_U8("sign-bytes"), 10, SR_LIT_U8(""), 0);
+    if (chain_code_in != NULL) merlin_transcript_commit_bytes(&t, SR_LIT_U8("chain-code"), 10, chain_code_in, 32);
+    merlin_transcript_commit_bytes(&t, SR_LIT_U8("secret-key"), 10, key_in, 32);
+    merlin_transcript_challenge_bytes(&t, SR_LIT_U8("HDKD-hard"), 9, key_out, 32);
+}
+
+// Device helper: derive_scalar_and_chaincode.
+static inline void derive_scalar_and_chaincode(thread merlin_transcript* t, thread bignum256modm* scalar, sr25519_chain_code chain_code_out, const sr25519_public_key public_key, const sr25519_chain_code chain_code_in) {
+    if (chain_code_in != NULL) merlin_transcript_commit_bytes(t, SR_LIT_U8("chain-code"), 10, chain_code_in, 32);
+    merlin_transcript_commit_bytes(t, SR_LIT_U8("public-key"), 10, public_key, 32);
+
+    uchar buf[64] = { 0 };
+    merlin_transcript_challenge_bytes(t, SR_LIT_U8("HDKD-scalar"), 11, buf, 64);
+    expand256_modm(reinterpret_cast<thread bignum256modm_element_t*>(scalar), buf, 64);
+
+    merlin_transcript_challenge_bytes(t, SR_LIT_U8("HDKD-chaincode"), 14, chain_code_out, 32);
+}
+
+// Device helper: derived_secret_key_simple.
+static inline void derived_secret_key_simple(sr25519_secret_key_key key_out, sr25519_secret_key_nonce nonce_out, sr25519_chain_code chain_code_out, const sr25519_public_key public_key, const sr25519_secret_key_key key_in, const sr25519_secret_key_nonce nonce_in, const sr25519_chain_code chain_code_in) {
+    merlin_transcript t = { 0 };
+
+    merlin_transcript_init(&t, SR_LIT_U8("SchnorrRistrettoHDKD"), 20);
+    merlin_transcript_commit_bytes(&t, SR_LIT_U8("sign-bytes"), 10, SR_LIT_U8(""), 0);
+
+    bignum256modm scalar = { 0 };
+
+    derive_scalar_and_chaincode(&t, &scalar, chain_code_out, public_key, chain_code_in);
+
+    bignum256modm original_scalar = { 0 };
+    bignum256modm final_scalar = { 0 };
+    expand_raw256_modm(original_scalar, key_in);
+    add256_modm(final_scalar, original_scalar, scalar);
+    contract256_modm(key_out, final_scalar);
+
+    uchar witness_data[64] = { 0 };
+    memcpy(witness_data, key_in, 32);
+    memcpy(witness_data + 32, nonce_in, 32);
+
+    merlin_rng mrng = { 0 };
+    merlin_rng_init(&mrng, &t);
+    merlin_rng_commit_witness_bytes(&mrng, SR_LIT_U8("HDKD-nonce"), 10, nonce_in, 32);
+    merlin_rng_commit_witness_bytes(&mrng, SR_LIT_U8("HDKD-nonce"), 10, witness_data, 64);
+
+    uchar entropy[32] = { 0 };
+    sr25519_randombytes(entropy, 32);
+    merlin_rng_finalize(&mrng, entropy);
+    merlin_rng_random_bytes(&mrng, nonce_out, 32);
+}
+
+// Device helper: private_key_to_public_key.
+static inline void private_key_to_public_key(sr25519_public_key public_key, sr25519_secret_key private_key) {
+    ge25519 P = { 0 };
+    bignum256modm s = { 0 };
+    expand_raw256_modm(s, private_key);
+
+    ge25519_scalarmult_base_niels(&P, ge25519_niels_base_multiples, s);
+    ristretto_encode(public_key, P);
+}
+
+// Device helper: sr25519_keypair_from_seed.
+static inline void sr25519_keypair_from_seed(sr25519_keypair keypair, const sr25519_mini_secret_key mini_secret_key) {
+    sr25519_secret_key_key secret_key_key = { 0 };
+    sr25519_secret_key_nonce secret_key_nonce = { 0 };
+    expand_ed25519(secret_key_key, secret_key_nonce, (thread uchar*)mini_secret_key);
+    sr25519_public_key public_key = { 0 };
+    private_key_to_public_key(public_key, secret_key_key);
+    multiply_scalar_bytes_by_cofactor(secret_key_key, 32);
+
+    memcpy(keypair, secret_key_key, 32);
+    memcpy(keypair + 32, secret_key_nonce, 32);
+    memcpy(keypair + 64, public_key, 32);
+}
+
+// Device helper: sr25519_public_from_seed.
+static inline void sr25519_public_from_seed(sr25519_public_key public_key, const sr25519_mini_secret_key mini_secret_key) {
+    sr25519_secret_key_key secret_key_key = { 0 };
+    expand_ed25519_key(secret_key_key, (thread uchar*)mini_secret_key);
+    private_key_to_public_key(public_key, secret_key_key);
+}
+
+// Device helper: sr25519_uniform_keypair_from_seed.
+static inline void sr25519_uniform_keypair_from_seed(sr25519_keypair keypair, const sr25519_mini_secret_key mini_secret_key) {
+    sr25519_secret_key_key secret_key_key = { 0 };
+    sr25519_secret_key_nonce secret_key_nonce = { 0 };
+    expand_ed25519(secret_key_key, secret_key_nonce, (thread uchar*)mini_secret_key);
+    sr25519_public_key public_key = { 0 };
+    private_key_to_public_key(public_key, secret_key_key);
+
+    memcpy(keypair, secret_key_key, 32);
+    memcpy(keypair + 32, secret_key_nonce, 32);
+    memcpy(keypair + 64, public_key, 32);
+}
+
+// Device helper: sr25519_keypair_ed25519_to_uniform.
+static inline void sr25519_keypair_ed25519_to_uniform(sr25519_keypair uniform_keypair, const sr25519_keypair ed25519_keypair) {
+    sr25519_secret_key_key secret_key_key = { 0 };
+    memcpy(secret_key_key, ed25519_keypair, 32);
+    divide_scalar_bytes_by_cofactor(secret_key_key, 32);
+
+    memcpy(uniform_keypair, secret_key_key, 32);
+    memcpy(uniform_keypair + 32, ed25519_keypair + 32, 64);
+}
+
+// Device helper: sr25519_derive_keypair_hard.
+static inline void sr25519_derive_keypair_hard(sr25519_keypair keypair_out, const sr25519_keypair keypair_in, const sr25519_chain_code chain_code_in) {
+    sr25519_mini_secret_key key_in = { 0 };
+    memcpy(key_in, keypair_in, 32);
+    divide_scalar_bytes_by_cofactor(key_in, 32);
+
+    sr25519_mini_secret_key key_out = { 0 };
+    hard_derive_mini_secret_key_no_chain_code(key_out, key_in, chain_code_in);
+
+    sr25519_keypair_from_seed(keypair_out, key_out);
+}
+
+// Device helper: sr25519_derive_keypair_soft.
+static inline void sr25519_derive_keypair_soft(sr25519_keypair keypair_out, const sr25519_keypair keypair_in, const sr25519_chain_code chain_code_in) {
+    sr25519_secret_key_key key_in = { 0 };
+    memcpy(key_in, keypair_in, 32);
+    divide_scalar_bytes_by_cofactor(key_in, 32);
+    sr25519_secret_key_nonce nonce_in = { 0 };
+    memcpy(nonce_in, keypair_in + 32, 32);
+    sr25519_public_key public_key = { 0 };
+    memcpy(public_key, keypair_in + 64, 32);
+
+    sr25519_secret_key_key key_out = { 0 };
+    sr25519_secret_key_nonce nonce_out = { 0 };
+    sr25519_public_key public_out = { 0 };
+    sr25519_chain_code chain_code_out = { 0 };
+
+    derived_secret_key_simple(key_out, nonce_out, chain_code_out, public_key, key_in, nonce_in, chain_code_in);
+
+    private_key_to_public_key(public_out, key_out);
+    multiply_scalar_bytes_by_cofactor(key_out, 32);
+
+    memcpy(keypair_out, key_out, 32);
+    memcpy(keypair_out + 32, nonce_out, 32);
+    memcpy(keypair_out + 64, public_out, 32);
+}
+
+// Device helper: sr25519_derive_public_soft.
+static inline void sr25519_derive_public_soft(sr25519_public_key public_out, const sr25519_public_key public_in, const sr25519_chain_code chain_code_in) {
+    merlin_transcript t = { 0 };
+
+    merlin_transcript_init(&t, SR_LIT_U8("SchnorrRistrettoHDKD"), 20);
+    merlin_transcript_commit_bytes(&t, SR_LIT_U8("sign-bytes"), 10, SR_LIT_U8(""), 0);
+
+    bignum256modm scalar = { 0 };
+    uchar chain_code_out[32] = { 0 };
+    derive_scalar_and_chaincode(&t, &scalar, chain_code_out, public_in, chain_code_in);
+
+    ge25519 P1 = { 0 }, P2 = { 0 }, P = { 0 };
+    ge25519_scalarmult_base_niels(&P1, ge25519_niels_base_multiples, scalar);
+    ristretto_decode(&P2, public_in);
+    ge25519_add(&P, &P1, &P2);
+    ristretto_encode(public_out, P);
+}
+
+// Device helper: sr25519_sign.
+static inline void sr25519_sign(sr25519_signature signature_out, const sr25519_public_key public_key, const sr25519_secret_key secret, const thread uchar* message, unsigned long message_length) {
+    sr25519_secret_key_key secret_key = { 0 };
+    sr25519_secret_key_nonce secret_nonce = { 0 };
+    memcpy(secret_key, secret, 32);
+    memcpy(secret_nonce, secret + 32, 32);
+    divide_scalar_bytes_by_cofactor(secret_key, 32);
+
+    merlin_transcript t = { 0 };
+    merlin_transcript_init(&t, SR_LIT_U8("SigningContext"), 14);
+    merlin_transcript_commit_bytes(&t, SR_LIT_U8(""), 0, SR_LIT_U8("substrate"), 9);
+    merlin_transcript_commit_bytes(&t, SR_LIT_U8("sign-bytes"), 10, message, message_length);
+
+    merlin_transcript_commit_bytes(&t, SR_LIT_U8("proto-name"), 10, SR_LIT_U8("Schnorr-sig"), 11);
+    merlin_transcript_commit_bytes(&t, SR_LIT_U8("sign:pk"), 7, public_key, 32);
+
+    bignum256modm r = { 0 };
+    uchar scalar_bytes[64] = { 0 };
+    merlin_rng mrng = { 0 };
+    merlin_rng_init(&mrng, &t);
+    merlin_rng_commit_witness_bytes(&mrng, SR_LIT_U8("signing"), 7, secret_nonce, 32);
+    uchar entropy[32] = { 0 };
+    sr25519_randombytes(entropy, 32);
+    merlin_rng_finalize(&mrng, entropy);
+    merlin_rng_random_bytes(&mrng, scalar_bytes, 32);
+    expand256_modm(r, scalar_bytes, 64);
+
+    ge25519 R = { 0 };
+    ge25519_scalarmult_base_niels(&R, ge25519_niels_base_multiples, r);
+    uchar R_compressed[32] = { 0 };
+    ristretto_encode(R_compressed, R);
+    merlin_transcript_commit_bytes(&t, SR_LIT_U8("sign:R"), 6, R_compressed, 32);
+
+    bignum256modm k = { 0 };
+    uchar buf[64] = { 0 };
+    merlin_transcript_challenge_bytes(&t, SR_LIT_U8("sign:c"), 6, buf, 64);
+    expand256_modm(k, buf, 64);
+
+    bignum256modm secret_key_scalar = { 0 };
+    expand_raw256_modm(secret_key_scalar, secret_key);
+
+    bignum256modm k_secret_key_scalar = { 0 };
+    mul256_modm(k_secret_key_scalar, k, secret_key_scalar);
+
+    bignum256modm s = { 0 };
+    add256_modm(s, k_secret_key_scalar, r);
+
+    uchar s_bytes[32] = { 0 };
+    contract256_modm(s_bytes, s);
+
+    memcpy(signature_out, R_compressed, 32);
+    memcpy(signature_out + 32, s_bytes, 32);
+    signature_out[63] |= 128;
+}
+
+// Device helper: sr25519_verify.
+static inline bool sr25519_verify(const sr25519_signature signature, const thread uchar* message, unsigned long message_length, const sr25519_public_key public_key) {
+    uchar signature_s[32] = { 0 };
+    memcpy(signature_s, signature + 32, 32);
+
+    if ((signature_s[31] & 128) == 0) {
+        return false;
+    }
+
+    signature_s[31] &= 127;
+    if ((signature_s[31] & 240) == 0) {
+        signature_s[31] &= 0b01111111;
+    }
+
+    if ((signature_s[31] >> 7) != 0) {
+        return false;
+    }
+
+    signature_s[31] &= 0b01111111;
+
+    uchar signature_R[32] = { 0 };
+    memcpy(signature_R, signature, 32);
+
+    merlin_transcript t = { 0 };
+    merlin_transcript_init(&t, SR_LIT_U8("SigningContext"), 14);
+    merlin_transcript_commit_bytes(&t, SR_LIT_U8(""), 0, SR_LIT_U8("substrate"), 9);
+    merlin_transcript_commit_bytes(&t, SR_LIT_U8("sign-bytes"), 10, message, message_length);
+
+    merlin_transcript_commit_bytes(&t, SR_LIT_U8("proto-name"), 10, SR_LIT_U8("Schnorr-sig"), 11);
+    merlin_transcript_commit_bytes(&t, SR_LIT_U8("sign:pk"), 7, public_key, 32);
+    merlin_transcript_commit_bytes(&t, SR_LIT_U8("sign:R"), 6, signature_R, 32);
+
+    bignum256modm k = { 0 }, s = { 0 };
+    uchar buf[64] = { 0 };
+    merlin_transcript_challenge_bytes(&t, SR_LIT_U8("sign:c"), 6, buf, 64);
+    expand256_modm(k, buf, 64);
+    expand_raw256_modm(s, signature_s);
+
+    int is_canonical = is_reduced256_modm(s);
+
+    if (!is_canonical) {
+        return false;
+    }
+
+    ge25519 A = { 0 }, R = { 0 };
+    ristretto_decode(&A, public_key);
+    curve25519_neg(A.x, A.x);
+    curve25519_neg(A.t, A.t);
+    ge25519_double_scalarmult_vartime(&R, &A, k, s);
+
+    uchar R_compressed[32] = { 0 };
+    ristretto_encode(R_compressed, R);
+    uchar valid = uint8_32_ct_eq(R_compressed, signature_R);
+
+    return valid;
+}
+
+// Device helper: from_le_bytes.
+static inline void from_le_bytes(thread uchar* out, const thread uchar* in, ulong len) {
+    for (ulong i = 0; i < len; i++) {
+        out[len - 1 - i] = in[i];
+    }
+}
+
+// Device helper: sr25519_vrf_sign_if_less.
+static inline VrfResult sr25519_vrf_sign_if_less(sr25519_vrf_out_and_proof out_and_proof, const sr25519_keypair keypair, const thread uchar* message, unsigned long message_length, const sr25519_vrf_threshold threshold) {
+    merlin_transcript t = { 0 };
+    merlin_transcript_init(&t, SR_LIT_U8("SigningContext"), 14);
+    merlin_transcript_commit_bytes(&t, SR_LIT_U8(""), 0, SR_LIT_U8("substrate"), 9);
+    merlin_transcript_commit_bytes(&t, SR_LIT_U8("sign-bytes"), 10, message, message_length);
+
+    sr25519_vrf_io io = { 0 };
+    sr25519_vrf_proof proof = { 0 };
+    sr25519_vrf_proof_batchable proof_batchable = { 0 };
+    Sr25519SignatureResult sign_result = vrf_sign(io, proof, proof_batchable, keypair, &t);
+    if (sign_result != Ok) {
+        VrfResult vrf_result;// = { 0 };
+        memset(&vrf_result, 0, sizeof(vrf_result));
+        vrf_result.result = sign_result;
+        vrf_result.is_less = false;
+        return vrf_result;
+    }
+
+    sr25519_vrf_raw_output raw_output = { 0 };
+    io_make_bytes(raw_output, io, SR_LIT_U8("substrate-babe-vrf"), 18);
+
+    uchar raw_output_le[16] = { 0 };
+    from_le_bytes(raw_output_le, raw_output, 16);
+    uchar threshold_le[16] = { 0 };
+    from_le_bytes(threshold_le, threshold, 16);
+
+    bool check = memcmp_dev(raw_output_le, threshold_le, 16) < 0;
+
+    memcpy(out_and_proof, io + 32, 32);
+    memcpy(out_and_proof + 32, proof, 64);
+
+    if (check) {
+        VrfResult vrf_result;// = { 0 };
+        memset(&vrf_result, 0, sizeof(vrf_result));
+        vrf_result.result = Ok;
+        vrf_result.is_less = true;
+
+        return vrf_result;
+    }
+    else {
+        VrfResult vrf_result;// = { 0 };
+        memset(&vrf_result, 0, sizeof(vrf_result));
+        vrf_result.result = Ok;
+        vrf_result.is_less = false;
+
+        return vrf_result;
+    }
+}
+
+// Device helper: sr25519_vrf_verify.
+static inline VrfResult sr25519_vrf_verify(const sr25519_public_key public_key, const thread uchar* message, unsigned long message_length, const sr25519_vrf_output output, const sr25519_vrf_proof proof, const sr25519_vrf_threshold threshold) {
+    merlin_transcript t1 = { 0 };
+    merlin_transcript_init(&t1, SR_LIT_U8("SigningContext"), 14);
+    merlin_transcript_commit_bytes(&t1, SR_LIT_U8(""), 0, SR_LIT_U8("substrate"), 9);
+    merlin_transcript_commit_bytes(&t1, SR_LIT_U8("sign-bytes"), 10, message, message_length);
+
+    sr25519_vrf_io inout = { 0 };
+    sr25519_vrf_proof_batchable proof_batchable = { 0 };
+    Sr25519SignatureResult verify_result = vrf_verify(inout, proof_batchable, public_key, &t1, output, proof);
+
+    if (verify_result != Ok) {
+        VrfResult vrf_result;// = { 0 };
+        memset(&vrf_result, 0, sizeof(vrf_result));
+        vrf_result.result = verify_result;
+        vrf_result.is_less = false;
+
+        return vrf_result;
+    }
+
+    sr25519_vrf_raw_output raw_output = { 0 };
+    io_make_bytes(raw_output, inout, SR_LIT_U8("substrate-babe-vrf"), 18);
+
+    uchar raw_output_le[16] = { 0 };
+    from_le_bytes(raw_output_le, raw_output, 16);
+    uchar threshold_le[16] = { 0 };
+    from_le_bytes(threshold_le, threshold, 16);
+
+    bool check = memcmp_dev(raw_output_le, threshold_le, 16) < 0;
+
+    sr25519_vrf_output verify_output = { 0 };
+    memcpy(verify_output, inout + 32, 32);
+
+    merlin_transcript t2 = { 0 };
+    merlin_transcript_init(&t2, SR_LIT_U8("SigningContext"), 14);
+    merlin_transcript_commit_bytes(&t2, SR_LIT_U8(""), 0, SR_LIT_U8("substrate"), 9);
+    merlin_transcript_commit_bytes(&t2, SR_LIT_U8("sign-bytes"), 10, message, message_length);
+    sr25519_vrf_proof decomp_proof = { 0 };
+    Sr25519SignatureResult shorten_result = shorten_vrf(decomp_proof, proof_batchable, public_key, &t2, verify_output);
+
+    if (shorten_result != Ok) {
+        VrfResult vrf_result;// = { 0 };
+        memset(&vrf_result, 0, sizeof(vrf_result));
+        vrf_result.result = shorten_result;
+        vrf_result.is_less = false;
+
+        return vrf_result;
+    }
+
+    if (memcmp_dev(output, verify_output, 32) == 0 && memcmp_dev(proof, decomp_proof, 32) == 0) {
+        VrfResult vrf_result;// = { 0 };
+        memset(&vrf_result, 0, sizeof(vrf_result));
+        vrf_result.result = Ok;
+        vrf_result.is_less = check;
+
+        return vrf_result;
+    }
+    else {
+        VrfResult vrf_result;// = { 0 };
+        memset(&vrf_result, 0, sizeof(vrf_result));
+        vrf_result.result = EquationFalse;
+        vrf_result.is_less = false;
+
+        return vrf_result;
+    }
+}
+
+//hash_impl
+
+static inline void
+// sr25519_hash_init: computes init for sr 25519.
+sr25519_hash_init(thread sr25519_hash_context* ctx) {
+    sha512_Init(ctx);
+}
+
+static inline void
+// sr25519_hash_update: computes update for sr 25519.
+sr25519_hash_update(thread sr25519_hash_context* ctx, const thread uchar* in, ulong inlen) {
+    sha512_Update(ctx, in, inlen);
+}
+
+static inline void
+// sr25519_hash_final: computes final for sr 25519.
+sr25519_hash_final(thread sr25519_hash_context* ctx, thread uchar* hash) {
+    sha512_Final(ctx, hash);
+}
+
+static inline void
+// sr25519_hash: computes the related data for sr 25519.
+sr25519_hash(thread uchar* hash, const thread uchar* in, ulong inlen) {
+    sha512_Raw(in, inlen, hash);
+}
+
+//randombytes_impl
+
+static inline void sr25519_randombytes(thread void* p, ulong len) {
+    thread uchar* buf = (thread uchar*)p;
+    for (int i = 0; i < len; i++)
+    {
+        buf[i] = 0x01;
+    }
+}
+
+
+//vrf_impl
+
+
+
+
+
+#define KUSAMA_VRF 1
+
+// Device helper: vrf_sign.
+static inline Sr25519SignatureResult vrf_sign(sr25519_vrf_io inout, sr25519_vrf_proof proof, sr25519_vrf_proof_batchable proof_batchable, const sr25519_keypair keypair, const thread merlin_transcript* t) {
+    sr25519_secret_key_key secret_key = { 0 };
+    memcpy(secret_key, keypair, 32);
+    sr25519_secret_key_nonce secret_nonce = { 0 };
+    memcpy(secret_nonce, keypair + 32, 32);
+    sr25519_public_key public_key = { 0 };
+    memcpy(public_key, keypair + 64, 32);
+
+    merlin_transcript_commit_bytes((thread merlin_transcript*)t, SR_LIT_U8("vrf-nm-pk"), 9, public_key, 32);
+    uchar b[64] = { 0 };
+    merlin_transcript_challenge_bytes((thread merlin_transcript*)t, SR_LIT_U8("VRFHash"), 7, b, 64);
+
+    ge25519 input = { 0 };
+    ristretto_from_uniform_bytes(&input, b);
+    uchar input_compressed[32] = { 0 };
+    ristretto_encode(input_compressed, input);
+
+    ge25519 output = { 0 };
+    bignum256modm secret_key_scalar = { 0 };
+    expand_raw256_modm(secret_key_scalar, secret_key);
+
+    int is_canonical = is_reduced256_modm(secret_key_scalar);
+    if (!is_canonical) {
+        Sr25519SignatureResult result = ScalarFormatError;
+        return result;
+    }
+
+    ge25519_scalarmult_tg(&output, &input, secret_key_scalar);
+
+    uchar output_compressed[32] = { 0 };
+    ristretto_encode(output_compressed, output);
+
+    memcpy(inout, input_compressed, 32);
+    memcpy(inout + 32, output_compressed, 32);
+
+    merlin_transcript e = { 0 };
+    merlin_transcript_init(&e, SR_LIT_U8("VRF"), 3);
+    merlin_transcript_commit_bytes(&e, SR_LIT_U8("proto-name"), 10, SR_LIT_U8("DLEQProof"), 9);
+    merlin_transcript_commit_bytes(&e, SR_LIT_U8("vrf:h"), 5, input_compressed, 32);
+    if (!KUSAMA_VRF) {
+        merlin_transcript_commit_bytes(&e, SR_LIT_U8("vrf:pk"), 6, public_key, 32);
+    }
+
+    bignum256modm r_scalar = { 0 };
+    uchar scalar_bytes[64] = { 0 };
+
+    merlin_rng mrng = { 0 };
+    merlin_rng_init(&mrng, &e);
+    merlin_rng_commit_witness_bytes(&mrng, SR_LIT_U8("proving\00"), 10, secret_nonce, 32);
+    uchar entropy[32] = { 0 };
+    sr25519_randombytes(entropy, 32);
+    merlin_rng_finalize(&mrng, entropy);
+    merlin_rng_random_bytes(&mrng, scalar_bytes, 32);
+
+    expand256_modm(r_scalar, scalar_bytes, 64);
+
+    ge25519 R = { 0 };
+    ge25519_scalarmult_base_niels(&R, ge25519_niels_base_multiples, r_scalar);
+    uchar R_compressed[32] = { 0 };
+    ristretto_encode(R_compressed, R);
+    merlin_transcript_commit_bytes(&e, SR_LIT_U8("vrf:R=g^r"), 9, R_compressed, 32);
+
+    ge25519 Hr = { 0 };
+    ge25519_scalarmult_tg(&Hr, &input, r_scalar);
+    uchar Hr_compressed[32] = { 0 };
+    ristretto_encode(Hr_compressed, Hr);
+    merlin_transcript_commit_bytes(&e, SR_LIT_U8("vrf:h^r"), 7, Hr_compressed, 32);
+
+    if (KUSAMA_VRF) {
+        merlin_transcript_commit_bytes(&e, SR_LIT_U8("vrf:pk"), 6, public_key, 32);
+    }
+
+    merlin_transcript_commit_bytes(&e, SR_LIT_U8("vrf:h^sk"), 8, output_compressed, 32);
+
+    bignum256modm c_scalar = { 0 };
+    uchar buf[64] = { 0 };
+    merlin_transcript_challenge_bytes(&e, SR_LIT_U8("prove"), 5, buf, 64);
+    expand256_modm(c_scalar, buf, 64);
+
+    bignum256modm c_secret_key_scalar = { 0 };
+    mul256_modm(c_secret_key_scalar, c_scalar, secret_key_scalar);
+
+    bignum256modm s_scalar = { 0 };
+    sub256_modm(s_scalar, r_scalar, c_secret_key_scalar);
+
+    uchar c[32] = { 0 };
+    contract256_modm(c, c_scalar);
+
+    uchar s[32] = { 0 };
+    contract256_modm(s, s_scalar);
+
+    memcpy(proof, c, 32);
+    memcpy(proof + 32, s, 32);
+
+    memcpy(proof_batchable, R_compressed, 32);
+    memcpy(proof_batchable + 32, Hr_compressed, 32);
+    memcpy(proof_batchable + 64, s, 32);
+
+    Sr25519SignatureResult result = Ok;
+    return result;
+}
+
+// Device helper: shorten_vrf.
+static inline Sr25519SignatureResult shorten_vrf(sr25519_vrf_proof proof, const sr25519_vrf_proof_batchable proof_batchable, const sr25519_public_key public_key, const thread merlin_transcript* t, const sr25519_vrf_output preout) {
+    merlin_transcript_commit_bytes((thread merlin_transcript*)t, SR_LIT_U8("vrf-nm-pk"), 9, public_key, 32);
+    uchar b[64] = { 0 };
+    merlin_transcript_challenge_bytes((thread merlin_transcript*)t, SR_LIT_U8("VRFHash"), 7, b, 64);
+    ge25519 input = { 0 };
+    ristretto_from_uniform_bytes(&input, b);
+
+    uchar input_compressed[32] = { 0 };
+    ristretto_encode(input_compressed, input);
+    uchar output_compressed[32] = { 0 };
+    memcpy(output_compressed, preout, 32);
+
+    merlin_transcript e = { 0 };
+    merlin_transcript_init(&e, SR_LIT_U8("VRF"), 3);
+    merlin_transcript_commit_bytes(&e, SR_LIT_U8("proto-name"), 10, SR_LIT_U8("DLEQProof"), 9);
+    merlin_transcript_commit_bytes(&e, SR_LIT_U8("vrf:h"), 5, input_compressed, 32);
+    if (!KUSAMA_VRF) {
+        merlin_transcript_commit_bytes(&e, SR_LIT_U8("vrf:pk"), 6, public_key, 32);
+    }
+
+    uchar R[32] = { 0 };
+    memcpy(R, proof_batchable, 32);
+    uchar Hr[32] = { 0 };
+    memcpy(Hr, proof_batchable + 32, 32);
+    uchar s[32] = { 0 };
+    memcpy(s, proof_batchable + 64, 32);
+
+    merlin_transcript_commit_bytes(&e, SR_LIT_U8("vrf:R=g^r"), 9, R, 32);
+    merlin_transcript_commit_bytes(&e, SR_LIT_U8("vrf:h^r"), 7, Hr, 32);
+    if (KUSAMA_VRF) {
+        merlin_transcript_commit_bytes(&e, SR_LIT_U8("vrf:pk"), 6, public_key, 32);
+    }
+    merlin_transcript_commit_bytes(&e, SR_LIT_U8("vrf:h^sk"), 8, output_compressed, 32);
+
+    bignum256modm c_scalar = { 0 };
+    uchar buf[64] = { 0 };
+    merlin_transcript_challenge_bytes(&e, SR_LIT_U8("prove"), 5, buf, 64);
+    expand256_modm(c_scalar, buf, 64);
+
+    uchar c[32] = { 0 };
+    contract256_modm(c, c_scalar);
+
+    memcpy(proof, c, 32);
+    memcpy(proof + 32, s, 32);
+
+    Sr25519SignatureResult result = Ok;
+    return result;
+}
+
+// Device helper: vrf_verify.
+static inline Sr25519SignatureResult vrf_verify(sr25519_vrf_io inout, sr25519_vrf_proof_batchable proof_batchable, const sr25519_public_key public_key, const thread merlin_transcript* t, const sr25519_vrf_output preout, const sr25519_vrf_proof proof) {
+    uchar c[32] = { 0 };
+    memcpy(c, proof, 32);
+    uchar s[32] = { 0 };
+    memcpy(s, proof + 32, 32);
+
+    merlin_transcript_commit_bytes((thread merlin_transcript*)t, SR_LIT_U8("vrf-nm-pk"), 9, public_key, 32);
+    uchar b[64] = { 0 };
+    merlin_transcript_challenge_bytes((thread merlin_transcript*)t, SR_LIT_U8("VRFHash"), 7, b, 64);
+    ge25519 input = { 0 };
+    ristretto_from_uniform_bytes(&input, b);
+
+    uchar input_compressed[32] = { 0 };
+    ristretto_encode(input_compressed, input);
+    uchar output_compressed[32] = { 0 };
+    memcpy(output_compressed, preout, 32);
+
+    memcpy(inout, input_compressed, 32);
+    memcpy(inout + 32, output_compressed, 32);
+
+    merlin_transcript e = { 0 };
+    merlin_transcript_init(&e, SR_LIT_U8("VRF"), 3);
+    merlin_transcript_commit_bytes(&e, SR_LIT_U8("proto-name"), 10, SR_LIT_U8("DLEQProof"), 9);
+    merlin_transcript_commit_bytes(&e, SR_LIT_U8("vrf:h"), 5, input_compressed, 32);
+    if (!KUSAMA_VRF) {
+        merlin_transcript_commit_bytes(&e, SR_LIT_U8("vrf:pk"), 6, public_key, 32);
+    }
+
+    ge25519 R, P = { 0 };
+    ristretto_decode(&P, public_key);
+    bignum256modm c_scalar = { 0 };
+    expand_raw256_modm(c_scalar, c);
+    bignum256modm s_scalar = { 0 };
+    expand_raw256_modm(s_scalar, s);
+    ge25519_double_scalarmult_vartime(&R, &P, c_scalar, s_scalar);
+    sr25519_public_key R_compressed = { 0 };
+    ristretto_encode(R_compressed, R);
+    merlin_transcript_commit_bytes(&e, SR_LIT_U8("vrf:R=g^r"), 9, R_compressed, 32);
+
+    ge25519 Hr, CP, SP, output = { 0 };
+    ristretto_decode(&output, output_compressed);
+    ge25519_scalarmult_tg(&CP, &output, c_scalar);
+    ge25519_scalarmult_tg(&SP, &input, s_scalar);
+    ge25519_add(&Hr, &CP, &SP);
+    sr25519_public_key Hr_compressed = { 0 };
+    ristretto_encode(Hr_compressed, Hr);
+    merlin_transcript_commit_bytes(&e, SR_LIT_U8("vrf:h^r"), 7, Hr_compressed, 32);
+
+    if (KUSAMA_VRF) {
+        merlin_transcript_commit_bytes(&e, SR_LIT_U8("vrf:pk"), 6, public_key, 32);
+    }
+    merlin_transcript_commit_bytes(&e, SR_LIT_U8("vrf:h^sk"), 8, output_compressed, 32);
+
+    bignum256modm verify_c_scalar = { 0 };
+    uchar buf[64] = { 0 };
+    merlin_transcript_challenge_bytes(&e, SR_LIT_U8("prove"), 5, buf, 64);
+    expand256_modm(verify_c_scalar, buf, 64);
+    uchar verify_c[32] = { 0 };
+    contract256_modm(verify_c, verify_c_scalar);
+
+    uchar is_valid = uint8_32_ct_eq(verify_c, c);
+
+    if (is_valid) {
+        memcpy(proof_batchable, R_compressed, 32);
+        memcpy(proof_batchable + 32, Hr_compressed, 32);
+        memcpy(proof_batchable + 64, s, 32);
+
+        Sr25519SignatureResult result = Ok;
+        return result;
+    }
+    else {
+
+        Sr25519SignatureResult result = EquationFalse;
+        return result;
+    }
+}
+
+// Device helper: io_make_bytes.
+static inline void io_make_bytes(sr25519_vrf_raw_output raw_output, const sr25519_vrf_io inout, const thread uchar* context, const ulong context_length) {
+    merlin_transcript t = { 0 };
+    merlin_transcript_init(&t, SR_LIT_U8("VRFResult"), 9);
+    merlin_transcript_commit_bytes(&t, SR_LIT_U8(""), 0, context, context_length);
+    uchar input[32] = { 0 };
+    memcpy(input, inout, 32);
+    uchar output[32] = { 0 };
+    memcpy(output, inout + 32, 32);
+    merlin_transcript_commit_bytes(&t, SR_LIT_U8("vrf-in"), 6, input, 32);
+    merlin_transcript_commit_bytes(&t, SR_LIT_U8("vrf-out"), 7, output, 32);
+    merlin_transcript_challenge_bytes(&t, SR_LIT_U8(""), 0, raw_output, 16);
+}
+
+#endif

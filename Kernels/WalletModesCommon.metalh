@@ -1,0 +1,148 @@
+#ifndef METAL_CRYPTO_WALLET_MODES_COMMON_METALH
+#define METAL_CRYPTO_WALLET_MODES_COMMON_METALH
+
+#include <metal_stdlib>
+
+using namespace metal;
+
+#define WALLET_MAX_PASSWORD_LEN 127u
+#define WALLET_PASS_STRIDE 128u
+#define WALLET_MAX_SALT_LEN 64u
+#define WALLET_MAX_CIPHERTEXT_LEN 128u
+#define WALLETDAT_MAX_CRYPTED_KEY_LEN 128u
+#define WALLETDAT_MAX_PUBKEY_LEN 65u
+#define WALLETDAT_MAX_CKEY_SLOTS 8u
+#define BROWSERVAULT_MAX_BLOB_LEN 65536u
+#define WALLET_MAX_MASK_LEN 64u
+#define WALLET_MAX_MASK_CHARS 4096u
+
+#define WALLET_CANDIDATE_DICTIONARY 1u
+#define WALLET_CANDIDATE_MASK 2u
+#define WALLET_CANDIDATE_RANGE 3u
+
+#define WALLET_MODE_WALLETDAT 2u
+#define WALLET_MODE_BROWSERVAULT 4u
+#define WALLET_MODE_ELECTRUMWALLET 5u
+#define WALLET_DAT_RESULT_PRIV 0x01u
+#define WALLET_DAT_RESULT_MKEY_ONLY 0x80u
+
+#define BROWSERVAULT_PROFILE_METAMASK_AES_GCM 1u
+#define BROWSERVAULT_PROFILE_PHANTOM_SECRETBOX_PBKDF2 2u
+#define BROWSERVAULT_PROFILE_PHANTOM_SECRETBOX_SCRYPT 3u
+#define BROWSERVAULT_PROFILE_ATOMIC_CRYPTOJS_AES 4u
+#define BROWSERVAULT_PROFILE_STELLAR_AES_GCM 20u
+#define BROWSERVAULT_PROFILE_BISQ_SCRYPT_AES 21u
+#define BROWSERVAULT_PROFILE_MULTIBIT_HD_SCRYPT_AES 22u
+#define BROWSERVAULT_PROFILE_DOGECHAIN_PBKDF2_AES_CBC 23u
+#define BROWSERVAULT_PROFILE_BLOCKCHAIN_V2_PBKDF2_AES_CBC 24u
+#define BROWSERVAULT_PROFILE_ETHPRESALE_PBKDF2_AES_CBC 25u
+#define BROWSERVAULT_PROFILE_MULTIBIT_CLASSIC_MD5_AES 26u
+#define BROWSERVAULT_PROFILE_MULTIBIT_CLASSIC_SCRYPT_AES 27u
+#define BROWSERVAULT_PROFILE_BIP38_NON_EC 28u
+#define BROWSERVAULT_PROFILE_ANDROID_BACKUP_PBKDF2_SHA1_AES_CBC 29u
+#define BROWSERVAULT_PROFILE_BIP38_EC 30u
+
+static inline bool wallet_mul_overflows_u64_by_u32(ulong x, uint y) {
+    const ulong yy = ulong(y);
+    const ulong lo = (x & 0xfffffffful) * yy;
+    const ulong hi = (x >> 32u) * yy;
+    return hi + (lo >> 32u) > 0xfffffffful;
+}
+
+static inline bool wallet_mul_overflows_u32_by_u32(ulong x, uint y) {
+    return (x >> 32u) != 0ul || ((x & 0xfffffffful) * ulong(y)) > 0xfffffffful;
+}
+
+struct WalletDatTarget {
+    uint iterations;
+    uint salt_len;
+    uint crypted_master_len;
+    uint target_index;
+    uint ckey_count;
+    uint crypted_key_len[WALLETDAT_MAX_CKEY_SLOTS];
+    uint pubkey_len[WALLETDAT_MAX_CKEY_SLOTS];
+    uchar salt[WALLET_MAX_SALT_LEN];
+    uchar crypted_master[WALLETDAT_MAX_CRYPTED_KEY_LEN];
+    uchar crypted_key[WALLETDAT_MAX_CKEY_SLOTS][WALLETDAT_MAX_CRYPTED_KEY_LEN];
+    uchar pubkey[WALLETDAT_MAX_CKEY_SLOTS][WALLETDAT_MAX_PUBKEY_LEN];
+    uchar ckey_iv[WALLETDAT_MAX_CKEY_SLOTS][16];
+};
+
+struct WalletDatGroup {
+    uint iterations;
+    uint salt_len;
+    uint target_offset;
+    uint target_count;
+    uchar salt[WALLET_MAX_SALT_LEN];
+};
+
+struct WalletDatMasterHit {
+    ulong candidate_index;
+    uint target_index;
+    uint master_len;
+    uchar key32[32];
+    uchar iv16[16];
+};
+
+struct WalletDatKdfTmp {
+    ulong digest[8];
+    uint active;
+    uint reserved0;
+};
+
+struct BrowserVaultDeviceTarget {
+    uint iterations;
+    uint salt_len;
+    uint iv_len;
+    uint ciphertext_len;
+    uint target_index;
+    uint profile;
+    uint scrypt_n;
+    uint scrypt_r;
+    uint scrypt_p;
+    ulong ciphertext_offset;
+    uchar salt[WALLET_MAX_SALT_LEN];
+    uchar iv[32];
+    uchar tag[16];
+    uchar vault_hash[32];
+};
+
+struct BrowserVaultGroup {
+    uint iterations;
+    uint salt_len;
+    uint target_offset;
+    uint target_count;
+    uint profile;
+    uint scrypt_n;
+    uint scrypt_r;
+    uint scrypt_p;
+    uchar salt[WALLET_MAX_SALT_LEN];
+};
+
+struct WalletMaskSpec {
+    uint len;
+    uint total_charsets;
+    ulong total_candidates;
+    ushort charset_offset[WALLET_MAX_MASK_LEN];
+    ushort charset_len[WALLET_MAX_MASK_LEN];
+    uchar chars[WALLET_MAX_MASK_CHARS];
+};
+
+struct WalletRangeSpec {
+    uint len;
+    uchar start[WALLET_MAX_PASSWORD_LEN];
+};
+
+struct WalletModeResult {
+    uchar mode;
+    uchar type;
+    ushort password_len;
+    uint target_index;
+    uchar password[WALLET_PASS_STRIDE];
+    uchar priv[32];
+    uchar payload[WALLETDAT_MAX_PUBKEY_LEN];
+    uchar payload_len;
+    uchar reserved[6];
+};
+
+#endif

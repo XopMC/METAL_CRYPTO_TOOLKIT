@@ -1,0 +1,301 @@
+#ifndef METAL_CRYPTO_BIG_INT_FUNC_METALH
+#define METAL_CRYPTO_BIG_INT_FUNC_METALH
+
+#include "../KernelState.metalh"
+
+template <uint N>
+inline void bigint_load_be_to_words_thread(const thread uchar* src, thread uint* c) {
+    for (uint i = 0; i < N; ++i) {
+        c[i] = (uint(src[4u * i + 0u]) << 24u)
+             | (uint(src[4u * i + 1u]) << 16u)
+             | (uint(src[4u * i + 2u]) << 8u)
+             | (uint(src[4u * i + 3u]) << 0u);
+    }
+}
+
+template <uint N>
+inline void bigint_load_be_to_words_device(const device uchar* src, thread uint* c) {
+    for (uint i = 0; i < N; ++i) {
+        c[i] = (uint(src[4u * i + 0u]) << 24u)
+             | (uint(src[4u * i + 1u]) << 16u)
+             | (uint(src[4u * i + 2u]) << 8u)
+             | (uint(src[4u * i + 3u]) << 0u);
+    }
+}
+
+template <uint N>
+inline void bigint_store_words_to_be_thread(const thread uint* c, thread uchar* dst) {
+    for (uint i = 0; i < N; ++i) {
+        const uint w = c[i];
+        dst[4u * i + 0u] = uchar(w >> 24u);
+        dst[4u * i + 1u] = uchar(w >> 16u);
+        dst[4u * i + 2u] = uchar(w >> 8u);
+        dst[4u * i + 3u] = uchar(w >> 0u);
+    }
+}
+
+template <uint N>
+inline void bigint_store_words_to_be_device(const thread uint* c, device uchar* dst) {
+    for (uint i = 0; i < N; ++i) {
+        const uint w = c[i];
+        dst[4u * i + 0u] = uchar(w >> 24u);
+        dst[4u * i + 1u] = uchar(w >> 16u);
+        dst[4u * i + 2u] = uchar(w >> 8u);
+        dst[4u * i + 3u] = uchar(w >> 0u);
+    }
+}
+
+inline void loadBE256toWords(const thread uchar src[32], thread uint c[8]) { bigint_load_be_to_words_thread<8>(src, c); }
+inline void loadBE256toWords(const device uchar src[32], thread uint c[8]) { bigint_load_be_to_words_device<8>(src, c); }
+inline void storeWordsToBE256(const thread uint c[8], thread uchar dst[32]) { bigint_store_words_to_be_thread<8>(c, dst); }
+inline void storeWordsToBE256(const thread uint c[8], device uchar dst[32]) { bigint_store_words_to_be_device<8>(c, dst); }
+
+inline void loadBE512toWords(const thread uchar src[64], thread uint c[16]) { bigint_load_be_to_words_thread<16>(src, c); }
+inline void loadBE512toWords(const device uchar src[64], thread uint c[16]) { bigint_load_be_to_words_device<16>(src, c); }
+inline void storeWordsToBE512(const thread uint c[16], thread uchar dst[64]) { bigint_store_words_to_be_thread<16>(c, dst); }
+inline void storeWordsToBE512(const thread uint c[16], device uchar dst[64]) { bigint_store_words_to_be_device<16>(c, dst); }
+
+inline void loadBE1024toWords(const thread uchar src[128], thread uint c[32]) { bigint_load_be_to_words_thread<32>(src, c); }
+inline void loadBE1024toWords(const device uchar src[128], thread uint c[32]) { bigint_load_be_to_words_device<32>(src, c); }
+inline void storeWordsToBE1024(const thread uint c[32], thread uchar dst[128]) { bigint_store_words_to_be_thread<32>(c, dst); }
+inline void storeWordsToBE1024(const thread uint c[32], device uchar dst[128]) { bigint_store_words_to_be_device<32>(c, dst); }
+
+inline void loadBE2048toWords(const thread uchar src[256], thread uint c[64]) { bigint_load_be_to_words_thread<64>(src, c); }
+inline void loadBE2048toWords(const device uchar src[256], thread uint c[64]) { bigint_load_be_to_words_device<64>(src, c); }
+inline void storeWordsToBE2048(const thread uint c[64], thread uchar dst[256]) { bigint_store_words_to_be_thread<64>(c, dst); }
+inline void storeWordsToBE2048(const thread uint c[64], device uchar dst[256]) { bigint_store_words_to_be_device<64>(c, dst); }
+
+inline void loadBE4096toWords(const thread uchar src[512], thread uint c[128]) { bigint_load_be_to_words_thread<128>(src, c); }
+inline void loadBE4096toWords(const device uchar src[512], thread uint c[128]) { bigint_load_be_to_words_device<128>(src, c); }
+inline void storeWordsToBE4096(const thread uint c[128], thread uchar dst[512]) { bigint_store_words_to_be_thread<128>(c, dst); }
+inline void storeWordsToBE4096(const thread uint c[128], device uchar dst[512]) { bigint_store_words_to_be_device<128>(c, dst); }
+
+inline void loadBE8192toWords(const thread uchar src[1024], thread uint c[256]) { bigint_load_be_to_words_thread<256>(src, c); }
+inline void loadBE8192toWords(const device uchar src[1024], thread uint c[256]) { bigint_load_be_to_words_device<256>(src, c); }
+inline void storeWordsToBE8192(const thread uint c[256], thread uchar dst[1024]) { bigint_store_words_to_be_thread<256>(c, dst); }
+inline void storeWordsToBE8192(const thread uint c[256], device uchar dst[1024]) { bigint_store_words_to_be_device<256>(c, dst); }
+
+template <uint N>
+inline int bigint_add64_to_words(const thread uint in[N], ulong val64, thread uint out[N]) {
+    const uint hi = uint(val64 >> 32u);
+    const uint lo = uint(val64 & 0xfffffffful);
+    ulong sum = ulong(in[N - 1u]) + ulong(lo);
+    out[N - 1u] = uint(sum);
+    ulong carry = sum >> 32u;
+    sum = ulong(in[N - 2u]) + ulong(hi) + carry;
+    out[N - 2u] = uint(sum);
+    carry = sum >> 32u;
+    for (int i = int(N) - 3; i >= 0; --i) {
+        sum = ulong(in[i]) + carry;
+        out[i] = uint(sum);
+        carry = sum >> 32u;
+    }
+    return int(carry);
+}
+
+template <uint N>
+inline int bigint_sub64_from_words(const thread uint in[N], ulong val64, thread uint out[N]) {
+    const uint hi = uint(val64 >> 32u);
+    const uint lo = uint(val64 & 0xfffffffful);
+    ulong borrow = 0ul;
+    ulong lhs = ulong(in[N - 1u]);
+    ulong rhs = ulong(lo);
+    if (lhs >= rhs) {
+        out[N - 1u] = uint(lhs - rhs);
+        borrow = 0ul;
+    } else {
+        out[N - 1u] = uint((1ul << 32u) + lhs - rhs);
+        borrow = 1ul;
+    }
+
+    lhs = ulong(in[N - 2u]);
+    rhs = ulong(hi) + borrow;
+    if (lhs >= rhs) {
+        out[N - 2u] = uint(lhs - rhs);
+        borrow = 0ul;
+    } else {
+        out[N - 2u] = uint((1ul << 32u) + lhs - rhs);
+        borrow = 1ul;
+    }
+
+    for (int i = int(N) - 3; i >= 0; --i) {
+        lhs = ulong(in[i]);
+        rhs = borrow;
+        if (lhs >= rhs) {
+            out[i] = uint(lhs - rhs);
+            borrow = 0ul;
+        } else {
+            out[i] = uint((1ul << 32u) + lhs - rhs);
+            borrow = 1ul;
+        }
+    }
+    return int(borrow & 1ul);
+}
+
+inline int add64to256_device(const thread uint in[8], ulong val64, thread uint out[8]) { return bigint_add64_to_words<8>(in, val64, out); }
+inline int sub64from256_device(const thread uint in[8], ulong val64, thread uint out[8]) { return bigint_sub64_from_words<8>(in, val64, out); }
+inline int add64to512_device(const thread uint in[16], ulong val64, thread uint out[16]) { return bigint_add64_to_words<16>(in, val64, out); }
+inline int sub64from512_device(const thread uint in[16], ulong val64, thread uint out[16]) { return bigint_sub64_from_words<16>(in, val64, out); }
+inline int add64to1024_device(const thread uint in[32], ulong val64, thread uint out[32]) { return bigint_add64_to_words<32>(in, val64, out); }
+inline int sub64from1024_device(const thread uint in[32], ulong val64, thread uint out[32]) { return bigint_sub64_from_words<32>(in, val64, out); }
+inline int add64to2048_device(const thread uint in[64], ulong val64, thread uint out[64]) { return bigint_add64_to_words<64>(in, val64, out); }
+inline int sub64from2048_device(const thread uint in[64], ulong val64, thread uint out[64]) { return bigint_sub64_from_words<64>(in, val64, out); }
+inline int add64to4096_device(const thread uint in[128], ulong val64, thread uint out[128]) { return bigint_add64_to_words<128>(in, val64, out); }
+inline int sub64from4096_device(const thread uint in[128], ulong val64, thread uint out[128]) { return bigint_sub64_from_words<128>(in, val64, out); }
+inline int add64to8192_device(const thread uint in[256], ulong val64, thread uint out[256]) { return bigint_add64_to_words<256>(in, val64, out); }
+inline int sub64from8192_device(const thread uint in[256], ulong val64, thread uint out[256]) { return bigint_sub64_from_words<256>(in, val64, out); }
+
+inline void mul_u64_u64_to_u128(ulong a, ulong b, thread ulong& lo, thread ulong& hi) {
+    lo = a * b;
+    hi = mulhi(a, b);
+}
+
+inline void add128to256_device(const thread uint c[8], ulong lo, ulong hi, thread uint r[8]) {
+    const uint v0 = uint(lo);
+    const uint v1 = uint(lo >> 32u);
+    const uint v2 = uint(hi);
+    const uint v3 = uint(hi >> 32u);
+    ulong sum;
+    ulong carry = 0ul;
+    sum = ulong(c[7]) + v0;         r[7] = uint(sum); carry = sum >> 32u;
+    sum = ulong(c[6]) + v1 + carry; r[6] = uint(sum); carry = sum >> 32u;
+    sum = ulong(c[5]) + v2 + carry; r[5] = uint(sum); carry = sum >> 32u;
+    sum = ulong(c[4]) + v3 + carry; r[4] = uint(sum); carry = sum >> 32u;
+    sum = ulong(c[3]) + carry;      r[3] = uint(sum); carry = sum >> 32u;
+    sum = ulong(c[2]) + carry;      r[2] = uint(sum); carry = sum >> 32u;
+    sum = ulong(c[1]) + carry;      r[1] = uint(sum); carry = sum >> 32u;
+    sum = ulong(c[0]) + carry;      r[0] = uint(sum);
+}
+
+inline uint bigint_sub32(uint a, uint b, thread ulong& borrow) {
+    const ulong x = ulong(a);
+    const ulong y = ulong(b) + borrow;
+    if (x >= y) {
+        borrow = 0ul;
+        return uint(x - y);
+    }
+    borrow = 1ul;
+    return uint((1ul << 32u) + x - y);
+}
+
+inline void sub128from256_device(const thread uint c[8], ulong lo, ulong hi, thread uint r[8]) {
+    const uint v0 = uint(lo);
+    const uint v1 = uint(lo >> 32u);
+    const uint v2 = uint(hi);
+    const uint v3 = uint(hi >> 32u);
+    ulong borrow = 0ul;
+    r[7] = bigint_sub32(c[7], v0, borrow);
+    r[6] = bigint_sub32(c[6], v1, borrow);
+    r[5] = bigint_sub32(c[5], v2, borrow);
+    r[4] = bigint_sub32(c[4], v3, borrow);
+    r[3] = bigint_sub32(c[3], 0u, borrow);
+    r[2] = bigint_sub32(c[2], 0u, borrow);
+    r[1] = bigint_sub32(c[1], 0u, borrow);
+    r[0] = bigint_sub32(c[0], 0u, borrow);
+}
+
+template <uint N>
+inline int bigint_size_be(const thread uint c[N]) {
+    for (uint i = 0; i < N; ++i) {
+        uint w = c[i];
+        if (w != 0u) {
+            int leadingZeroBytes = 0;
+            if ((w >> 24u) == 0u) {
+                leadingZeroBytes++;
+                w <<= 8u;
+                if ((w >> 24u) == 0u) {
+                    leadingZeroBytes++;
+                    w <<= 8u;
+                    if ((w >> 24u) == 0u) {
+                        leadingZeroBytes++;
+                        w <<= 8u;
+                        if ((w >> 24u) == 0u) {
+                            leadingZeroBytes++;
+                        }
+                    }
+                }
+            }
+            return int((N - i) * 4u) - leadingZeroBytes;
+        }
+    }
+    return 0;
+}
+
+inline int sizeBE256_device(const thread uint c[8]) { return bigint_size_be<8>(c); }
+inline int sizeBE512_device(const thread uint c[16]) { return bigint_size_be<16>(c); }
+inline int sizeBE1024_device(const thread uint c[32]) { return bigint_size_be<32>(c); }
+inline int sizeBE2048_device(const thread uint c[64]) { return bigint_size_be<64>(c); }
+inline int sizeBE4096_device(const thread uint c[128]) { return bigint_size_be<128>(c); }
+inline int sizeBE8192_device(const thread uint c[256]) { return bigint_size_be<256>(c); }
+
+template <uint N>
+inline int bigint_cmp_words(const thread uint A[N], const thread uint B[N]) {
+    for (uint i = 0; i < N; ++i) {
+        if (A[i] < B[i]) {
+            return -1;
+        }
+        if (A[i] > B[i]) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+inline int cmp256_device(const thread uint A[8], const thread uint B[8]) { return bigint_cmp_words<8>(A, B); }
+inline int cmp512_device(const thread uint A[16], const thread uint B[16]) { return bigint_cmp_words<16>(A, B); }
+inline int cmp1024_device(const thread uint A[32], const thread uint B[32]) { return bigint_cmp_words<32>(A, B); }
+inline int cmp2048_device(const thread uint A[64], const thread uint B[64]) { return bigint_cmp_words<64>(A, B); }
+inline int cmp4096_device(const thread uint A[128], const thread uint B[128]) { return bigint_cmp_words<128>(A, B); }
+inline int cmp8192_device(const thread uint A[256], const thread uint B[256]) { return bigint_cmp_words<256>(A, B); }
+
+inline bool bump_key_256(thread uchar* prv32, ulong n, bool plus) {
+    bool is_null = false;
+    thread uint c[8];
+    thread uint r[8];
+    loadBE256toWords(prv32, c);
+    if (plus) {
+        add64to256_device(c, n, r);
+    } else {
+        sub64from256_device(c, n, r);
+    }
+
+    const uint orv = r[0] | r[1] | r[2] | r[3] | r[4] | r[5] | r[6] | r[7];
+    if (plus && orv == 0u) {
+        r[0] = 0u; r[1] = 0u; r[2] = 0u; r[3] = 0u;
+        r[4] = 0u; r[5] = 0u; r[6] = 0u; r[7] = 2u;
+        is_null = true;
+    }
+
+    storeWordsToBE256(r, prv32);
+    return is_null;
+}
+
+inline int bump_all_keys(thread uchar* prvKeys, int count, ulong n, bool plus, thread int* zeroz) {
+    thread uint c[8];
+    thread uint r[8];
+    int wrapped = 0;
+
+    for (int i = 0; i < count; ++i) {
+        thread uchar* pvk = &prvKeys[i * 32];
+        loadBE256toWords(pvk, c);
+        if (plus) {
+            add64to256_device(c, n, r);
+        } else {
+            sub64from256_device(c, n, r);
+        }
+
+        const uint orv = r[0] | r[1] | r[2] | r[3] | r[4] | r[5] | r[6] | r[7];
+        if (plus && orv == 0u) {
+            r[0] = 0u; r[1] = 0u; r[2] = 0u; r[3] = 0u;
+            r[4] = 0u; r[5] = 0u; r[6] = 0u; r[7] = 2u;
+            if (zeroz != nullptr) {
+                zeroz[i] = i + 1;
+            }
+            wrapped++;
+        }
+        storeWordsToBE256(r, pvk);
+    }
+    return wrapped;
+}
+
+#endif

@@ -1,0 +1,949 @@
+#ifndef METAL_CRYPTO_ADADOT_FUNC_METALH
+#define METAL_CRYPTO_ADADOT_FUNC_METALH
+
+#include "AdaFunc.metalh"
+#include "BigIntFunc.metalh"
+#include "FilterCommon.metalh"
+#include "FoundCommon.metalh"
+#include "Pbkdf2Func.metalh"
+#include "../sr25519-donna-32bit/ed25519-donna/ed25519.metalh"
+#include "../sr25519-donna-32bit/sr25519.metalh"
+
+using namespace metal;
+
+#if !defined(METAL_CRYPTO_NO_FUNCTION_CONSTANTS)
+constant uint ADADOT_FC_ADA_TYPE_MASK [[function_constant(32)]];
+constant bool ADADOT_FC_ED_SCALAR [[function_constant(66)]];
+constant bool ADADOT_FC_ED_HASH [[function_constant(67)]];
+constant bool ADADOT_FC_ED_LITTLE_ENDIAN [[function_constant(68)]];
+#endif
+
+static inline bool adadot_ed_scalar_mode(device RuntimeConfig& config) {
+#if defined(METAL_CRYPTO_NO_FUNCTION_CONSTANTS)
+    return config.isEd25519Scalar != 0u;
+#else
+    return is_function_constant_defined(ADADOT_FC_ED_SCALAR)
+        ? ADADOT_FC_ED_SCALAR
+        : config.isEd25519Scalar != 0u;
+#endif
+}
+
+static inline bool adadot_ed_hash_mode(device RuntimeConfig& config) {
+#if defined(METAL_CRYPTO_NO_FUNCTION_CONSTANTS)
+    return config.isEd25519Hash != 0u;
+#else
+    return is_function_constant_defined(ADADOT_FC_ED_HASH)
+        ? ADADOT_FC_ED_HASH
+        : config.isEd25519Hash != 0u;
+#endif
+}
+
+static inline bool adadot_ed_little_endian_mode(device RuntimeConfig& config) {
+#if defined(METAL_CRYPTO_NO_FUNCTION_CONSTANTS)
+    return config.isLittleEndian != 0u;
+#else
+    return is_function_constant_defined(ADADOT_FC_ED_LITTLE_ENDIAN)
+        ? ADADOT_FC_ED_LITTLE_ENDIAN
+        : config.isLittleEndian != 0u;
+#endif
+}
+
+static inline bool adadot_ada_type_enabled(device RuntimeConfig& config, uchar coin_type) {
+#if defined(METAL_CRYPTO_NO_FUNCTION_CONSTANTS)
+    return metal_type_mask_enabled(config.adaTypeMask, coin_type, 0x10u, 0x19u);
+#else
+    (void)config;
+    return metal_type_mask_enabled(ADADOT_FC_ADA_TYPE_MASK, coin_type, 0x10u, 0x19u);
+#endif
+}
+
+static inline void adadot_copy_thread_bytes(thread uchar* dst, const thread uchar* src, uint len) {
+    for (uint i = 0u; i < len; ++i) {
+        dst[i] = src[i];
+    }
+}
+
+static inline void adadot_copy_constant_bytes(thread uchar* dst, const constant uchar* src, uint len) {
+    for (uint i = 0u; i < len; ++i) {
+        dst[i] = src[i];
+    }
+}
+
+static inline void adadot_copy_device_bytes(thread uchar* dst, const device uchar* src, uint len) {
+    for (uint i = 0u; i < len; ++i) {
+        dst[i] = src[i];
+    }
+}
+
+static inline bool adadot_has_any_target(device RuntimeConfig& config) {
+    return config.full != 0u ||
+           config.hashTargetEnabled != 0u ||
+           config.useBloom != 0u ||
+           config.useXor != 0u ||
+           config.useXorUn != 0u ||
+           config.useXorUc != 0u ||
+           config.useXorHc != 0u;
+}
+
+static inline bool adadot_check_hash_words(device RuntimeConfig& config,
+                                           device XorFilterState& filters,
+                                           device FilterStorageState& storage,
+                                           const device uchar* bloom_storage,
+                                           const device uchar* xor_storage,
+                                           const device uchar* xor_un_storage,
+                                           const device uchar* xor_uc_storage,
+                                           const device uchar* xor_hc_storage,
+                                           const thread void* raw_hash_words) {
+    thread uint hash[5];
+    const thread uchar* src = reinterpret_cast<const thread uchar*>(raw_hash_words);
+    for (uint i = 0u; i < 5u; ++i) {
+        const uint o = i * 4u;
+        hash[i] = uint(src[o + 0u]) |
+                  (uint(src[o + 1u]) << 8u) |
+                  (uint(src[o + 2u]) << 16u) |
+                  (uint(src[o + 3u]) << 24u);
+    }
+    return filter_check_hash(config, filters, storage, bloom_storage, xor_storage,
+                             xor_un_storage, xor_uc_storage, xor_hc_storage, hash);
+}
+
+static inline void adadot_store_result_with_found_len(device bool* isResult,
+                                                      device bool* buffResult,
+                                                      const thread char* toHash,
+                                                      ulong len,
+                                                      ulong stored_len,
+                                                      const thread uchar* priv1,
+                                                      const thread uchar* priv2,
+                                                      const thread uchar* raw,
+                                                      uint raw_len,
+                                                      uchar type,
+                                                      uint c_path,
+                                                      uint c_path2,
+                                                      long current_round,
+                                                      ushort starter_pass,
+                                                      const device char* passStart,
+                                                      uint passSize,
+                                                      ulong buff_index,
+                                                      bool store_seed,
+                                                      ulong seed_value,
+                                                      uint iter_value,
+                                                      bool store_iter,
+                                                      device RuntimeConfig& config,
+                                                      FoundBuffers found) {
+    (void)starter_pass;
+    if (!target_subtype_enabled(config, type)) {
+        return;
+    }
+    if (buffResult != nullptr) {
+        buffResult[buff_index] = true;
+    }
+    if (isResult != nullptr) {
+        isResult[0] = true;
+    }
+    if (found.resultsCount == nullptr) {
+        return;
+    }
+
+    const ulong idx64 = found_atomic_add_count(found.resultsCount, 1u);
+    if (idx64 >= ulong(found.maxFounds)) {
+        return;
+    }
+    const uint idx = uint(idx64);
+
+    if (toHash != nullptr && len > 0ul) {
+        if (found.foundDerivations != nullptr) {
+            found.foundDerivations[idx] = c_path;
+        }
+        if (found.foundDerivations2 != nullptr) {
+            found.foundDerivations2[idx] = c_path2;
+        }
+        if (found.foundStrings != nullptr) {
+            const uint copy_len = (len > ulong(kFoundStringBytes)) ? kFoundStringBytes : uint(len);
+            found_copy_thread_to_device_char(found.foundStrings + ulong(idx) * kFoundStringBytes, toHash, copy_len);
+        }
+        if (found.len != nullptr) {
+            found.len[idx] = uint(stored_len);
+        }
+    }
+    if (found.foundPrvKeys != nullptr) {
+        device uchar* out_priv = found.foundPrvKeys + ulong(idx) * kFoundPrivateKeyBytes;
+        if (priv1 != nullptr) {
+            found_copy_thread_to_device_uchar(out_priv, priv1, 32u);
+        }
+        if (priv2 != nullptr) {
+            found_copy_thread_to_device_uchar(out_priv + 32u, priv2, 32u);
+        }
+    }
+    if (found.foundHash160 != nullptr && raw != nullptr) {
+        const uint copy_len = (raw_len > kFoundHashWords * 4u) ? (kFoundHashWords * 4u) : raw_len;
+        device uchar* out_hash = reinterpret_cast<device uchar*>(found.foundHash160 + ulong(idx) * kFoundHashWords);
+        found_copy_thread_to_device_uchar(out_hash, raw, copy_len);
+    }
+    if (found.type != nullptr) {
+        found.type[idx] = type;
+    }
+    if (found.round != nullptr) {
+        found.round[idx] = current_round;
+    }
+    if (store_seed && found.seed != nullptr) {
+        found.seed[idx] = seed_value;
+    }
+    if (store_iter && found.iter != nullptr) {
+        found.iter[idx] = iter_value;
+    }
+    if (config.isPass != 0u && passStart != nullptr && passSize > 0u) {
+        const uint copy_len = (passSize > kFoundPassBytes) ? kFoundPassBytes : passSize;
+        if (found.passSize != nullptr) {
+            found.passSize[idx] = ushort(copy_len);
+        }
+        if (found.pass != nullptr) {
+            device char* out_pass = found.pass + ulong(idx) * kFoundPassBytes;
+            for (uint i = 0u; i < copy_len; ++i) {
+                out_pass[i] = passStart[i];
+            }
+        }
+    }
+}
+
+static inline void adadot_store_result(device bool* isResult,
+                                       device bool* buffResult,
+                                       const thread char* toHash,
+                                       ulong len,
+                                       const thread uchar* priv1,
+                                       const thread uchar* priv2,
+                                       const thread uchar* raw,
+                                       uint raw_len,
+                                       uchar type,
+                                       uint c_path,
+                                       uint c_path2,
+                                       long current_round,
+                                       ushort starter_pass,
+                                       const device char* passStart,
+                                       uint passSize,
+                                       ulong buff_index,
+                                       bool store_seed,
+                                       ulong seed_value,
+                                       uint iter_value,
+                                       bool store_iter,
+                                       device RuntimeConfig& config,
+                                       FoundBuffers found) {
+    adadot_store_result_with_found_len(isResult, buffResult, toHash, len, len,
+                                       priv1, priv2, raw, raw_len, type, c_path,
+                                       c_path2, current_round, starter_pass,
+                                       passStart, passSize, buff_index, store_seed,
+                                       seed_value, iter_value, store_iter, config,
+                                       found);
+}
+
+static inline void adadot_sha256_57(const thread uchar* raw, thread uchar out[32]) {
+    uint s[8];
+    SHA256Initialize(s);
+
+    thread uint w[16];
+#pragma unroll
+    for (int i = 0; i < 14; ++i) {
+        const uint o = uint(i) << 2u;
+        w[i] = (uint(raw[o + 0u]) << 24u) |
+               (uint(raw[o + 1u]) << 16u) |
+               (uint(raw[o + 2u]) << 8u) |
+               uint(raw[o + 3u]);
+    }
+    w[14] = (uint(raw[56]) << 24u) | 0x00800000u;
+    w[15] = 0u;
+    SHA256Transform(s, w);
+
+#pragma unroll
+    for (int i = 0; i < 14; ++i) {
+        w[i] = 0u;
+    }
+    w[14] = 0u;
+    w[15] = 57u * 8u;
+    SHA256Transform(s, w);
+
+#pragma unroll
+    for (int i = 0; i < 8; ++i) {
+        const uint v = s[i];
+        out[(i << 2) + 0] = uchar(v >> 24u);
+        out[(i << 2) + 1] = uchar(v >> 16u);
+        out[(i << 2) + 2] = uchar(v >> 8u);
+        out[(i << 2) + 3] = uchar(v);
+    }
+}
+
+static inline void adadot_check_ada_raw(device bool* isResult,
+                                        device bool* buffResult,
+                                        const thread char* toHash,
+                                        ulong len,
+                                        const thread uchar* priv1,
+                                        const thread uchar* priv2,
+                                        const thread uchar* raw,
+                                        uint raw_len,
+                                        uchar type,
+                                        uint c_path,
+                                        uint c_path2,
+                                        long current_round,
+                                        ushort starter_pass,
+                                        const device char* passStart,
+                                        uint passSize,
+                                        ulong buff_index,
+                                        bool store_seed,
+                                        ulong seed_value,
+                                        uint iter_value,
+                                        bool store_iter,
+                                        device RuntimeConfig& config,
+                                        device XorFilterState& filters,
+                                        device FilterStorageState& storage,
+                                        const device uchar* bloom_storage,
+                                        const device uchar* xor_storage,
+                                        const device uchar* xor_un_storage,
+                                        const device uchar* xor_uc_storage,
+                                        const device uchar* xor_hc_storage,
+                                        FoundBuffers found) {
+    if (!adadot_ada_type_enabled(config, type)) {
+        return;
+    }
+    if (!adadot_has_any_target(config)) {
+        return;
+    }
+    thread uchar addr_hash[32] = { 0 };
+    if (raw_len == 57u) {
+        adadot_sha256_57(raw, addr_hash);
+    } else {
+        SHA256(raw, size_t(raw_len), addr_hash);
+    }
+    if (adadot_check_hash_words(config, filters, storage, bloom_storage, xor_storage,
+                                xor_un_storage, xor_uc_storage, xor_hc_storage, addr_hash)) {
+        adadot_store_result(isResult, buffResult, toHash, len, priv1, priv2, raw, raw_len,
+                            type, c_path, c_path2, current_round, starter_pass, passStart,
+                            passSize, buff_index, store_seed, seed_value, iter_value,
+                            store_iter, config, found);
+    }
+}
+
+static inline uint adadot_ada_encode_pointer_uint(ulong value, thread uchar* out) {
+    thread uchar tmp[10] = { 0 };
+    uint count = 0u;
+    do {
+        tmp[count++] = uchar(value & 0x7ful);
+        value >>= 7u;
+    } while (value != 0ul && count < 10u);
+    for (uint i = 0u; i < count; ++i) {
+        const uint src = count - 1u - i;
+        out[i] = tmp[src];
+        if (i + 1u < count) {
+            out[i] |= 0x80u;
+        }
+    }
+    return count;
+}
+
+static inline bool adadot_key32_equal(const thread uchar* a, const thread uchar* b) {
+    for (uint i = 0u; i < 32u; ++i) {
+        if (a[i] != b[i]) {
+            return false;
+        }
+    }
+    return true;
+}
+
+static inline bool adadot_substrate_ed25519_path_supported(const device SubstratePathDevice& path) {
+    const uint junction_count = min(path.junction_count, uint(kSubstrateMaxJunctions));
+    for (uint i = 0u; i < junction_count; ++i) {
+        if (path.junctions[i].is_hard == 0u) {
+            return false;
+        }
+    }
+    return true;
+}
+
+static inline void adadot_substrate_derive_sr25519_keypair(thread sr25519_keypair out_keypair,
+                                                           const thread uchar seed32[32],
+                                                           const device SubstratePathDevice& path) {
+    thread sr25519_keypair current = { 0 };
+    sr25519_keypair_from_seed(current, seed32);
+    const uint junction_count = min(path.junction_count, uint(kSubstrateMaxJunctions));
+    for (uint i = 0u; i < junction_count; ++i) {
+        thread sr25519_keypair next = { 0 };
+        thread sr25519_chain_code chain_code;
+        for (uint j = 0u; j < 32u; ++j) {
+            chain_code[j] = path.junctions[i].chain_code[j];
+        }
+        if (path.junctions[i].is_hard != 0u) {
+            sr25519_derive_keypair_hard(next, current, chain_code);
+        } else {
+            sr25519_derive_keypair_soft(next, current, chain_code);
+        }
+        adadot_copy_thread_bytes(current, next, 96u);
+    }
+    adadot_copy_thread_bytes(out_keypair, current, 96u);
+}
+
+static inline void adadot_substrate_derive_sr25519_keypair_from_root(thread sr25519_keypair out_keypair,
+                                                                     const thread uchar root_keypair[96],
+                                                                     const device SubstratePathDevice& path) {
+    thread sr25519_keypair current = { 0 };
+    adadot_copy_thread_bytes(current, root_keypair, 96u);
+    const uint junction_count = min(path.junction_count, uint(kSubstrateMaxJunctions));
+    for (uint i = 0u; i < junction_count; ++i) {
+        thread sr25519_keypair next = { 0 };
+        thread sr25519_chain_code chain_code;
+        for (uint j = 0u; j < 32u; ++j) {
+            chain_code[j] = path.junctions[i].chain_code[j];
+        }
+        if (path.junctions[i].is_hard != 0u) {
+            sr25519_derive_keypair_hard(next, current, chain_code);
+        } else {
+            sr25519_derive_keypair_soft(next, current, chain_code);
+        }
+        adadot_copy_thread_bytes(current, next, 96u);
+    }
+    adadot_copy_thread_bytes(out_keypair, current, 96u);
+}
+
+static inline bool adadot_substrate_derive_ed25519_seed(thread uchar out_seed32[32],
+                                                        const thread uchar seed32[32],
+                                                        const device SubstratePathDevice& path) {
+    thread uchar current[32] = { 0 };
+    adadot_copy_thread_bytes(current, seed32, 32u);
+    const uint junction_count = min(path.junction_count, uint(kSubstrateMaxJunctions));
+    for (uint i = 0u; i < junction_count; ++i) {
+        if (path.junctions[i].is_hard == 0u) {
+            return false;
+        }
+        thread uchar next[32] = { 0 };
+        thread uchar hdkd[76] = { 0 };
+        hdkd[0] = 11u << 2u;
+        const uchar label[11] = { 'E','d','2','5','5','1','9','H','D','K','D' };
+        for (uint j = 0u; j < 11u; ++j) {
+            hdkd[1u + j] = label[j];
+        }
+        adadot_copy_thread_bytes(hdkd + 12, current, 32u);
+        for (uint j = 0u; j < 32u; ++j) {
+            hdkd[44u + j] = path.junctions[i].chain_code[j];
+        }
+        Blake2b_256(hdkd, sizeof(hdkd), next);
+        adadot_copy_thread_bytes(current, next, 32u);
+    }
+    adadot_copy_thread_bytes(out_seed32, current, 32u);
+    return true;
+}
+
+static inline void adadot_emit_dot_ed25519_public(device bool* isResult,
+                                                  device bool* buffResult,
+                                                  const thread char* toHash,
+                                                  ulong len,
+                                                  const thread uchar* priv,
+                                                  const thread uchar* pub,
+                                                  uint c_path,
+                                                  long current_round,
+                                                  ushort starter_pass,
+                                                  const device char* passStart,
+                                                  uint passSize,
+                                                  ulong buff_index,
+                                                  bool store_seed,
+                                                  ulong seed_value,
+                                                  uint iter_value,
+                                                  bool store_iter,
+                                                  device RuntimeConfig& config,
+                                                  device XorFilterState& filters,
+                                                  device FilterStorageState& storage,
+                                                  const device uchar* bloom_storage,
+                                                  const device uchar* xor_storage,
+                                                  const device uchar* xor_un_storage,
+                                                  const device uchar* xor_uc_storage,
+                                                  const device uchar* xor_hc_storage,
+                                                  FoundBuffers found) {
+    if (!dot_type_enabled(config, 0x30u)) {
+        return;
+    }
+    if (adadot_check_hash_words(config, filters, storage, bloom_storage, xor_storage,
+                                xor_un_storage, xor_uc_storage, xor_hc_storage, pub)) {
+        adadot_store_result(isResult, buffResult, toHash, len, priv, nullptr, pub, 32u,
+                            0x30u, c_path, c_path, current_round, starter_pass, passStart,
+                            passSize, buff_index, store_seed, seed_value, iter_value,
+                            store_iter, config, found);
+    }
+}
+
+static inline void adadot_emit_dot_ed25519_seed(device bool* isResult,
+                                                device bool* buffResult,
+                                                const thread char* toHash,
+                                                ulong len,
+                                                const thread uchar* seed32,
+                                                uint c_path,
+                                                long current_round,
+                                                ushort starter_pass,
+                                                const device char* passStart,
+                                                uint passSize,
+                                                ulong buff_index,
+                                                bool store_seed,
+                                                ulong seed_value,
+                                                uint iter_value,
+                                                bool store_iter,
+                                                device RuntimeConfig& config,
+                                                device XorFilterState& filters,
+                                                device FilterStorageState& storage,
+                                                const device uchar* bloom_storage,
+                                                const device uchar* xor_storage,
+                                                const device uchar* xor_un_storage,
+                                                const device uchar* xor_uc_storage,
+                                                const device uchar* xor_hc_storage,
+                                                FoundBuffers found) {
+    if (!dot_type_enabled(config, 0x30u)) {
+        return;
+    }
+    thread uchar pub[32] = { 0 };
+    ed25519_publickey(seed32, pub);
+    adadot_emit_dot_ed25519_public(isResult, buffResult, toHash, len, seed32, pub, c_path,
+                                   current_round, starter_pass, passStart, passSize,
+                                   buff_index, store_seed, seed_value, iter_value, store_iter,
+                                   config, filters, storage, bloom_storage, xor_storage,
+                                   xor_un_storage, xor_uc_storage, xor_hc_storage, found);
+}
+
+static inline void adadot_emit_dot_sr25519_seed(device bool* isResult,
+                                                device bool* buffResult,
+                                                const thread char* toHash,
+                                                ulong len,
+                                                const thread uchar* seed32,
+                                                uint c_path,
+                                                long current_round,
+                                                ushort starter_pass,
+                                                const device char* passStart,
+                                                uint passSize,
+                                                ulong buff_index,
+                                                bool store_seed,
+                                                ulong seed_value,
+                                                uint iter_value,
+                                                bool store_iter,
+                                                device RuntimeConfig& config,
+                                                device XorFilterState& filters,
+                                                device FilterStorageState& storage,
+                                                const device uchar* bloom_storage,
+                                                const device uchar* xor_storage,
+                                                const device uchar* xor_un_storage,
+                                                const device uchar* xor_uc_storage,
+                                                const device uchar* xor_hc_storage,
+                                                FoundBuffers found) {
+    if (!dot_type_enabled(config, 0x31u)) {
+        return;
+    }
+    thread uchar pub[32] = { 0 };
+    sr25519_public_from_seed(pub, seed32);
+    if (adadot_check_hash_words(config, filters, storage, bloom_storage, xor_storage,
+                                xor_un_storage, xor_uc_storage, xor_hc_storage, pub)) {
+        adadot_store_result(isResult, buffResult, toHash, len, seed32, nullptr, pub, 32u,
+                            0x31u, c_path, c_path, current_round, starter_pass, passStart,
+                            passSize, buff_index, store_seed, seed_value, iter_value,
+                            store_iter, config, found);
+    }
+}
+
+static inline void adadot_emit_dot_substrate_from_seed(device bool* isResult,
+                                                       device bool* buffResult,
+                                                       const thread char* toHash,
+                                                       ulong len,
+                                                       const thread uchar* seed32,
+                                                       long current_round,
+                                                       ushort starter_pass,
+                                                       const device char* passStart,
+                                                       uint passSize,
+                                                       ulong buff_index,
+                                                       bool store_seed,
+                                                       ulong seed_value,
+                                                       uint iter_value,
+                                                       bool store_iter,
+                                                       device RuntimeConfig& config,
+                                                       const device SubstratePathDevice* substrate_paths,
+                                                       device XorFilterState& filters,
+                                                       device FilterStorageState& storage,
+                                                       const device uchar* bloom_storage,
+                                                       const device uchar* xor_storage,
+                                                       const device uchar* xor_un_storage,
+                                                       const device uchar* xor_uc_storage,
+                                                       const device uchar* xor_hc_storage,
+                                                       FoundBuffers found,
+                                                       uint path_count_override = 0xffffffffu) {
+    if (substrate_paths == nullptr) {
+        return;
+    }
+    const uint requested_path_count = path_count_override == 0xffffffffu
+        ? config.substratePathCount
+        : path_count_override;
+    const uint path_count = min(requested_path_count, uint(kSubstrateMaxPaths));
+    const bool dot_ed_enabled = dot_type_enabled(config, 0x30u);
+    const bool dot_sr_enabled = dot_type_enabled(config, 0x31u);
+    thread sr25519_keypair sr_root_keypair = { 0 };
+    if (dot_sr_enabled) {
+        sr25519_keypair_from_seed(sr_root_keypair, seed32);
+    }
+    for (uint sp = 0u; sp < path_count; ++sp) {
+        const device SubstratePathDevice& path = substrate_paths[sp];
+        if (dot_ed_enabled && adadot_substrate_ed25519_path_supported(path)) {
+            thread uchar ed_path_seed[32] = { 0 };
+            if (adadot_substrate_derive_ed25519_seed(ed_path_seed, seed32, path)) {
+                adadot_emit_dot_ed25519_seed(isResult, buffResult, toHash, len, ed_path_seed,
+                                             path.save_index, current_round, starter_pass,
+                                             passStart, passSize, buff_index, store_seed,
+                                             seed_value, iter_value, store_iter, config,
+                                             filters, storage, bloom_storage, xor_storage,
+                                             xor_un_storage, xor_uc_storage, xor_hc_storage, found);
+            }
+        }
+        if (dot_sr_enabled) {
+            thread sr25519_keypair path_keypair = { 0 };
+            adadot_substrate_derive_sr25519_keypair_from_root(path_keypair, sr_root_keypair, path);
+            thread uchar substrate_public[32] = { 0 };
+            adadot_copy_thread_bytes(substrate_public, path_keypair + 64, 32u);
+            if (adadot_check_hash_words(config, filters, storage, bloom_storage, xor_storage,
+                                        xor_un_storage, xor_uc_storage, xor_hc_storage,
+                                        substrate_public)) {
+                adadot_store_result(isResult, buffResult, toHash, len, seed32, nullptr,
+                                    substrate_public, 32u, 0x31u, path.save_index,
+                                    path.save_index, current_round, starter_pass, passStart,
+                                    passSize, buff_index, store_seed, seed_value, iter_value,
+                                    store_iter, config, found);
+            }
+        }
+    }
+}
+
+static inline void adadot_ada_seed_pubkey_hash(const thread uchar* priv,
+                                               thread uchar pub[32],
+                                               thread uchar pk_hash[28],
+                                               device RuntimeConfig& config) {
+    if (adadot_ed_scalar_mode(config)) {
+        uchar scalar[32];
+        adadot_copy_thread_bytes(scalar, priv, 32u);
+        if (adadot_ed_little_endian_mode(config)) {
+            for (uint left = 0u, right = 31u; left < right; ++left, --right) {
+                const uchar value = scalar[left];
+                scalar[left] = scalar[right];
+                scalar[right] = value;
+            }
+        }
+        cardano_ed25519_publickey_from_scalar(scalar, pub);
+    } else if (adadot_ed_hash_mode(config)) {
+        ed25519_publickey_scalar_hash(priv, pub);
+    } else {
+        ed25519_publickey(priv, pub);
+    }
+    Blake2b_224(pub, 32u, pk_hash);
+}
+
+static inline void adadot_ada_plain_seed_pubkey_hash(const thread uchar* priv, thread uchar pub[32], thread uchar pk_hash[28]) {
+    ed25519_publickey(priv, pub);
+    Blake2b_224(pub, 32u, pk_hash);
+}
+
+static inline void adadot_ada_scalar_pubkey_hash(const thread uchar* priv, thread uchar pub[32], thread uchar pk_hash[28]) {
+    cardano_ed25519_publickey_from_scalar(priv, pub);
+    Blake2b_224(pub, 32u, pk_hash);
+}
+
+static inline size_t adadot_cardano_byron_ledger_msg(uint i, thread uchar* out) {
+    const uchar prefix[16] = { 'R','o','o','t',' ','S','e','e','d',' ','C','h','a','i','n',' ' };
+    for (uint j = 0u; j < 16u; ++j) {
+        out[j] = prefix[j];
+    }
+    size_t len = 16u;
+    thread uchar tmp[10];
+    size_t n = 0u;
+    do {
+        tmp[n++] = uchar('0' + (i % 10u));
+        i /= 10u;
+    } while (i != 0u);
+    for (size_t j = 0u; j < n; ++j) {
+        out[len + j] = tmp[n - 1u - j];
+    }
+    return len + n;
+}
+
+static inline void adadot_cardano_byron_ledger_master_from_seed32(const thread uchar seed32[32],
+                                                                  thread uchar scalar32[32]) {
+    for (uint i = 1u; i < 64u; ++i) {
+        thread uchar msg[32] = { 0 };
+        thread uchar h[64] = { 0 };
+        thread uchar prv64[64] = { 0 };
+        const size_t msg_len = adadot_cardano_byron_ledger_msg(i, msg);
+        HMAC_SHA512(seed32, 32ul, msg, ulong(msg_len), h);
+        SHA512(h, 32u, prv64);
+        prv64[0] &= 0xf8u;
+        prv64[31] &= 0x7fu;
+        prv64[31] |= 0x40u;
+        if ((prv64[31] & 0x20u) == 0u) {
+            adadot_copy_thread_bytes(scalar32, prv64, 32u);
+            return;
+        }
+    }
+    for (uint i = 0u; i < 32u; ++i) {
+        scalar32[i] = 0u;
+    }
+}
+
+static inline void adadot_ada_direct_private_pubkey_hash(const thread uchar* priv,
+                                                         thread uchar pub[32],
+                                                         thread uchar pk_hash[28],
+                                                         bool invert_scalar_for_ada,
+                                                         device RuntimeConfig& config) {
+    if (!invert_scalar_for_ada) {
+        adadot_ada_seed_pubkey_hash(priv, pub, pk_hash, config);
+        return;
+    }
+    if (adadot_ed_scalar_mode(config)) {
+        adadot_ada_plain_seed_pubkey_hash(priv, pub, pk_hash);
+        return;
+    }
+    if (adadot_ed_hash_mode(config)) {
+        adadot_ada_seed_pubkey_hash(priv, pub, pk_hash, config);
+        return;
+    }
+    adadot_ada_scalar_pubkey_hash(priv, pub, pk_hash);
+}
+
+static inline void adadot_make_ada_base_raw(const thread uchar pk_pay[28],
+                                            const thread uchar pk_stake[28],
+                                            thread uchar shelley_base[57]) {
+    shelley_base[0] = 0x01u;
+    adadot_copy_thread_bytes(shelley_base + 1, pk_pay, 28u);
+    adadot_copy_thread_bytes(shelley_base + 29, pk_stake, 28u);
+}
+
+static inline void adadot_emit_ada_base_pair_from_hashes(device bool* isResult,
+                                                         device bool* buffResult,
+                                                         const thread char* toHash,
+                                                         ulong len,
+                                                         const thread uchar* payment_key,
+                                                         const thread uchar* stake_key,
+                                                         const thread uchar pk_pay[28],
+                                                         const thread uchar pk_stake[28],
+                                                         uint payment_path,
+                                                         uint stake_path,
+                                                         long current_round,
+                                                         ushort starter_pass,
+                                                         const device char* passStart,
+                                                         uint passSize,
+                                                         ulong buff_index,
+                                                         bool store_seed,
+                                                         ulong seed_value,
+                                                         uint iter_value,
+                                                         bool store_iter,
+                                                         uchar type,
+                                                         device RuntimeConfig& config,
+                                                         device XorFilterState& filters,
+                                                         device FilterStorageState& storage,
+                                                         const device uchar* bloom_storage,
+                                                         const device uchar* xor_storage,
+                                                         const device uchar* xor_un_storage,
+                                                         const device uchar* xor_uc_storage,
+                                                         const device uchar* xor_hc_storage,
+                                                         FoundBuffers found) {
+    if (!adadot_ada_type_enabled(config, type)) {
+        return;
+    }
+    thread uchar shelley_base[57] = { 0x01u };
+    adadot_make_ada_base_raw(pk_pay, pk_stake, shelley_base);
+    adadot_check_ada_raw(isResult, buffResult, toHash, len, payment_key, stake_key,
+                         shelley_base, 57u, type, payment_path, stake_path, current_round,
+                         starter_pass, passStart, passSize, buff_index, store_seed,
+                         seed_value, iter_value, store_iter, config, filters, storage,
+                         bloom_storage, xor_storage, xor_un_storage, xor_uc_storage,
+                         xor_hc_storage, found);
+}
+
+static inline void adadot_emit_ada_single_key_addresses_from_hash(device bool* isResult,
+                                                                  device bool* buffResult,
+                                                                  const thread char* toHash,
+                                                                  ulong len,
+                                                                  const thread uchar* payment_key,
+                                                                  const thread uchar pk_pay[28],
+                                                                  bool include_base_self,
+                                                                  uint c_path,
+                                                                  long current_round,
+                                                                  ushort starter_pass,
+                                                                  const device char* passStart,
+                                                                  uint passSize,
+                                                                  ulong buff_index,
+                                                                  bool store_seed,
+                                                                  ulong seed_value,
+                                                                  uint iter_value,
+                                                                  bool store_iter,
+                                                                  device RuntimeConfig& config,
+                                                                  device XorFilterState& filters,
+                                                                  device FilterStorageState& storage,
+                                                                  const device uchar* bloom_storage,
+                                                                  const device uchar* xor_storage,
+                                                                  const device uchar* xor_un_storage,
+                                                                  const device uchar* xor_uc_storage,
+                                                                  const device uchar* xor_hc_storage,
+                                                                  FoundBuffers found) {
+    if (adadot_ada_type_enabled(config, 0x12u)) {
+        thread uchar shelley_enterprise_bytes[29] = { 0x61u };
+        adadot_copy_thread_bytes(shelley_enterprise_bytes + 1, pk_pay, 28u);
+        adadot_check_ada_raw(isResult, buffResult, toHash, len, payment_key, nullptr,
+                             shelley_enterprise_bytes, 29u, 0x12u, c_path, c_path,
+                             current_round, starter_pass, passStart, passSize, buff_index,
+                             store_seed, seed_value, iter_value, store_iter, config,
+                             filters, storage, bloom_storage, xor_storage, xor_un_storage,
+                             xor_uc_storage, xor_hc_storage, found);
+    }
+
+    if (adadot_ada_type_enabled(config, 0x14u)) {
+        thread uchar shelley_reward_bytes[29] = { 0xe1u };
+        adadot_copy_thread_bytes(shelley_reward_bytes + 1, pk_pay, 28u);
+        adadot_check_ada_raw(isResult, buffResult, toHash, len, payment_key, nullptr,
+                             shelley_reward_bytes, 29u, 0x14u, c_path, c_path,
+                             current_round, starter_pass, passStart, passSize, buff_index,
+                             store_seed, seed_value, iter_value, store_iter, config,
+                             filters, storage, bloom_storage, xor_storage, xor_un_storage,
+                             xor_uc_storage, xor_hc_storage, found);
+    }
+
+    if (adadot_ada_type_enabled(config, 0x15u) && config.adaPointerEnabled != 0u) {
+        thread uchar pointer_bytes[64] = { 0x41u };
+        adadot_copy_thread_bytes(pointer_bytes + 1, pk_pay, 28u);
+        uint out_len = 29u;
+        out_len += adadot_ada_encode_pointer_uint(config.adaPointerSlot, pointer_bytes + out_len);
+        out_len += adadot_ada_encode_pointer_uint(config.adaPointerTx, pointer_bytes + out_len);
+        out_len += adadot_ada_encode_pointer_uint(config.adaPointerCert, pointer_bytes + out_len);
+        adadot_check_ada_raw(isResult, buffResult, toHash, len, payment_key, nullptr,
+                             pointer_bytes, out_len, 0x15u, c_path, c_path, current_round,
+                             starter_pass, passStart, passSize, buff_index, store_seed,
+                             seed_value, iter_value, store_iter, config, filters, storage,
+                             bloom_storage, xor_storage, xor_un_storage, xor_uc_storage,
+                             xor_hc_storage, found);
+    }
+
+    if (include_base_self && adadot_ada_type_enabled(config, 0x11u)) {
+        adadot_emit_ada_base_pair_from_hashes(isResult, buffResult, toHash, len, payment_key,
+                                              payment_key, pk_pay, pk_pay, c_path, c_path,
+                                              current_round, starter_pass, passStart, passSize,
+                                              buff_index, store_seed, seed_value, iter_value,
+                                              store_iter, 0x11u, config, filters, storage,
+                                              bloom_storage, xor_storage, xor_un_storage,
+                                              xor_uc_storage, xor_hc_storage, found);
+    }
+}
+
+static inline void adadot_emit_ada_byron_ledger_from_bip32_key(device bool* isResult,
+                                                               device bool* buffResult,
+                                                               const thread char* toHash,
+                                                               ulong len,
+                                                               const thread uchar* bip32_key,
+                                                               uint c_path,
+                                                               long current_round,
+                                                               ushort starter_pass,
+                                                               const device char* passStart,
+                                                               uint passSize,
+                                                               ulong buff_index,
+                                                               bool store_seed,
+                                                               ulong seed_value,
+                                                               uint iter_value,
+                                                               bool store_iter,
+                                                               device RuntimeConfig& config,
+                                                               device XorFilterState& filters,
+                                                               device FilterStorageState& storage,
+                                                               const device uchar* bloom_storage,
+                                                               const device uchar* xor_storage,
+                                                               const device uchar* xor_un_storage,
+                                                               const device uchar* xor_uc_storage,
+                                                               const device uchar* xor_hc_storage,
+                                                               FoundBuffers found) {
+    if (!adadot_ada_type_enabled(config, 0x16u)) {
+        return;
+    }
+    thread uchar ledger_key[32] = { 0 };
+    adadot_cardano_byron_ledger_master_from_seed32(bip32_key, ledger_key);
+    thread uchar ledger_pub[32] = { 0 };
+    thread uchar pk_hash[28] = { 0 };
+    adadot_ada_scalar_pubkey_hash(ledger_key, ledger_pub, pk_hash);
+    thread uchar shelley_base[57] = { 0x01u };
+    adadot_make_ada_base_raw(pk_hash, pk_hash, shelley_base);
+    adadot_check_ada_raw(isResult, buffResult, toHash, len, ledger_key, nullptr,
+                         shelley_base, 57u, 0x16u, c_path, c_path, current_round,
+                         starter_pass, passStart, passSize, buff_index, store_seed,
+                         seed_value, iter_value, store_iter, config, filters, storage,
+                         bloom_storage, xor_storage, xor_un_storage, xor_uc_storage,
+                         xor_hc_storage, found);
+}
+
+static inline void adadot_emit_ada_direct_keyset(device bool* isResult,
+                                                 device bool* buffResult,
+                                                 const thread char* toHash,
+                                                 ulong len,
+                                                 const thread uchar* payment_key,
+                                                 const thread uchar* next_key,
+                                                 uint c_path,
+                                                 long current_round,
+                                                 ushort starter_pass,
+                                                 const device char* passStart,
+                                                 uint passSize,
+                                                 ulong buff_index,
+                                                 bool store_seed,
+                                                 ulong seed_value,
+                                                 uint iter_value,
+                                                 bool store_iter,
+                                                 bool invert_scalar_for_ada,
+                                                 device RuntimeConfig& config,
+                                                 device XorFilterState& filters,
+                                                 device FilterStorageState& storage,
+                                                 const device uchar* bloom_storage,
+                                                 const device uchar* xor_storage,
+                                                 const device uchar* xor_un_storage,
+                                                 const device uchar* xor_uc_storage,
+                                                 const device uchar* xor_hc_storage,
+                                                 FoundBuffers found) {
+    if (!adadot_has_any_target(config)) {
+        return;
+    }
+    const bool direct_shelley = adadot_ada_type_enabled(config, 0x11u) ||
+                                adadot_ada_type_enabled(config, 0x12u) ||
+                                adadot_ada_type_enabled(config, 0x14u) ||
+                                adadot_ada_type_enabled(config, 0x15u);
+    thread uchar payment_pub[32] = { 0 };
+    thread uchar pk_pay[28] = { 0 };
+    if (direct_shelley) {
+        adadot_ada_direct_private_pubkey_hash(payment_key, payment_pub, pk_pay,
+                                              invert_scalar_for_ada, config);
+        adadot_emit_ada_single_key_addresses_from_hash(isResult, buffResult, toHash, len,
+                                                       payment_key, pk_pay, true, c_path,
+                                                       current_round, starter_pass, passStart,
+                                                       passSize, buff_index, store_seed,
+                                                       seed_value, iter_value, store_iter,
+                                                       config, filters, storage, bloom_storage,
+                                                       xor_storage, xor_un_storage, xor_uc_storage,
+                                                       xor_hc_storage, found);
+    }
+    if (direct_shelley && adadot_ada_type_enabled(config, 0x11u) && next_key != nullptr &&
+        !adadot_key32_equal(payment_key, next_key)) {
+        thread uchar next_pub[32] = { 0 };
+        thread uchar pk_next[28] = { 0 };
+        adadot_ada_direct_private_pubkey_hash(next_key, next_pub, pk_next,
+                                              invert_scalar_for_ada, config);
+        adadot_emit_ada_base_pair_from_hashes(isResult, buffResult, toHash, len,
+                                              payment_key, next_key, pk_pay, pk_next,
+                                              c_path, c_path, current_round, starter_pass,
+                                              passStart, passSize, buff_index, store_seed,
+                                              seed_value, iter_value, store_iter, 0x11u,
+                                              config, filters, storage, bloom_storage,
+                                              xor_storage, xor_un_storage, xor_uc_storage,
+                                              xor_hc_storage, found);
+        adadot_emit_ada_base_pair_from_hashes(isResult, buffResult, toHash, len,
+                                              next_key, payment_key, pk_next, pk_pay,
+                                              c_path, c_path, current_round, starter_pass,
+                                              passStart, passSize, buff_index, store_seed,
+                                              seed_value, iter_value, store_iter, 0x11u,
+                                              config, filters, storage, bloom_storage,
+                                              xor_storage, xor_un_storage, xor_uc_storage,
+                                              xor_hc_storage, found);
+    }
+    adadot_emit_ada_byron_ledger_from_bip32_key(isResult, buffResult, toHash, len,
+                                                payment_key, c_path, current_round,
+                                                starter_pass, passStart, passSize, buff_index,
+                                                store_seed, seed_value, iter_value, store_iter,
+                                                config, filters, storage, bloom_storage,
+                                                xor_storage, xor_un_storage, xor_uc_storage,
+                                                xor_hc_storage, found);
+}
+
+#endif

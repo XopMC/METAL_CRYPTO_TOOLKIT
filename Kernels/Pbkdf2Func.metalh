@@ -1,0 +1,738 @@
+#ifndef METAL_CRYPTO_PBKDF2_FUNC_METALH
+#define METAL_CRYPTO_PBKDF2_FUNC_METALH
+
+#include "HashFunc.metalh"
+
+#define PBKDF2_SHA512_BLOCKSZ 128ul
+#define PBKDF2_SHA512_HASHSZ 64ul
+
+static inline ulong pbkdf2_min_ulong(const ulong a, const ulong b) {
+    return a < b ? a : b;
+}
+
+static inline void pbkdf2_zero(thread uchar* dst, const ulong len) {
+    for (ulong i = 0; i < len; ++i) {
+        dst[i] = 0;
+    }
+}
+
+static inline void pbkdf2_set(thread uchar* dst, const uchar value, const ulong len) {
+    for (ulong i = 0; i < len; ++i) {
+        dst[i] = value;
+    }
+}
+
+static inline void pbkdf2_copy(thread uchar* dst, const thread uchar* src, const ulong len) {
+    for (ulong i = 0; i < len; ++i) {
+        dst[i] = src[i];
+    }
+}
+
+static inline void pbkdf2_copy(thread uchar* dst, const constant uchar* src, const ulong len) {
+    for (ulong i = 0; i < len; ++i) {
+        dst[i] = src[i];
+    }
+}
+
+static inline void pbkdf2_copy(thread uchar* dst, const device uchar* src, const ulong len) {
+    for (ulong i = 0; i < len; ++i) {
+        dst[i] = src[i];
+    }
+}
+
+static inline uint pbkdf2_read32_be(const thread uchar x[4]) {
+    return (uint(x[0]) << 24u) |
+           (uint(x[1]) << 16u) |
+           (uint(x[2]) << 8u) |
+            uint(x[3]);
+}
+
+static inline void pbkdf2_write32_be(const uint n, thread uchar out[4]) {
+    out[0] = uchar((n >> 24u) & 0xffu);
+    out[1] = uchar((n >> 16u) & 0xffu);
+    out[2] = uchar((n >> 8u) & 0xffu);
+    out[3] = uchar(n & 0xffu);
+}
+
+static inline ulong pbkdf2_read64_be(const thread uchar x[8]) {
+    return (ulong(x[0]) << 56u) |
+           (ulong(x[1]) << 48u) |
+           (ulong(x[2]) << 40u) |
+           (ulong(x[3]) << 32u) |
+           (ulong(x[4]) << 24u) |
+           (ulong(x[5]) << 16u) |
+           (ulong(x[6]) << 8u) |
+            ulong(x[7]);
+}
+
+static inline void pbkdf2_write64_be(const ulong n, thread uchar out[8]) {
+    pbkdf2_write32_be(uint((n >> 32u) & 0xfffffffful), out);
+    pbkdf2_write32_be(uint(n & 0xfffffffful), out + 4);
+}
+
+struct Pbkdf2Sha512Context {
+    ulong H[8];
+    uchar partial[PBKDF2_SHA512_BLOCKSZ];
+    uint blocks;
+    ulong npartial;
+};
+
+typedef ulong Pbkdf2Sha512Block[16];
+
+static inline void pbkdf2_sha512_init(thread Pbkdf2Sha512Context* ctx) {
+    pbkdf2_zero(reinterpret_cast<thread uchar*>(ctx), sizeof(Pbkdf2Sha512Context));
+    ctx->H[0] = 0x6a09e667f3bcc908ul;
+    ctx->H[1] = 0xbb67ae8584caa73bul;
+    ctx->H[2] = 0x3c6ef372fe94f82bul;
+    ctx->H[3] = 0xa54ff53a5f1d36f1ul;
+    ctx->H[4] = 0x510e527fade682d1ul;
+    ctx->H[5] = 0x9b05688c2b3e6c1ful;
+    ctx->H[6] = 0x1f83d9abfb41bd6bul;
+    ctx->H[7] = 0x5be0cd19137e2179ul;
+}
+
+static inline void pbkdf2_sha512_raw_transform(const thread ulong state_in[8],
+                                               thread ulong state_out[8],
+                                               const thread Pbkdf2Sha512Block inp) {
+    sha512_compress_words(state_in, inp, state_out);
+}
+
+static inline void pbkdf2_sha512_raw_transform_digest64(const thread ulong state_in[8],
+                                                        thread ulong state_out[8],
+                                                        const thread ulong digest_words[8]) {
+    sha512_compress_digest64_words(state_in, digest_words, state_out);
+}
+
+static inline void pbkdf2_sha512_convert_input(thread Pbkdf2Sha512Block inp64,
+                                               const thread uchar inp[PBKDF2_SHA512_BLOCKSZ]) {
+    for (uint i = 0u; i < PBKDF2_SHA512_BLOCKSZ; i += 8u) {
+        inp64[i >> 3u] = pbkdf2_read64_be(inp + i);
+    }
+}
+
+static inline void pbkdf2_sha512_update_block(thread Pbkdf2Sha512Context* ctx,
+                                              const thread uchar inp[PBKDF2_SHA512_BLOCKSZ]) {
+    Pbkdf2Sha512Block inp64;
+    pbkdf2_sha512_convert_input(inp64, inp);
+    pbkdf2_sha512_raw_transform(ctx->H, ctx->H, inp64);
+    ctx->blocks += 1u;
+}
+
+#define PBKDF2_DEFINE_SHA512_UPDATE(SPACE)                                                            \
+static inline void pbkdf2_sha512_update(thread Pbkdf2Sha512Context* ctx,                              \
+                                        const SPACE uchar* data,                                      \
+                                        ulong nbytes) {                                               \
+    const SPACE uchar* bufin = data;                                                                  \
+    if (ctx->npartial != 0ul && nbytes != 0ul) {                                                       \
+        const ulong space = PBKDF2_SHA512_BLOCKSZ - ctx->npartial;                                    \
+        const ulong taken = pbkdf2_min_ulong(space, nbytes);                                          \
+        pbkdf2_copy(ctx->partial + ctx->npartial, bufin, taken);                                      \
+        bufin += taken;                                                                               \
+        nbytes -= taken;                                                                              \
+        ctx->npartial += taken;                                                                       \
+        if (ctx->npartial == PBKDF2_SHA512_BLOCKSZ) {                                                 \
+            pbkdf2_sha512_update_block(ctx, ctx->partial);                                            \
+            ctx->npartial = 0ul;                                                                      \
+        }                                                                                             \
+    }                                                                                                 \
+    while (nbytes >= PBKDF2_SHA512_BLOCKSZ) {                                                         \
+        uchar block[PBKDF2_SHA512_BLOCKSZ];                                                           \
+        pbkdf2_copy(block, bufin, PBKDF2_SHA512_BLOCKSZ);                                             \
+        pbkdf2_sha512_update_block(ctx, block);                                                       \
+        bufin += PBKDF2_SHA512_BLOCKSZ;                                                              \
+        nbytes -= PBKDF2_SHA512_BLOCKSZ;                                                             \
+    }                                                                                                 \
+    while (nbytes != 0ul) {                                                                           \
+        const ulong space = PBKDF2_SHA512_BLOCKSZ - ctx->npartial;                                    \
+        const ulong taken = pbkdf2_min_ulong(space, nbytes);                                          \
+        pbkdf2_copy(ctx->partial + ctx->npartial, bufin, taken);                                      \
+        bufin += taken;                                                                               \
+        nbytes -= taken;                                                                              \
+        ctx->npartial += taken;                                                                       \
+    }                                                                                                 \
+}
+
+PBKDF2_DEFINE_SHA512_UPDATE(thread)
+PBKDF2_DEFINE_SHA512_UPDATE(constant)
+PBKDF2_DEFINE_SHA512_UPDATE(device)
+
+#undef PBKDF2_DEFINE_SHA512_UPDATE
+
+static inline void pbkdf2_sha512_acc_byte(thread Pbkdf2Sha512Context* ctx,
+                                          const uchar byte,
+                                          ulong nbytes) {
+    int filled = 0;
+    while (nbytes != 0ul) {
+        const ulong start = ctx->npartial;
+        const ulong count = pbkdf2_min_ulong(nbytes, PBKDF2_SHA512_BLOCKSZ - start);
+
+        if (filled == 0) {
+            pbkdf2_set(ctx->partial + start, byte, count);
+        }
+        if (start == 0ul && count == PBKDF2_SHA512_BLOCKSZ) {
+            filled = 1;
+        }
+        if (start + count == PBKDF2_SHA512_BLOCKSZ) {
+            pbkdf2_sha512_update_block(ctx, ctx->partial);
+            ctx->npartial = 0ul;
+        } else {
+            ctx->npartial += count;
+        }
+        nbytes -= count;
+    }
+}
+
+static inline void pbkdf2_sha512_acc_pad(thread Pbkdf2Sha512Context* ctx,
+                                         uchar fbyte,
+                                         const uchar mbyte,
+                                         const uchar lbyte,
+                                         const ulong nbytes) {
+    switch (nbytes) {
+    case 0ul:
+        break;
+    case 1ul:
+        fbyte ^= lbyte;
+        pbkdf2_sha512_update(ctx, &fbyte, 1ul);
+        break;
+    case 2ul:
+        pbkdf2_sha512_update(ctx, &fbyte, 1ul);
+        pbkdf2_sha512_update(ctx, &lbyte, 1ul);
+        break;
+    default:
+        pbkdf2_sha512_update(ctx, &fbyte, 1ul);
+        if (lbyte != mbyte) {
+            pbkdf2_sha512_acc_byte(ctx, mbyte, nbytes - 2ul);
+            pbkdf2_sha512_update(ctx, &lbyte, 1ul);
+        } else {
+            pbkdf2_sha512_acc_byte(ctx, mbyte, nbytes - 1ul);
+        }
+        break;
+    }
+}
+
+static inline void pbkdf2_sha512_convert_output(const thread ulong H[8],
+                                                thread uchar hash[PBKDF2_SHA512_HASHSZ]) {
+    pbkdf2_write64_be(H[0], hash + 0);
+    pbkdf2_write64_be(H[1], hash + 8);
+    pbkdf2_write64_be(H[2], hash + 16);
+    pbkdf2_write64_be(H[3], hash + 24);
+    pbkdf2_write64_be(H[4], hash + 32);
+    pbkdf2_write64_be(H[5], hash + 40);
+    pbkdf2_write64_be(H[6], hash + 48);
+    pbkdf2_write64_be(H[7], hash + 56);
+}
+
+static inline void pbkdf2_sha512_xor(thread ulong out[8], const thread ulong in[8]) {
+    for (uint i = 0u; i < 8u; ++i) {
+        out[i] ^= in[i];
+    }
+}
+
+static inline void pbkdf2_sha512_final(thread Pbkdf2Sha512Context* ctx,
+                                       thread uchar hash[PBKDF2_SHA512_HASHSZ]) {
+    uint digested_bytes = ctx->blocks;
+    digested_bytes = (digested_bytes * uint(PBKDF2_SHA512_BLOCKSZ)) + uint(ctx->npartial);
+    const uint digested_bits = digested_bytes * 8u;
+
+    const ulong padbytes = PBKDF2_SHA512_BLOCKSZ - (ulong(digested_bytes + 4u) % PBKDF2_SHA512_BLOCKSZ);
+    pbkdf2_sha512_acc_pad(ctx, 0x80u, 0x00u, 0x00u, padbytes);
+
+    uchar buf[4];
+    pbkdf2_write32_be(digested_bits, buf);
+    pbkdf2_sha512_update(ctx, buf, 4ul);
+
+    pbkdf2_sha512_convert_output(ctx->H, hash);
+}
+
+#define PBKDF2_DEFINE_SHA512_DIGEST(SPACE)                                                \
+static inline void SHA512(const SPACE uchar* data, ulong len, thread uchar out[64]) {      \
+    Pbkdf2Sha512Context ctx;                                                               \
+    pbkdf2_sha512_init(&ctx);                                                              \
+    pbkdf2_sha512_update(&ctx, data, len);                                                 \
+    pbkdf2_sha512_final(&ctx, out);                                                        \
+}
+
+PBKDF2_DEFINE_SHA512_DIGEST(thread)
+PBKDF2_DEFINE_SHA512_DIGEST(constant)
+PBKDF2_DEFINE_SHA512_DIGEST(device)
+
+#undef PBKDF2_DEFINE_SHA512_DIGEST
+
+struct Pbkdf2HmacSha512Context {
+    Pbkdf2Sha512Context inner;
+    Pbkdf2Sha512Context outer;
+};
+
+#define PBKDF2_DEFINE_HMAC_INIT(SPACE)                                                     \
+static inline void pbkdf2_hmac_sha512_init(thread Pbkdf2HmacSha512Context* ctx,            \
+                                           const SPACE uchar* key,                         \
+                                           ulong nkey) {                                   \
+    uchar k[PBKDF2_SHA512_BLOCKSZ];                                                        \
+    if (nkey > PBKDF2_SHA512_BLOCKSZ) {                                                    \
+        SHA512(key, nkey, k);                                                              \
+        nkey = PBKDF2_SHA512_HASHSZ;                                                       \
+    } else {                                                                                \
+        pbkdf2_copy(k, key, nkey);                                                         \
+    }                                                                                       \
+    if (PBKDF2_SHA512_BLOCKSZ > nkey) {                                                     \
+        pbkdf2_zero(k + nkey, PBKDF2_SHA512_BLOCKSZ - nkey);                               \
+    }                                                                                       \
+    for (ulong i = 0ul; i < PBKDF2_SHA512_BLOCKSZ; ++i) {                                  \
+        k[i] ^= 0x36u;                                                                      \
+    }                                                                                       \
+    pbkdf2_sha512_init(&ctx->inner);                                                       \
+    pbkdf2_sha512_update(&ctx->inner, k, PBKDF2_SHA512_BLOCKSZ);                            \
+    for (ulong i = 0ul; i < PBKDF2_SHA512_BLOCKSZ; ++i) {                                  \
+        k[i] ^= (0x36u ^ 0x5cu);                                                           \
+    }                                                                                       \
+    pbkdf2_sha512_init(&ctx->outer);                                                       \
+    pbkdf2_sha512_update(&ctx->outer, k, PBKDF2_SHA512_BLOCKSZ);                            \
+}
+
+PBKDF2_DEFINE_HMAC_INIT(thread)
+PBKDF2_DEFINE_HMAC_INIT(constant)
+PBKDF2_DEFINE_HMAC_INIT(device)
+
+#undef PBKDF2_DEFINE_HMAC_INIT
+
+#define PBKDF2_DEFINE_HMAC_UPDATE(SPACE)                                                   \
+static inline void pbkdf2_hmac_sha512_update(thread Pbkdf2HmacSha512Context* ctx,          \
+                                             const SPACE uchar* data,                      \
+                                             ulong ndata) {                                \
+    pbkdf2_sha512_update(&ctx->inner, data, ndata);                                        \
+}
+
+PBKDF2_DEFINE_HMAC_UPDATE(thread)
+PBKDF2_DEFINE_HMAC_UPDATE(constant)
+PBKDF2_DEFINE_HMAC_UPDATE(device)
+
+#undef PBKDF2_DEFINE_HMAC_UPDATE
+
+static inline void pbkdf2_hmac_sha512_final(thread Pbkdf2HmacSha512Context* ctx,
+                                            thread uchar out[64]) {
+    pbkdf2_sha512_final(&ctx->inner, out);
+    pbkdf2_sha512_update(&ctx->outer, out, PBKDF2_SHA512_HASHSZ);
+    pbkdf2_sha512_final(&ctx->outer, out);
+}
+
+#define PBKDF2_DEFINE_HMAC_SHA512(KEYSPACE, DATASPACE)                                     \
+static inline void HMAC_SHA512(const KEYSPACE uchar* key, ulong key_len,                   \
+                               const DATASPACE uchar* data, ulong data_len,                \
+                               thread uchar* out) {                                        \
+    Pbkdf2HmacSha512Context ctx;                                                           \
+    pbkdf2_hmac_sha512_init(&ctx, key, key_len);                                           \
+    pbkdf2_hmac_sha512_update(&ctx, data, data_len);                                       \
+    pbkdf2_hmac_sha512_final(&ctx, out);                                                   \
+}
+
+PBKDF2_DEFINE_HMAC_SHA512(thread, thread)
+PBKDF2_DEFINE_HMAC_SHA512(thread, constant)
+PBKDF2_DEFINE_HMAC_SHA512(thread, device)
+PBKDF2_DEFINE_HMAC_SHA512(constant, thread)
+PBKDF2_DEFINE_HMAC_SHA512(constant, constant)
+PBKDF2_DEFINE_HMAC_SHA512(constant, device)
+PBKDF2_DEFINE_HMAC_SHA512(device, thread)
+PBKDF2_DEFINE_HMAC_SHA512(device, constant)
+PBKDF2_DEFINE_HMAC_SHA512(device, device)
+
+#undef PBKDF2_DEFINE_HMAC_SHA512
+
+typedef hmac_sha512_precomp_t pbkdf2_sha512_precomp_t;
+
+#define PBKDF2_DEFINE_LOAD_KEY_WORD(SPACE)                                                 \
+static inline ulong pbkdf2_load_key_word_be(const SPACE uchar* key, ulong nkey, int word_idx) { \
+    const ulong off = ulong(word_idx) * 8ul;                                               \
+    if (off >= nkey) {                                                                      \
+        return 0ul;                                                                         \
+    }                                                                                       \
+    if ((off + 8ul) <= nkey) {                                                              \
+        uchar tmp[8];                                                                       \
+        pbkdf2_copy(tmp, key + off, 8ul);                                                   \
+        return pbkdf2_read64_be(tmp);                                                       \
+    }                                                                                       \
+    const ulong tail = nkey - off;                                                          \
+    ulong w = 0ul;                                                                          \
+    for (int j = 0; j < 8; ++j) {                                                           \
+        w <<= 8u;                                                                           \
+        if (ulong(j) < tail) {                                                              \
+            w |= ulong(key[off + ulong(j)]);                                                \
+        }                                                                                   \
+    }                                                                                       \
+    return w;                                                                               \
+}
+
+PBKDF2_DEFINE_LOAD_KEY_WORD(thread)
+PBKDF2_DEFINE_LOAD_KEY_WORD(constant)
+PBKDF2_DEFINE_LOAD_KEY_WORD(device)
+
+#undef PBKDF2_DEFINE_LOAD_KEY_WORD
+
+constant ulong PBKDF2_HMAC12_BTC_INNER[8] = {
+    0x2e2af459060c1873ul, 0x7894b868dc88433aul,
+    0xdd1a797ef1a1933aul, 0xe6486d04fcb412a7ul,
+    0xfbcc67b9a396caa0ul, 0xa2970b146f49b65eul,
+    0xfdf1daabc66f6248ul, 0x2ff99c812ada6dc3ul
+};
+constant ulong PBKDF2_HMAC12_BTC_OUTER[8] = {
+    0xbbd27bac212e9dbdul, 0xdd0bc55e7e4037c1ul,
+    0xdfdd3d6890bd6424ul, 0x2902de663032b34cul,
+    0xa30f8aa6f67899fcul, 0x69a566c30f88378ful,
+    0x0500247985ecb694ul, 0xf6d70307c6b2d337ul
+};
+constant ulong PBKDF2_HMAC12_ED_INNER[8] = {
+    0x5bc41398df1674a4ul, 0xbaa6705ad93bdc5bul,
+    0xb2ca41f232163418ul, 0x5120ff274d0a64aful,
+    0x06b7af2c52d308beul, 0xb84eec044311aff5ul,
+    0x74faa67d142432e0ul, 0x4df8e9c1c79ca7a4ul
+};
+constant ulong PBKDF2_HMAC12_ED_OUTER[8] = {
+    0x85114e2631c88122ul, 0x2161f5a2f8e82705ul,
+    0xaf5babef0961f86cul, 0x2ac6abc3e1482eb8ul,
+    0x6564f5c420d9a779ul, 0xfefabb492b746226ul,
+    0x8410404b08a58a65ul, 0x68c116f96ba0690bul
+};
+constant ulong PBKDF2_HMAC12_SEEDVER_INNER[8] = {
+    0x1197a4930cdcdf99ul, 0x546bbb7463b748ecul,
+    0x54b710c32be37324ul, 0xb1c66f4992fba20bul,
+    0x2636810bfe5bb0acul, 0xa303a6e0e2f532b7ul,
+    0x6f8de49628412246ul, 0x12a1440d199e4378ul
+};
+constant ulong PBKDF2_HMAC12_SEEDVER_OUTER[8] = {
+    0x81dbfcd8ccef4fd9ul, 0xe6d72480c338f2f2ul,
+    0x83986704cc866344ul, 0x3c6605131ca79477ul,
+    0xb9dceafa29032584ul, 0xded96c7785b367d5ul,
+    0x393a2aff50ec45ebul, 0x2e7b225f70227970ul
+};
+
+static inline void pbkdf2_sha512_load_precomp(thread pbkdf2_sha512_precomp_t* out_ctx,
+                                              const constant ulong inner[8],
+                                              const constant ulong outer[8]) {
+#pragma unroll
+    for (int i = 0; i < 8; ++i) {
+        out_ctx->inner_H[i] = inner[i];
+        out_ctx->outer_H[i] = outer[i];
+    }
+}
+
+static inline bool pbkdf2_sha512_known_precomp_12(const constant uchar* key,
+                                                  thread pbkdf2_sha512_precomp_t* out_ctx) {
+    const ulong k0 = pbkdf2_load_key_word_be(key, 12ul, 0);
+    const ulong k1 = pbkdf2_load_key_word_be(key, 12ul, 1);
+    if (k1 == 0x7365656400000000ul) {
+        if (k0 == 0x426974636f696e20ul) {
+            pbkdf2_sha512_load_precomp(out_ctx, PBKDF2_HMAC12_BTC_INNER, PBKDF2_HMAC12_BTC_OUTER);
+            return true;
+        }
+        if (k0 == 0x6564323535313920ul) {
+            pbkdf2_sha512_load_precomp(out_ctx, PBKDF2_HMAC12_ED_INNER, PBKDF2_HMAC12_ED_OUTER);
+            return true;
+        }
+    }
+    if (k0 == 0x5365656420766572ul && k1 == 0x73696f6e00000000ul) {
+        pbkdf2_sha512_load_precomp(out_ctx, PBKDF2_HMAC12_SEEDVER_INNER, PBKDF2_HMAC12_SEEDVER_OUTER);
+        return true;
+    }
+    return false;
+}
+
+#define PBKDF2_DEFINE_PRECOMP(SPACE)                                                       \
+static inline void pbkdf2_sha512_init_precomp(const SPACE uchar* key,                      \
+                                              ulong nkey,                                  \
+                                              thread pbkdf2_sha512_precomp_t* out_ctx) {   \
+    uchar hashed_key[PBKDF2_SHA512_HASHSZ];                                                 \
+    bool use_hashed_key = false;                                                            \
+    if (nkey > PBKDF2_SHA512_BLOCKSZ) {                                                     \
+        SHA512(key, nkey, hashed_key);                                                      \
+        nkey = PBKDF2_SHA512_HASHSZ;                                                        \
+        use_hashed_key = true;                                                              \
+    }                                                                                       \
+    const ulong iv[8] = {                                                                   \
+        0x6a09e667f3bcc908ul, 0xbb67ae8584caa73bul,                                        \
+        0x3c6ef372fe94f82bul, 0xa54ff53a5f1d36f1ul,                                        \
+        0x510e527fade682d1ul, 0x9b05688c2b3e6c1ful,                                        \
+        0x1f83d9abfb41bd6bul, 0x5be0cd19137e2179ul                                         \
+    };                                                                                      \
+    Pbkdf2Sha512Block block_words;                                                          \
+    for (int i = 0; i < 16; ++i) {                                                          \
+        const ulong word = use_hashed_key                                                   \
+            ? pbkdf2_load_key_word_be(hashed_key, nkey, i)                                  \
+            : pbkdf2_load_key_word_be(key, nkey, i);                                        \
+        block_words[i] = word ^ 0x3636363636363636ul;                                       \
+    }                                                                                       \
+    pbkdf2_sha512_raw_transform(iv, out_ctx->inner_H, block_words);                         \
+    for (int i = 0; i < 16; ++i) {                                                          \
+        block_words[i] ^= 0x6a6a6a6a6a6a6a6aul;                                             \
+    }                                                                                       \
+    pbkdf2_sha512_raw_transform(iv, out_ctx->outer_H, block_words);                         \
+}
+
+PBKDF2_DEFINE_PRECOMP(thread)
+PBKDF2_DEFINE_PRECOMP(constant)
+PBKDF2_DEFINE_PRECOMP(device)
+
+#undef PBKDF2_DEFINE_PRECOMP
+
+static inline void pbkdf2_hmac_sha512_precomp_64(const thread pbkdf2_sha512_precomp_t* precomp,
+                                                 const thread uchar* data,
+                                                 thread uchar* out) {
+    ulong inner_words[8];
+    for (int i = 0; i < 8; ++i) {
+        inner_words[i] = pbkdf2_read64_be(data + (uint(i) * 8u));
+    }
+    ulong inner_state[8];
+    pbkdf2_sha512_raw_transform_digest64(precomp->inner_H, inner_state, inner_words);
+
+    ulong outer_state[8];
+    pbkdf2_sha512_raw_transform_digest64(precomp->outer_H, outer_state, inner_state);
+    pbkdf2_sha512_convert_output(outer_state, out);
+}
+
+static inline void pbkdf2_sha512_context_from_precomp_state(thread Pbkdf2Sha512Context* ctx,
+                                                            const thread ulong state[8]) {
+    for (int i = 0; i < 8; ++i) {
+        ctx->H[i] = state[i];
+    }
+    ctx->blocks = 1u;
+    ctx->npartial = 0ul;
+}
+
+static inline void pbkdf2_hmac_sha512_precomp(const thread pbkdf2_sha512_precomp_t* precomp,
+                                              const thread uchar* data,
+                                              ulong data_len,
+                                              thread uchar* out) {
+    Pbkdf2HmacSha512Context ctx;
+    pbkdf2_sha512_context_from_precomp_state(&ctx.inner, precomp->inner_H);
+    pbkdf2_sha512_update(&ctx.inner, data, data_len);
+    pbkdf2_sha512_final(&ctx.inner, out);
+    pbkdf2_sha512_context_from_precomp_state(&ctx.outer, precomp->outer_H);
+    pbkdf2_sha512_update(&ctx.outer, out, PBKDF2_SHA512_HASHSZ);
+    pbkdf2_sha512_final(&ctx.outer, out);
+}
+
+static inline void HMAC_SHA512_BTC_SEED_64(const thread uchar* data, thread uchar* out) {
+    pbkdf2_sha512_precomp_t precomp;
+    pbkdf2_sha512_load_precomp(&precomp, PBKDF2_HMAC12_BTC_INNER, PBKDF2_HMAC12_BTC_OUTER);
+    pbkdf2_hmac_sha512_precomp_64(&precomp, data, out);
+}
+
+static inline void HMAC_SHA512_ED25519_SEED_64(const thread uchar* data, thread uchar* out) {
+    pbkdf2_sha512_precomp_t precomp;
+    pbkdf2_sha512_load_precomp(&precomp, PBKDF2_HMAC12_ED_INNER, PBKDF2_HMAC12_ED_OUTER);
+    pbkdf2_hmac_sha512_precomp_64(&precomp, data, out);
+}
+
+static inline void HMAC_SHA512_SEED_VERSION_64(const thread uchar* data, thread uchar* out) {
+    pbkdf2_sha512_precomp_t precomp;
+    pbkdf2_sha512_load_precomp(&precomp, PBKDF2_HMAC12_SEEDVER_INNER, PBKDF2_HMAC12_SEEDVER_OUTER);
+    pbkdf2_hmac_sha512_precomp_64(&precomp, data, out);
+}
+
+static inline void HMAC_SHA512_SEED_VERSION(const thread uchar* data, ulong data_len, thread uchar* out) {
+    pbkdf2_sha512_precomp_t precomp;
+    pbkdf2_sha512_load_precomp(&precomp, PBKDF2_HMAC12_SEEDVER_INNER, PBKDF2_HMAC12_SEEDVER_OUTER);
+    pbkdf2_hmac_sha512_precomp(&precomp, data, data_len, out);
+}
+
+static inline void HMAC_SHA512_12_64(const constant uchar* key,
+                                     const thread uchar* data,
+                                     thread uchar* out) {
+    pbkdf2_sha512_precomp_t precomp;
+    if (!pbkdf2_sha512_known_precomp_12(key, &precomp)) {
+        const ulong iv[8] = {
+            0x6a09e667f3bcc908ul, 0xbb67ae8584caa73bul,
+            0x3c6ef372fe94f82bul, 0xa54ff53a5f1d36f1ul,
+            0x510e527fade682d1ul, 0x9b05688c2b3e6c1ful,
+            0x1f83d9abfb41bd6bul, 0x5be0cd19137e2179ul
+        };
+        Pbkdf2Sha512Block key_block;
+        for (int i = 0; i < 16; ++i) {
+            key_block[i] = pbkdf2_load_key_word_be(key, 12ul, i) ^ 0x3636363636363636ul;
+        }
+        pbkdf2_sha512_raw_transform(iv, precomp.inner_H, key_block);
+        for (int i = 0; i < 16; ++i) {
+            key_block[i] ^= 0x6a6a6a6a6a6a6a6aul;
+        }
+        pbkdf2_sha512_raw_transform(iv, precomp.outer_H, key_block);
+    }
+    pbkdf2_hmac_sha512_precomp_64(&precomp, data, out);
+}
+
+#define PBKDF2_DEFINE_COPY_SALT_COUNT(SPACE)                                                \
+static inline void pbkdf2_copy_salt_count_bytes(thread uchar* dst,                         \
+                                                ulong len,                                  \
+                                                const SPACE uchar* salt,                    \
+                                                ulong nsalt,                                \
+                                                const thread uchar countbuf[4],             \
+                                                ulong offset) {                             \
+    ulong copied = 0ul;                                                                      \
+    if (offset < nsalt) {                                                                    \
+        const ulong salt_avail = nsalt - offset;                                            \
+        const ulong take_salt = len < salt_avail ? len : salt_avail;                        \
+        pbkdf2_copy(dst, salt + offset, take_salt);                                         \
+        copied = take_salt;                                                                 \
+    }                                                                                        \
+    const ulong rem = len - copied;                                                          \
+    if (rem != 0ul) {                                                                        \
+        const ulong count_off = offset + copied - nsalt;                                    \
+        pbkdf2_copy(dst + copied, countbuf + count_off, rem);                               \
+    }                                                                                        \
+}
+
+PBKDF2_DEFINE_COPY_SALT_COUNT(thread)
+PBKDF2_DEFINE_COPY_SALT_COUNT(constant)
+PBKDF2_DEFINE_COPY_SALT_COUNT(device)
+
+#undef PBKDF2_DEFINE_COPY_SALT_COUNT
+
+#define PBKDF2_DEFINE_PACK_SHORT_SALT_COUNT(SPACE)                                          \
+static inline void pbkdf2_pack_short_salt_count_words(thread Pbkdf2Sha512Block block_words, \
+                                                      const SPACE uchar* salt,              \
+                                                      ulong nsalt,                           \
+                                                      const thread uchar countbuf[4],        \
+                                                      ulong msg_len,                         \
+                                                      uint total_inner_bits) {               \
+    for (int word = 0; word < 16; ++word) {                                                  \
+        ulong packed = 0ul;                                                                  \
+        for (int byte_index = 0; byte_index < 8; ++byte_index) {                              \
+            const ulong idx = ulong(word * 8 + byte_index);                                  \
+            uchar v = 0u;                                                                    \
+            if (idx < nsalt) {                                                               \
+                v = salt[idx];                                                               \
+            } else if (idx < msg_len) {                                                      \
+                v = countbuf[idx - nsalt];                                                   \
+            }                                                                                \
+            if (idx == msg_len) {                                                            \
+                v = 0x80u;                                                                   \
+            }                                                                                \
+            if (idx >= 124ul) {                                                              \
+                const uint shift = uint((127ul - idx) * 8ul);                                \
+                v = uchar((total_inner_bits >> shift) & 0xffu);                              \
+            }                                                                                \
+            packed = (packed << 8u) | ulong(v);                                              \
+        }                                                                                    \
+        block_words[word] = packed;                                                          \
+    }                                                                                        \
+}
+
+PBKDF2_DEFINE_PACK_SHORT_SALT_COUNT(thread)
+PBKDF2_DEFINE_PACK_SHORT_SALT_COUNT(constant)
+PBKDF2_DEFINE_PACK_SHORT_SALT_COUNT(device)
+
+#undef PBKDF2_DEFINE_PACK_SHORT_SALT_COUNT
+
+#define PBKDF2_DEFINE_U1(SPACE)                                                             \
+static inline void pbkdf2_u1_sha512_words(const thread pbkdf2_sha512_precomp_t* startctx,  \
+                                          uint counter,                                     \
+                                          const SPACE uchar* salt,                          \
+                                          ulong nsalt,                                      \
+                                          thread ulong out_words[8]) {                      \
+    uchar countbuf[4];                                                                       \
+    pbkdf2_write32_be(counter, countbuf);                                                    \
+    ulong msg_len = nsalt + 4ul;                                                             \
+    const uint total_inner_bits = uint((PBKDF2_SHA512_BLOCKSZ + msg_len) * 8ul);             \
+    if (msg_len < PBKDF2_SHA512_BLOCKSZ) {                                                   \
+        Pbkdf2Sha512Block block_words;                                                       \
+        pbkdf2_pack_short_salt_count_words(block_words, salt, nsalt, countbuf, msg_len,      \
+                                           total_inner_bits);                                \
+        ulong inner_out[8];                                                                  \
+        pbkdf2_sha512_raw_transform(startctx->inner_H, inner_out, block_words);              \
+        pbkdf2_sha512_raw_transform_digest64(startctx->outer_H, out_words, inner_out);       \
+        return;                                                                              \
+    }                                                                                        \
+    uchar block_bytes[PBKDF2_SHA512_BLOCKSZ];                                                \
+    Pbkdf2Sha512Block block_words;                                                           \
+    ulong inner_a[8];                                                                        \
+    ulong inner_b[8];                                                                        \
+    const thread ulong* in_state = startctx->inner_H;                                        \
+    thread ulong* out_state = inner_a;                                                       \
+    ulong offset = 0ul;                                                                      \
+    while (msg_len >= PBKDF2_SHA512_BLOCKSZ) {                                               \
+        pbkdf2_copy_salt_count_bytes(block_bytes, PBKDF2_SHA512_BLOCKSZ, salt, nsalt, countbuf, offset); \
+        pbkdf2_sha512_convert_input(block_words, block_bytes);                               \
+        pbkdf2_sha512_raw_transform(in_state, out_state, block_words);                       \
+        in_state = out_state;                                                                \
+        out_state = (out_state == inner_a) ? inner_b : inner_a;                              \
+        offset += PBKDF2_SHA512_BLOCKSZ;                                                     \
+        msg_len -= PBKDF2_SHA512_BLOCKSZ;                                                    \
+    }                                                                                        \
+    pbkdf2_zero(block_bytes, PBKDF2_SHA512_BLOCKSZ);                                         \
+    if (msg_len != 0ul) {                                                                    \
+        pbkdf2_copy_salt_count_bytes(block_bytes, msg_len, salt, nsalt, countbuf, offset);   \
+    }                                                                                        \
+    block_bytes[msg_len] = 0x80u;                                                            \
+    pbkdf2_write32_be(total_inner_bits, block_bytes + (PBKDF2_SHA512_BLOCKSZ - 4ul));        \
+    pbkdf2_sha512_convert_input(block_words, block_bytes);                                   \
+    pbkdf2_sha512_raw_transform(in_state, out_state, block_words);                           \
+    pbkdf2_sha512_raw_transform_digest64(startctx->outer_H, out_words, out_state);           \
+}
+
+PBKDF2_DEFINE_U1(thread)
+PBKDF2_DEFINE_U1(constant)
+PBKDF2_DEFINE_U1(device)
+
+#undef PBKDF2_DEFINE_U1
+
+#define PBKDF2_DEFINE_F(SPACE)                                                              \
+static inline void pbkdf2_f_sha512(const thread pbkdf2_sha512_precomp_t* startctx,         \
+                                   uint counter,                                            \
+                                   const SPACE uchar* salt,                                 \
+                                   ulong nsalt,                                             \
+                                   ulong iterations,                                        \
+                                   thread uchar* out) {                                     \
+    ulong resultH[8];                                                                        \
+    pbkdf2_u1_sha512_words(startctx, counter, salt, nsalt, resultH);                         \
+    ulong Ublock[8];                                                                         \
+    for (int j = 0; j < 8; ++j) {                                                            \
+        Ublock[j] = resultH[j];                                                              \
+    }                                                                                        \
+    for (ulong i = 1ul; i < iterations; ++i) {                                               \
+        pbkdf2_sha512_raw_transform_digest64(startctx->inner_H, Ublock, Ublock);             \
+        pbkdf2_sha512_raw_transform_digest64(startctx->outer_H, Ublock, Ublock);             \
+        pbkdf2_sha512_xor(resultH, Ublock);                                                  \
+    }                                                                                        \
+    pbkdf2_sha512_convert_output(resultH, out);                                              \
+}
+
+PBKDF2_DEFINE_F(thread)
+PBKDF2_DEFINE_F(constant)
+PBKDF2_DEFINE_F(device)
+
+#undef PBKDF2_DEFINE_F
+
+#define PBKDF2_DEFINE_FAST(KEYSPACE, SALTSPACE)                                             \
+static inline void fastpbkdf2_hmac_sha512(const KEYSPACE uchar* pw, ulong npw,              \
+                                          const SALTSPACE uchar* salt, ulong nsalt,          \
+                                          ulong iterations,                                  \
+                                          thread uchar* out, ulong nout) {                   \
+    pbkdf2_sha512_precomp_t ctx;                                                            \
+    pbkdf2_sha512_init_precomp(pw, npw, &ctx);                                               \
+    if (nout == PBKDF2_SHA512_HASHSZ) {                                                      \
+        pbkdf2_f_sha512(&ctx, 1u, salt, nsalt, iterations, out);                              \
+        return;                                                                              \
+    }                                                                                        \
+    const uint blocks_needed = uint((nout + PBKDF2_SHA512_HASHSZ - 1ul) / PBKDF2_SHA512_HASHSZ); \
+    for (uint counter = 1u; counter <= blocks_needed; ++counter) {                           \
+        uchar block[PBKDF2_SHA512_HASHSZ];                                                   \
+        pbkdf2_f_sha512(&ctx, counter, salt, nsalt, iterations, block);                       \
+        const ulong offset = ulong(counter - 1u) * PBKDF2_SHA512_HASHSZ;                      \
+        const ulong taken = pbkdf2_min_ulong(nout - offset, PBKDF2_SHA512_HASHSZ);            \
+        pbkdf2_copy(out + offset, block, taken);                                             \
+    }                                                                                        \
+}
+
+PBKDF2_DEFINE_FAST(thread, thread)
+PBKDF2_DEFINE_FAST(thread, constant)
+PBKDF2_DEFINE_FAST(thread, device)
+PBKDF2_DEFINE_FAST(constant, thread)
+PBKDF2_DEFINE_FAST(constant, constant)
+PBKDF2_DEFINE_FAST(constant, device)
+PBKDF2_DEFINE_FAST(device, thread)
+PBKDF2_DEFINE_FAST(device, constant)
+PBKDF2_DEFINE_FAST(device, device)
+
+#undef PBKDF2_DEFINE_FAST
+
+#undef PBKDF2_SHA512_BLOCKSZ
+#undef PBKDF2_SHA512_HASHSZ
+
+#endif

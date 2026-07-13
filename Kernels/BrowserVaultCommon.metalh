@@ -1,0 +1,1008 @@
+#ifndef METAL_CRYPTO_BROWSER_VAULT_COMMON_METALH
+#define METAL_CRYPTO_BROWSER_VAULT_COMMON_METALH
+
+#include "WalletDatResolveCommon.metalh"
+#include "GPUHash.metalh"
+#include "PrngCommon.metalh"
+#include "ElectrumWalletCommon.metalh"
+
+#define ETHPRESALE_MAX_ENCSEED_LEN 608u
+#define WALLET_MODE_ETHPRESALE 11u
+
+struct WalletHmacSha256Precomp {
+    uint istate[8];
+    uint ostate[8];
+};
+
+static inline void wallet_store_be32(thread uchar* out, uint v) {
+    out[0] = uchar(v >> 24u);
+    out[1] = uchar(v >> 16u);
+    out[2] = uchar(v >> 8u);
+    out[3] = uchar(v);
+}
+
+static inline void wallet_sha256_load_be_block_pre(const thread uchar* p, thread uint w[16]) {
+    for (int i = 0; i < 16; ++i) {
+        const thread uchar* q = p + (uint(i) << 2u);
+        w[i] = (uint(q[0]) << 24u) | (uint(q[1]) << 16u) | (uint(q[2]) << 8u) | uint(q[3]);
+    }
+}
+
+static inline void wallet_sha256_finalize_pre(thread uint s[8],
+                                              const thread uchar* tail,
+                                              uint tail_len,
+                                              ulong total_len_bytes,
+                                              thread uchar out[32]) {
+    uint w[16];
+    for (int i = 0; i < 16; ++i) {
+        w[i] = 0u;
+    }
+
+    for (uint i = 0u; i < tail_len; ++i) {
+        const uint wi = i >> 2u;
+        const uint sh = (3u - (i & 3u)) * 8u;
+        w[wi] |= uint(tail[i]) << sh;
+    }
+    {
+        const uint wi = tail_len >> 2u;
+        const uint sh = (3u - (tail_len & 3u)) * 8u;
+        w[wi] |= 0x80u << sh;
+    }
+
+    const ulong bitlen = total_len_bytes * 8ul;
+    if (tail_len <= 55u) {
+        w[14] = uint(bitlen >> 32u);
+        w[15] = uint(bitlen);
+        SHA256Transform(s, w);
+    } else {
+        SHA256Transform(s, w);
+        for (int i = 0; i < 14; ++i) {
+            w[i] = 0u;
+        }
+        w[14] = uint(bitlen >> 32u);
+        w[15] = uint(bitlen);
+        SHA256Transform(s, w);
+    }
+
+    for (int i = 0; i < 8; ++i) {
+        const uint v = s[i];
+        out[(uint(i) << 2u) + 0u] = uchar(v >> 24u);
+        out[(uint(i) << 2u) + 1u] = uchar(v >> 16u);
+        out[(uint(i) << 2u) + 2u] = uchar(v >> 8u);
+        out[(uint(i) << 2u) + 3u] = uchar(v);
+    }
+}
+
+static inline bool wallet_hmac_sha256_precompute(const thread uchar* key,
+                                                 uint key_len,
+                                                 thread WalletHmacSha256Precomp* out) {
+    if (key_len > 64u) {
+        return false;
+    }
+
+    uchar block[64];
+    uint w[16];
+    for (int i = 0; i < 64; ++i) {
+        block[i] = 0x36u;
+    }
+    for (uint i = 0u; i < key_len; ++i) {
+        block[i] = uchar(key[i] ^ 0x36u);
+    }
+    wallet_sha256_load_be_block_pre(block, w);
+    SHA256Initialize(out->istate);
+    SHA256Transform(out->istate, w);
+
+    for (int i = 0; i < 64; ++i) {
+        block[i] = 0x5cu;
+    }
+    for (uint i = 0u; i < key_len; ++i) {
+        block[i] = uchar(key[i] ^ 0x5cu);
+    }
+    wallet_sha256_load_be_block_pre(block, w);
+    SHA256Initialize(out->ostate);
+    SHA256Transform(out->ostate, w);
+    return true;
+}
+
+static inline void wallet_hmac_sha256_from_precomp(const thread WalletHmacSha256Precomp* ctx,
+                                                   const thread uchar* msg,
+                                                   uint msg_len,
+                                                   thread uchar out_mac[32]) {
+    uint s[8];
+    uint w[16];
+    for (int i = 0; i < 8; ++i) {
+        s[i] = ctx->istate[i];
+    }
+
+    const uint nblocks = msg_len >> 6u;
+    const uint rem = msg_len & 63u;
+    const thread uchar* p = msg;
+    for (uint i = 0u; i < nblocks; ++i, p += 64) {
+        wallet_sha256_load_be_block_pre(p, w);
+        SHA256Transform(s, w);
+    }
+
+    uchar ihash[32];
+    wallet_sha256_finalize_pre(s, p, rem, 64ul + ulong(msg_len), ihash);
+
+    for (int i = 0; i < 8; ++i) {
+        s[i] = ctx->ostate[i];
+    }
+    wallet_sha256_finalize_pre(s, ihash, 32u, 96ul, out_mac);
+}
+
+__attribute__((noinline)) static void wallet_pbkdf2_sha256_32(const thread uchar* pass,
+                                           uint pass_len,
+                                           const device uchar* salt_in,
+                                           uint salt_len,
+                                           uint iterations,
+                                           thread uchar out32[32]) {
+    uchar salt_block[WALLET_MAX_SALT_LEN + 4u];
+    uchar u[32];
+    uchar u_next[32];
+
+    if (salt_len > WALLET_MAX_SALT_LEN) {
+        salt_len = WALLET_MAX_SALT_LEN;
+    }
+    for (uint i = 0u; i < salt_len; ++i) {
+        salt_block[i] = salt_in[i];
+    }
+    wallet_store_be32(salt_block + salt_len, 1u);
+
+    WalletHmacSha256Precomp hmac_ctx;
+    const bool use_fast_hmac = wallet_hmac_sha256_precompute(pass, pass_len, &hmac_ctx);
+    if (use_fast_hmac) {
+        wallet_hmac_sha256_from_precomp(&hmac_ctx, salt_block, salt_len + 4u, u);
+    } else {
+        hmac_sha256(pass, size_t(pass_len), salt_block, size_t(salt_len + 4u), u);
+    }
+    for (int i = 0; i < 32; ++i) {
+        out32[i] = u[i];
+    }
+
+    if (iterations == 0u) {
+        return;
+    }
+    for (uint iter = 1u; iter < iterations; ++iter) {
+        if (use_fast_hmac) {
+            wallet_hmac_sha256_from_precomp(&hmac_ctx, u, 32u, u_next);
+        } else {
+            hmac_sha256(pass, size_t(pass_len), u, 32u, u_next);
+        }
+        for (int i = 0; i < 32; ++i) {
+            u[i] = u_next[i];
+            out32[i] = uchar(out32[i] ^ u_next[i]);
+        }
+    }
+}
+
+static inline void wallet_gcm_xor16(thread uchar a[16], const thread uchar* b) {
+    for (int i = 0; i < 16; ++i) {
+        a[i] = uchar(a[i] ^ b[i]);
+    }
+}
+
+static inline void wallet_gcm_mul(thread uchar x[16], const thread uchar h[16]) {
+    ulong x_hi = 0ul;
+    ulong x_lo = 0ul;
+    ulong v_hi = 0ul;
+    ulong v_lo = 0ul;
+    for (uint i = 0u; i < 8u; ++i) {
+        x_hi = (x_hi << 8u) | ulong(x[i]);
+        x_lo = (x_lo << 8u) | ulong(x[i + 8u]);
+        v_hi = (v_hi << 8u) | ulong(h[i]);
+        v_lo = (v_lo << 8u) | ulong(h[i + 8u]);
+    }
+
+    ulong z_hi = 0ul;
+    ulong z_lo = 0ul;
+    for (int i = 0; i < 128; ++i) {
+        const ulong x_mask = 0ul - (x_hi >> 63u);
+        z_hi ^= v_hi & x_mask;
+        z_lo ^= v_lo & x_mask;
+
+        x_hi = (x_hi << 1u) | (x_lo >> 63u);
+        x_lo <<= 1u;
+
+        const ulong reduction_mask = 0ul - (v_lo & 1ul);
+        v_lo = (v_lo >> 1u) | (v_hi << 63u);
+        v_hi = (v_hi >> 1u) ^ (0xe100000000000000ul & reduction_mask);
+    }
+
+    wallet_store_be64(x, z_hi);
+    wallet_store_be64(x + 8, z_lo);
+}
+
+static inline void wallet_gcm_ghash_device(const thread uchar h[16],
+                                           const device uchar* data,
+                                           uint data_len,
+                                           thread uchar out[16]) {
+    uchar y[16] = {};
+    uchar block[16];
+    for (uint off = 0u; off < data_len; off += 16u) {
+        for (int i = 0; i < 16; ++i) {
+            block[i] = 0u;
+        }
+        const uint n = ((data_len - off) < 16u) ? (data_len - off) : 16u;
+        for (uint i = 0u; i < n; ++i) {
+            block[i] = data[off + i];
+        }
+        wallet_gcm_xor16(y, block);
+        wallet_gcm_mul(y, h);
+    }
+    for (int i = 0; i < 16; ++i) {
+        block[i] = 0u;
+    }
+    const ulong bits = ulong(data_len) * 8ul;
+    wallet_store_be64(block + 8, bits);
+    wallet_gcm_xor16(y, block);
+    wallet_gcm_mul(y, h);
+    for (int i = 0; i < 16; ++i) {
+        out[i] = y[i];
+    }
+}
+
+static inline bool wallet_aes256_gcm_verify(const thread uchar key32[32],
+                                            const device uchar* iv,
+                                            uint iv_len,
+                                            const device uchar* ciphertext,
+                                            uint ciphertext_len,
+                                            const device uchar* tag) {
+    if (iv_len == 0u || iv_len > 32u || ciphertext_len == 0u || ciphertext_len > BROWSERVAULT_MAX_BLOB_LEN) {
+        return false;
+    }
+    uint round_keys[60];
+    provider_aes_expand_key(key32, round_keys);
+    uchar zero[16] = {};
+    uchar h[16];
+    provider_aes_encrypt_block(round_keys, zero, h);
+    uchar j0[16] = {};
+    if (iv_len == 12u) {
+        for (int i = 0; i < 12; ++i) {
+            j0[i] = iv[i];
+        }
+        j0[15] = 1u;
+    } else {
+        uchar y[16] = {};
+        uchar block[16];
+        for (uint off = 0u; off < iv_len; off += 16u) {
+            for (int i = 0; i < 16; ++i) {
+                block[i] = 0u;
+            }
+            const uint n = ((iv_len - off) < 16u) ? (iv_len - off) : 16u;
+            for (uint i = 0u; i < n; ++i) {
+                block[i] = iv[off + i];
+            }
+            wallet_gcm_xor16(y, block);
+            wallet_gcm_mul(y, h);
+        }
+        for (int i = 0; i < 16; ++i) {
+            block[i] = 0u;
+        }
+        wallet_store_be64(block + 8, ulong(iv_len) * 8ul);
+        wallet_gcm_xor16(y, block);
+        wallet_gcm_mul(y, h);
+        for (int i = 0; i < 16; ++i) {
+            j0[i] = y[i];
+        }
+    }
+    uchar s[16];
+    wallet_gcm_ghash_device(h, ciphertext, ciphertext_len, s);
+    uchar e0[16];
+    provider_aes_encrypt_block(round_keys, j0, e0);
+    uchar diff = 0u;
+    for (int i = 0; i < 16; ++i) {
+        diff = uchar(diff | uchar((e0[i] ^ s[i]) ^ tag[i]));
+    }
+    return diff == 0u;
+}
+
+__attribute__((noinline)) static void wallet_cryptojs_evp_bytes_to_key_md5(const thread uchar* pass,
+                                                        uint pass_len,
+                                                        const device uchar salt8[8],
+                                                        thread uchar key32[32],
+                                                        thread uchar iv16[16]) {
+    uchar material[48];
+    uchar prev[16];
+    uchar md_in[16 + WALLET_PASS_STRIDE + 8];
+    uint material_pos = 0u;
+    for (uint round = 0u; round < 3u; ++round) {
+        uint pos = 0u;
+        if (round != 0u) {
+            for (int i = 0; i < 16; ++i) {
+                md_in[pos++] = prev[i];
+            }
+        }
+        for (uint i = 0u; i < pass_len && i < WALLET_MAX_PASSWORD_LEN; ++i) {
+            md_in[pos++] = pass[i];
+        }
+        for (int i = 0; i < 8; ++i) {
+            md_in[pos++] = salt8[i];
+        }
+        MD5(md_in, size_t(pos), prev);
+        for (int i = 0; i < 16; ++i) {
+            material[material_pos + uint(i)] = prev[i];
+        }
+        material_pos += 16u;
+    }
+    for (int i = 0; i < 32; ++i) {
+        key32[i] = material[i];
+    }
+    for (int i = 0; i < 16; ++i) {
+        iv16[i] = material[32 + i];
+    }
+}
+
+static inline bool wallet_plaintext_byte_plausible(uchar c) {
+    return c == 9u || c == 10u || c == 13u || (c >= 32u && c <= 126u);
+}
+
+__attribute__((noinline)) static bool wallet_aes256_cbc_check_cryptojs_atomic(const thread uchar key32[32],
+                                                           const thread uchar iv16[16],
+                                                           const device uchar* ciphertext,
+                                                           uint ciphertext_len) {
+    if (ciphertext == nullptr || ciphertext_len < 16u || (ciphertext_len & 15u) != 0u ||
+        ciphertext_len > BROWSERVAULT_MAX_BLOB_LEN) {
+        return false;
+    }
+    uint round_keys[60];
+    provider_aes_expand_key(key32, round_keys);
+    uchar first_plain[16];
+    wallet_aes256_decrypt_block(round_keys, ciphertext, first_plain);
+    for (int i = 0; i < 16; ++i) {
+        first_plain[i] = uchar(first_plain[i] ^ iv16[i]);
+    }
+    uint printable = 0u;
+    uchar first_non_ws = 0u;
+    for (int i = 0; i < 16; ++i) {
+        const uchar c = first_plain[i];
+        if (wallet_plaintext_byte_plausible(c)) {
+            ++printable;
+        }
+        if (first_non_ws == 0u && c != ' ' && c != '\t' && c != '\r' && c != '\n') {
+            first_non_ws = c;
+        }
+    }
+    const bool head_ok = first_non_ws == '{' || first_non_ws == '[' || first_non_ws == '"' ||
+        (first_non_ws >= 'a' && first_non_ws <= 'z') ||
+        (first_non_ws >= 'A' && first_non_ws <= 'Z') ||
+        (first_non_ws >= '0' && first_non_ws <= '9');
+    if (!head_ok || printable < 12u) {
+        return false;
+    }
+    const uint last_off = ciphertext_len - 16u;
+    uchar last_plain[16];
+    wallet_aes256_decrypt_block(round_keys, ciphertext + last_off, last_plain);
+    for (int i = 0; i < 16; ++i) {
+        const uchar prev = (last_off == 0u) ? iv16[i] : ciphertext[last_off - 16u + uint(i)];
+        last_plain[i] = uchar(last_plain[i] ^ prev);
+    }
+    const uchar pad = last_plain[15];
+    if (pad == 0u || pad > 16u || uint(pad) > ciphertext_len) {
+        return false;
+    }
+    for (uint i = 0u; i < uint(pad); ++i) {
+        if (last_plain[15u - i] != pad) {
+            return false;
+        }
+    }
+    for (uint i = 0u; i < 16u - uint(pad); ++i) {
+        if (!wallet_plaintext_byte_plausible(last_plain[i])) {
+            return false;
+        }
+    }
+    return true;
+}
+
+__attribute__((noinline)) static bool wallet_aes256_cbc_check_blockchain_printable(const thread uchar key32[32],
+                                                                const device uchar iv16[16],
+                                                                const device uchar* ciphertext,
+                                                                uint ciphertext_len) {
+    if (ciphertext == nullptr || ciphertext_len < 48u ||
+        ciphertext_len > BROWSERVAULT_MAX_BLOB_LEN) {
+        return false;
+    }
+    uint round_keys[60];
+    provider_aes_expand_key(key32, round_keys);
+    uchar prev[16];
+    for (int i = 0; i < 16; ++i) {
+        prev[i] = iv16[i];
+    }
+    for (uint off = 0u; off < 48u; off += 16u) {
+        uchar plain[16];
+        wallet_aes256_decrypt_block(round_keys, ciphertext + off, plain);
+        for (int i = 0; i < 16; ++i) {
+            if (!wallet_plaintext_byte_plausible(uchar(plain[i] ^ prev[i]))) {
+                return false;
+            }
+            prev[i] = ciphertext[off + uint(i)];
+        }
+    }
+    return true;
+}
+
+__attribute__((noinline)) static bool wallet_aes256_cbc_check_dogechain_ascii(const thread uchar key32[32],
+                                                           const device uchar iv16[16],
+                                                           const device uchar* ciphertext,
+                                                           uint ciphertext_len) {
+    if (ciphertext == nullptr || ciphertext_len < 32u || (ciphertext_len & 15u) != 0u ||
+        ciphertext_len > BROWSERVAULT_MAX_BLOB_LEN) {
+        return false;
+    }
+    uint round_keys[60];
+    provider_aes_expand_key(key32, round_keys);
+    uchar prev[16];
+    for (int i = 0; i < 16; ++i) {
+        prev[i] = iv16[i];
+    }
+    const uint checked_len = ciphertext_len - 16u;
+    for (uint off = 0u; off < checked_len; off += 16u) {
+        uchar plain[16];
+        wallet_aes256_decrypt_block(round_keys, ciphertext + off, plain);
+        for (int i = 0; i < 16; ++i) {
+            if ((uchar(plain[i] ^ prev[i]) & 0x80u) != 0u) {
+                return false;
+            }
+            prev[i] = ciphertext[off + uint(i)];
+        }
+    }
+    return true;
+}
+
+__attribute__((noinline)) static bool wallet_aes256_cbc_check_android_backup_tail(const thread uchar key32[32],
+                                                               const device uchar iv16[16],
+                                                               const device uchar* ciphertext,
+                                                               uint ciphertext_len) {
+    if (ciphertext == nullptr || ciphertext_len != 16u) {
+        return false;
+    }
+    uint round_keys[60];
+    provider_aes_expand_key(key32, round_keys);
+    uchar plain[16];
+    wallet_aes256_decrypt_block(round_keys, ciphertext, plain);
+    for (int i = 0; i < 16; ++i) {
+        plain[i] = uchar(plain[i] ^ iv16[i]);
+    }
+    for (int i = 8; i < 16; ++i) {
+        if (plain[i] != 0x0du) {
+            return false;
+        }
+    }
+    return true;
+}
+
+static inline bool wallet_multibit_base58_char(uchar c) {
+    return (c >= '1' && c <= '9') || (c >= 'A' && c <= 'H') ||
+        (c >= 'J' && c <= 'N') || (c >= 'P' && c <= 'Z') ||
+        (c >= 'a' && c <= 'k') || (c >= 'm' && c <= 'z');
+}
+
+static inline bool wallet_multibit_bitcoinj_char(uchar c) {
+    return c == '.' || (c >= 'a' && c <= 'z');
+}
+
+static inline bool wallet_multibit_bitcoinj_block_ok(const thread uchar plain[16]) {
+    if (plain[0] != 0x0au || plain[1] > 0x7fu ||
+        plain[2] != 'o' || plain[3] != 'r' || plain[4] != 'g' || plain[5] != '.') {
+        return false;
+    }
+    for (uint i = 6u; i < 14u; ++i) {
+        if (!wallet_multibit_bitcoinj_char(plain[i])) {
+            return false;
+        }
+    }
+    return true;
+}
+
+__attribute__((noinline)) static bool wallet_aes256_cbc_check_multibit_classic_md5(const thread uchar key32[32],
+                                                                const thread uchar iv16[16],
+                                                                const device uchar* ciphertext,
+                                                                uint ciphertext_len) {
+    if (ciphertext == nullptr || ciphertext_len != 32u) {
+        return false;
+    }
+    uint round_keys[60];
+    provider_aes_expand_key(key32, round_keys);
+    uchar first[16];
+    wallet_aes256_decrypt_block(round_keys, ciphertext, first);
+    for (int i = 0; i < 16; ++i) {
+        first[i] = uchar(first[i] ^ iv16[i]);
+    }
+    const uchar first_byte = first[0];
+    if (first_byte == 'K' || first_byte == 'L' || first_byte == 'Q' || first_byte == '5') {
+        for (int i = 0; i < 16; ++i) {
+            if (!wallet_multibit_base58_char(first[i])) {
+                return false;
+            }
+        }
+        uchar second[16];
+        wallet_aes256_decrypt_block(round_keys, ciphertext + 16u, second);
+        for (int i = 0; i < 16; ++i) {
+            second[i] = uchar(second[i] ^ ciphertext[i]);
+            if (!wallet_multibit_base58_char(second[i])) {
+                return false;
+            }
+        }
+        return true;
+    }
+    if (first_byte == 0x0au) {
+        return wallet_multibit_bitcoinj_block_ok(first);
+    }
+    if (first_byte == '#') {
+        const uchar hdr0[16] = {'#',' ','K','E','E','P',' ','Y','O','U','R',' ','P','R','I','V'};
+        const uchar hdr1[16] = {'A','T','E',' ','K','E','Y','S',' ','S','A','F','E','!',' ','A'};
+        for (int i = 0; i < 16; ++i) {
+            if (first[i] != hdr0[i]) {
+                return false;
+            }
+        }
+        uchar second[16];
+        wallet_aes256_decrypt_block(round_keys, ciphertext + 16u, second);
+        for (int i = 0; i < 16; ++i) {
+            if (uchar(second[i] ^ ciphertext[i]) != hdr1[i]) {
+                return false;
+            }
+        }
+        return true;
+    }
+    return false;
+}
+
+__attribute__((noinline)) static bool wallet_aes256_cbc_check_multibit_hd_scrypt(const thread uchar key32[32],
+                                                              const device uchar iv16[16],
+                                                              const device uchar* ciphertext,
+                                                              uint ciphertext_len) {
+    if (ciphertext == nullptr || ciphertext_len != 32u) {
+        return false;
+    }
+    uint round_keys[60];
+    provider_aes_expand_key(key32, round_keys);
+    uchar plain[16];
+    wallet_aes256_decrypt_block(round_keys, ciphertext, plain);
+    for (int i = 0; i < 16; ++i) {
+        plain[i] = uchar(plain[i] ^ iv16[i]);
+    }
+    if (wallet_multibit_bitcoinj_block_ok(plain)) {
+        return true;
+    }
+    const uchar fixed_iv[16] = {
+        0xa3u, 0x44u, 0x39u, 0x1fu, 0x53u, 0x81u, 0x11u, 0xb3u,
+        0x29u, 0x54u, 0x86u, 0x16u, 0xc4u, 0x89u, 0x72u, 0x3eu
+    };
+    wallet_aes256_decrypt_block(round_keys, ciphertext + 16u, plain);
+    for (int i = 0; i < 16; ++i) {
+        plain[i] = uchar(plain[i] ^ fixed_iv[i]);
+    }
+    return wallet_multibit_bitcoinj_block_ok(plain);
+}
+
+__attribute__((noinline)) static bool wallet_aes256_cbc_check_multibit_classic_scrypt(const thread uchar key32[32],
+                                                                   const device uchar iv16[16],
+                                                                   const device uchar* ciphertext,
+                                                                   uint ciphertext_len) {
+    if (ciphertext == nullptr || ciphertext_len != 16u) {
+        return false;
+    }
+    uint round_keys[60];
+    provider_aes_expand_key(key32, round_keys);
+    uchar plain[16];
+    wallet_aes256_decrypt_block(round_keys, ciphertext, plain);
+    for (int i = 0; i < 16; ++i) {
+        if (uchar(plain[i] ^ iv16[i]) != 0x10u) {
+            return false;
+        }
+    }
+    return true;
+}
+
+static inline void wallet_hmac_sha1(const thread uchar* key,
+                                    uint key_len,
+                                    const thread uchar* msg,
+                                    uint msg_len,
+                                    thread uchar out20[20]) {
+    uchar key_hash[20];
+    if (key_len > 64u) {
+        prng32_provider_sha1_hash32(key, int(key_len), key_hash);
+        key = key_hash;
+        key_len = 20u;
+    }
+    uchar inner[64 + WALLET_MAX_SALT_LEN + 4u];
+    uchar outer[84];
+    for (uint i = 0u; i < 64u; ++i) {
+        const uchar k = i < key_len ? key[i] : 0u;
+        inner[i] = uchar(k ^ 0x36u);
+        outer[i] = uchar(k ^ 0x5cu);
+    }
+    for (uint i = 0u; i < msg_len; ++i) {
+        inner[64u + i] = msg[i];
+    }
+    uchar ihash[20];
+    prng32_provider_sha1_hash32(inner, int(64u + msg_len), ihash);
+    for (int i = 0; i < 20; ++i) {
+        outer[64 + i] = ihash[i];
+    }
+    prng32_provider_sha1_hash32(outer, 84, out20);
+}
+
+__attribute__((noinline)) static void wallet_pbkdf2_sha1_32(const thread uchar* pass,
+                                         uint pass_len,
+                                         const device uchar* salt_in,
+                                         uint salt_len,
+                                         uint iterations,
+                                         thread uchar out32[32]) {
+    if (iterations == 0u) {
+        iterations = 1u;
+    }
+    if (salt_len > WALLET_MAX_SALT_LEN) {
+        salt_len = WALLET_MAX_SALT_LEN;
+    }
+    uchar salt_block[WALLET_MAX_SALT_LEN + 4u];
+    uchar u[20];
+    uchar u_next[20];
+    uchar t[20];
+    for (uint block = 1u, written = 0u; written < 32u; ++block) {
+        for (uint i = 0u; i < salt_len; ++i) {
+            salt_block[i] = salt_in[i];
+        }
+        wallet_store_be32(salt_block + salt_len, block);
+        wallet_hmac_sha1(pass, pass_len, salt_block, salt_len + 4u, u);
+        for (int i = 0; i < 20; ++i) {
+            t[i] = u[i];
+        }
+        for (uint iter = 1u; iter < iterations; ++iter) {
+            wallet_hmac_sha1(pass, pass_len, u, 20u, u_next);
+            for (int i = 0; i < 20; ++i) {
+                u[i] = u_next[i];
+                t[i] = uchar(t[i] ^ u_next[i]);
+            }
+        }
+        const uint ncopy = min(32u - written, 20u);
+        for (uint i = 0u; i < ncopy; ++i) {
+            out32[written + i] = t[i];
+        }
+        written += ncopy;
+    }
+}
+
+static inline uchar wallet_base64_char_device(uint v) {
+    if (v < 26u) return uchar('A' + v);
+    if (v < 52u) return uchar('a' + (v - 26u));
+    if (v < 62u) return uchar('0' + (v - 52u));
+    return uchar(v == 62u ? '+' : '/');
+}
+
+__attribute__((noinline)) static void wallet_base64_encode_32_device(const thread uchar in[32],
+                                                  thread uchar out44[44]) {
+    uint o = 0u;
+    for (uint i = 0u; i < 30u; i += 3u) {
+        const uint v = (uint(in[i]) << 16u) | (uint(in[i + 1u]) << 8u) | uint(in[i + 2u]);
+        out44[o++] = wallet_base64_char_device((v >> 18u) & 63u);
+        out44[o++] = wallet_base64_char_device((v >> 12u) & 63u);
+        out44[o++] = wallet_base64_char_device((v >> 6u) & 63u);
+        out44[o++] = wallet_base64_char_device(v & 63u);
+    }
+    const uint tail = (uint(in[30]) << 16u) | (uint(in[31]) << 8u);
+    out44[o++] = wallet_base64_char_device((tail >> 18u) & 63u);
+    out44[o++] = wallet_base64_char_device((tail >> 12u) & 63u);
+    out44[o++] = wallet_base64_char_device((tail >> 6u) & 63u);
+    out44[o] = '=';
+}
+
+__attribute__((noinline)) static void wallet_pbkdf2_sha256_32_thread_salt(const thread uchar* pass,
+                                                       uint pass_len,
+                                                       const thread uchar* salt,
+                                                       uint salt_len,
+                                                       uint iterations,
+                                                       thread uchar out32[32]) {
+    uchar salt_block[WALLET_PASS_STRIDE + 4u];
+    uchar u[32];
+    uchar u_next[32];
+    if (salt_len > WALLET_PASS_STRIDE) {
+        salt_len = WALLET_PASS_STRIDE;
+    }
+    for (uint i = 0u; i < salt_len; ++i) {
+        salt_block[i] = salt[i];
+    }
+    wallet_store_be32(salt_block + salt_len, 1u);
+    WalletHmacSha256Precomp hmac_ctx;
+    const bool use_fast_hmac = wallet_hmac_sha256_precompute(pass, pass_len, &hmac_ctx);
+    if (use_fast_hmac) {
+        wallet_hmac_sha256_from_precomp(&hmac_ctx, salt_block, salt_len + 4u, u);
+    } else {
+        hmac_sha256(pass, size_t(pass_len), salt_block, size_t(salt_len + 4u), u);
+    }
+    for (int i = 0; i < 32; ++i) {
+        out32[i] = u[i];
+    }
+    for (uint iter = 1u; iter < iterations; ++iter) {
+        if (use_fast_hmac) {
+            wallet_hmac_sha256_from_precomp(&hmac_ctx, u, 32u, u_next);
+        } else {
+            hmac_sha256(pass, size_t(pass_len), u, 32u, u_next);
+        }
+        for (int i = 0; i < 32; ++i) {
+            u[i] = u_next[i];
+            out32[i] = uchar(out32[i] ^ u_next[i]);
+        }
+    }
+}
+
+__attribute__((noinline)) static bool wallet_ethpresale_priv_from_encseed(const thread uchar key32[32],
+                                                       const device uchar iv16[16],
+                                                       const device uchar* ciphertext,
+                                                       uint ciphertext_len,
+                                                       thread uchar priv32[32],
+                                                       thread uchar bkp32[32]) {
+    if (ciphertext == nullptr || ciphertext_len == 0u || (ciphertext_len & 15u) != 0u ||
+        ciphertext_len > ETHPRESALE_MAX_ENCSEED_LEN) {
+        return false;
+    }
+    uint round_keys[44];
+    provider_aes_expand_key128(key32, round_keys);
+    uchar seed[ETHPRESALE_MAX_ENCSEED_LEN + 2u];
+    uchar prev[16];
+    for (int i = 0; i < 16; ++i) {
+        prev[i] = iv16[i];
+    }
+    for (uint off = 0u; off < ciphertext_len; off += 16u) {
+        uchar block[16];
+        wallet_aes128_decrypt_block(round_keys, ciphertext + off, block);
+        for (int i = 0; i < 16; ++i) {
+            seed[off + uint(i)] = uchar(block[i] ^ prev[i]);
+            prev[i] = ciphertext[off + uint(i)];
+        }
+    }
+    const uchar pad = seed[ciphertext_len - 1u];
+    if (pad == 0u || pad > 16u || uint(pad) > ciphertext_len) {
+        return false;
+    }
+    for (uint i = 0u; i < uint(pad); ++i) {
+        if (seed[ciphertext_len - 1u - i] != pad) {
+            return false;
+        }
+    }
+    const uint seed_len = ciphertext_len - uint(pad);
+    keccak(reinterpret_cast<const thread char*>(seed), int(seed_len), priv32, 32);
+    seed[seed_len] = 0x02u;
+    keccak(reinterpret_cast<const thread char*>(seed), int(seed_len + 1u), bkp32, 32);
+    return true;
+}
+
+static inline uint wallet_load_le32_thread(const thread uchar* p) {
+    return uint(p[0]) | (uint(p[1]) << 8u) | (uint(p[2]) << 16u) | (uint(p[3]) << 24u);
+}
+
+static inline uint wallet_load_le32_device(const device uchar* p) {
+    return uint(p[0]) | (uint(p[1]) << 8u) | (uint(p[2]) << 16u) | (uint(p[3]) << 24u);
+}
+
+static inline void wallet_store_le32(thread uchar* p, uint v) {
+    p[0] = uchar(v);
+    p[1] = uchar(v >> 8u);
+    p[2] = uchar(v >> 16u);
+    p[3] = uchar(v >> 24u);
+}
+
+static inline uint wallet_rotl32_browser(uint v, uint n) {
+    return (v << n) | (v >> (32u - n));
+}
+
+static inline void wallet_salsa20_rounds20(thread uint x[16]) {
+    for (int i = 0; i < 10; ++i) {
+        x[4] ^= wallet_rotl32_browser(x[0] + x[12], 7u); x[8] ^= wallet_rotl32_browser(x[4] + x[0], 9u);
+        x[12] ^= wallet_rotl32_browser(x[8] + x[4], 13u); x[0] ^= wallet_rotl32_browser(x[12] + x[8], 18u);
+        x[9] ^= wallet_rotl32_browser(x[5] + x[1], 7u); x[13] ^= wallet_rotl32_browser(x[9] + x[5], 9u);
+        x[1] ^= wallet_rotl32_browser(x[13] + x[9], 13u); x[5] ^= wallet_rotl32_browser(x[1] + x[13], 18u);
+        x[14] ^= wallet_rotl32_browser(x[10] + x[6], 7u); x[2] ^= wallet_rotl32_browser(x[14] + x[10], 9u);
+        x[6] ^= wallet_rotl32_browser(x[2] + x[14], 13u); x[10] ^= wallet_rotl32_browser(x[6] + x[2], 18u);
+        x[3] ^= wallet_rotl32_browser(x[15] + x[11], 7u); x[7] ^= wallet_rotl32_browser(x[3] + x[15], 9u);
+        x[11] ^= wallet_rotl32_browser(x[7] + x[3], 13u); x[15] ^= wallet_rotl32_browser(x[11] + x[7], 18u);
+        x[1] ^= wallet_rotl32_browser(x[0] + x[3], 7u); x[2] ^= wallet_rotl32_browser(x[1] + x[0], 9u);
+        x[3] ^= wallet_rotl32_browser(x[2] + x[1], 13u); x[0] ^= wallet_rotl32_browser(x[3] + x[2], 18u);
+        x[6] ^= wallet_rotl32_browser(x[5] + x[4], 7u); x[7] ^= wallet_rotl32_browser(x[6] + x[5], 9u);
+        x[4] ^= wallet_rotl32_browser(x[7] + x[6], 13u); x[5] ^= wallet_rotl32_browser(x[4] + x[7], 18u);
+        x[11] ^= wallet_rotl32_browser(x[10] + x[9], 7u); x[8] ^= wallet_rotl32_browser(x[11] + x[10], 9u);
+        x[9] ^= wallet_rotl32_browser(x[8] + x[11], 13u); x[10] ^= wallet_rotl32_browser(x[9] + x[8], 18u);
+        x[12] ^= wallet_rotl32_browser(x[15] + x[14], 7u); x[13] ^= wallet_rotl32_browser(x[12] + x[15], 9u);
+        x[14] ^= wallet_rotl32_browser(x[13] + x[12], 13u); x[15] ^= wallet_rotl32_browser(x[14] + x[13], 18u);
+    }
+}
+
+static inline void wallet_hsalsa20(thread uchar out32[32],
+                                   const device uchar nonce16[16],
+                                   const thread uchar key32[32]) {
+    uint x[16];
+    x[0] = 0x61707865u; x[5] = 0x3320646eu; x[10] = 0x79622d32u; x[15] = 0x6b206574u;
+    x[1] = wallet_load_le32_thread(key32); x[2] = wallet_load_le32_thread(key32 + 4);
+    x[3] = wallet_load_le32_thread(key32 + 8); x[4] = wallet_load_le32_thread(key32 + 12);
+    x[11] = wallet_load_le32_thread(key32 + 16); x[12] = wallet_load_le32_thread(key32 + 20);
+    x[13] = wallet_load_le32_thread(key32 + 24); x[14] = wallet_load_le32_thread(key32 + 28);
+    x[6] = wallet_load_le32_device(nonce16); x[7] = wallet_load_le32_device(nonce16 + 4);
+    x[8] = wallet_load_le32_device(nonce16 + 8); x[9] = wallet_load_le32_device(nonce16 + 12);
+    wallet_salsa20_rounds20(x);
+    wallet_store_le32(out32, x[0]); wallet_store_le32(out32 + 4, x[5]);
+    wallet_store_le32(out32 + 8, x[10]); wallet_store_le32(out32 + 12, x[15]);
+    wallet_store_le32(out32 + 16, x[6]); wallet_store_le32(out32 + 20, x[7]);
+    wallet_store_le32(out32 + 24, x[8]); wallet_store_le32(out32 + 28, x[9]);
+}
+
+static inline void wallet_salsa20_block(thread uchar out64[64],
+                                        const thread uchar key32[32],
+                                        const device uchar nonce8[8],
+                                        ulong counter) {
+    uint j[16];
+    j[0] = 0x61707865u; j[5] = 0x3320646eu; j[10] = 0x79622d32u; j[15] = 0x6b206574u;
+    j[1] = wallet_load_le32_thread(key32); j[2] = wallet_load_le32_thread(key32 + 4);
+    j[3] = wallet_load_le32_thread(key32 + 8); j[4] = wallet_load_le32_thread(key32 + 12);
+    j[11] = wallet_load_le32_thread(key32 + 16); j[12] = wallet_load_le32_thread(key32 + 20);
+    j[13] = wallet_load_le32_thread(key32 + 24); j[14] = wallet_load_le32_thread(key32 + 28);
+    j[6] = wallet_load_le32_device(nonce8); j[7] = wallet_load_le32_device(nonce8 + 4);
+    j[8] = uint(counter); j[9] = uint(counter >> 32u);
+    uint x[16];
+    for (int i = 0; i < 16; ++i) {
+        x[i] = j[i];
+    }
+    wallet_salsa20_rounds20(x);
+    for (int i = 0; i < 16; ++i) {
+        wallet_store_le32(out64 + (i << 2), x[i] + j[i]);
+    }
+}
+
+struct WalletPoly1305RawCtx {
+    uint r[5];
+    uint h[5];
+    uint pad[4];
+};
+
+static inline void wallet_poly1305_raw_init(thread WalletPoly1305RawCtx* ctx,
+                                            const thread uchar key[32]) {
+    ctx->r[0] = wallet_load_le32_thread(key) & 0x3ffffffu;
+    ctx->r[1] = (wallet_load_le32_thread(key + 3) >> 2u) & 0x3ffff03u;
+    ctx->r[2] = (wallet_load_le32_thread(key + 6) >> 4u) & 0x3ffc0ffu;
+    ctx->r[3] = (wallet_load_le32_thread(key + 9) >> 6u) & 0x3f03fffu;
+    ctx->r[4] = (wallet_load_le32_thread(key + 12) >> 8u) & 0x00fffffu;
+    for (int i = 0; i < 5; ++i) ctx->h[i] = 0u;
+    for (int i = 0; i < 4; ++i) ctx->pad[i] = wallet_load_le32_thread(key + 16 + (i << 2));
+}
+
+static inline void wallet_poly1305_raw_block(thread WalletPoly1305RawCtx* ctx,
+                                             uint t0, uint t1, uint t2, uint t3,
+                                             uint hibit) {
+    const uint r0 = ctx->r[0], r1 = ctx->r[1], r2 = ctx->r[2], r3 = ctx->r[3], r4 = ctx->r[4];
+    uint h0 = ctx->h[0] + (t0 & 0x3ffffffu);
+    uint h1 = ctx->h[1] + (((t0 >> 26u) | (t1 << 6u)) & 0x3ffffffu);
+    uint h2 = ctx->h[2] + (((t1 >> 20u) | (t2 << 12u)) & 0x3ffffffu);
+    uint h3 = ctx->h[3] + (((t2 >> 14u) | (t3 << 18u)) & 0x3ffffffu);
+    uint h4 = ctx->h[4] + (((t3 >> 8u) & 0x00ffffffu) | hibit);
+    const uint s1 = r1 * 5u, s2 = r2 * 5u, s3 = r3 * 5u, s4 = r4 * 5u;
+    ulong d0 = ulong(h0) * r0 + ulong(h1) * s4 + ulong(h2) * s3 + ulong(h3) * s2 + ulong(h4) * s1;
+    ulong d1 = ulong(h0) * r1 + ulong(h1) * r0 + ulong(h2) * s4 + ulong(h3) * s3 + ulong(h4) * s2;
+    ulong d2 = ulong(h0) * r2 + ulong(h1) * r1 + ulong(h2) * r0 + ulong(h3) * s4 + ulong(h4) * s3;
+    ulong d3 = ulong(h0) * r3 + ulong(h1) * r2 + ulong(h2) * r1 + ulong(h3) * r0 + ulong(h4) * s4;
+    ulong d4 = ulong(h0) * r4 + ulong(h1) * r3 + ulong(h2) * r2 + ulong(h3) * r1 + ulong(h4) * r0;
+    uint c = uint(d0 >> 26u); h0 = uint(d0) & 0x3ffffffu; d1 += c;
+    c = uint(d1 >> 26u); h1 = uint(d1) & 0x3ffffffu; d2 += c;
+    c = uint(d2 >> 26u); h2 = uint(d2) & 0x3ffffffu; d3 += c;
+    c = uint(d3 >> 26u); h3 = uint(d3) & 0x3ffffffu; d4 += c;
+    c = uint(d4 >> 26u); h4 = uint(d4) & 0x3ffffffu; h0 += c * 5u;
+    c = h0 >> 26u; h0 &= 0x3ffffffu; h1 += c;
+    ctx->h[0] = h0; ctx->h[1] = h1; ctx->h[2] = h2; ctx->h[3] = h3; ctx->h[4] = h4;
+}
+
+static inline void wallet_poly1305_raw_finish(thread WalletPoly1305RawCtx* ctx,
+                                              thread uchar tag[16]) {
+    uint h0 = ctx->h[0], h1 = ctx->h[1], h2 = ctx->h[2], h3 = ctx->h[3], h4 = ctx->h[4];
+    uint c = h1 >> 26u; h1 &= 0x3ffffffu; h2 += c;
+    c = h2 >> 26u; h2 &= 0x3ffffffu; h3 += c;
+    c = h3 >> 26u; h3 &= 0x3ffffffu; h4 += c;
+    c = h4 >> 26u; h4 &= 0x3ffffffu; h0 += c * 5u;
+    c = h0 >> 26u; h0 &= 0x3ffffffu; h1 += c;
+    uint g0 = h0 + 5u; c = g0 >> 26u; g0 &= 0x3ffffffu;
+    uint g1 = h1 + c; c = g1 >> 26u; g1 &= 0x3ffffffu;
+    uint g2 = h2 + c; c = g2 >> 26u; g2 &= 0x3ffffffu;
+    uint g3 = h3 + c; c = g3 >> 26u; g3 &= 0x3ffffffu;
+    uint g4 = h4 + c - (1u << 26u);
+    uint mask = (g4 >> 31u) - 1u;
+    g0 &= mask; g1 &= mask; g2 &= mask; g3 &= mask; g4 &= mask;
+    mask = ~mask;
+    h0 = (h0 & mask) | g0; h1 = (h1 & mask) | g1; h2 = (h2 & mask) | g2;
+    h3 = (h3 & mask) | g3; h4 = (h4 & mask) | g4;
+    ulong f0 = uint(ulong(h0) | (ulong(h1) << 26u));
+    ulong f1 = uint((ulong(h1) >> 6u) | (ulong(h2) << 20u));
+    ulong f2 = uint((ulong(h2) >> 12u) | (ulong(h3) << 14u));
+    ulong f3 = uint((ulong(h3) >> 18u) | (ulong(h4) << 8u));
+    f0 += ctx->pad[0]; f1 += ctx->pad[1] + (f0 >> 32u); f0 &= 0xfffffffful;
+    f2 += ctx->pad[2] + (f1 >> 32u); f1 &= 0xfffffffful;
+    f3 += ctx->pad[3] + (f2 >> 32u); f2 &= 0xfffffffful;
+    wallet_store_le32(tag, uint(f0)); wallet_store_le32(tag + 4, uint(f1));
+    wallet_store_le32(tag + 8, uint(f2)); wallet_store_le32(tag + 12, uint(f3));
+}
+
+static inline void wallet_poly1305_raw_mac(const device uchar* msg,
+                                           uint msg_len,
+                                           const thread uchar key[32],
+                                           thread uchar tag[16]) {
+    WalletPoly1305RawCtx ctx;
+    wallet_poly1305_raw_init(&ctx, key);
+    uint off = 0u;
+    while (msg_len - off >= 16u) {
+        wallet_poly1305_raw_block(&ctx,
+            wallet_load_le32_device(msg + off), wallet_load_le32_device(msg + off + 4u),
+            wallet_load_le32_device(msg + off + 8u), wallet_load_le32_device(msg + off + 12u),
+            1u << 24u);
+        off += 16u;
+    }
+    const uint rem = msg_len - off;
+    if (rem != 0u) {
+        uchar block[16] = {};
+        for (uint i = 0u; i < rem; ++i) block[i] = msg[off + i];
+        block[rem] = 1u;
+        wallet_poly1305_raw_block(&ctx,
+            wallet_load_le32_thread(block), wallet_load_le32_thread(block + 4),
+            wallet_load_le32_thread(block + 8), wallet_load_le32_thread(block + 12), 0u);
+    }
+    wallet_poly1305_raw_finish(&ctx, tag);
+}
+
+__attribute__((noinline)) static bool wallet_xsalsa20poly1305_secretbox_verify(const thread uchar key32[32],
+                                                           const device uchar nonce24[24],
+                                                           const device uchar tag16[16],
+                                                           const device uchar* ciphertext,
+                                                           uint ciphertext_len) {
+    if (ciphertext == nullptr || ciphertext_len == 0u ||
+        ciphertext_len > BROWSERVAULT_MAX_BLOB_LEN) {
+        return false;
+    }
+    uchar subkey[32];
+    wallet_hsalsa20(subkey, nonce24, key32);
+    uchar first_block[64];
+    wallet_salsa20_block(first_block, subkey, nonce24 + 16, 0ul);
+    uchar calc[16];
+    wallet_poly1305_raw_mac(ciphertext, ciphertext_len, first_block, calc);
+    uchar diff = 0u;
+    for (int i = 0; i < 16; ++i) {
+        diff = uchar(diff | uchar(calc[i] ^ tag16[i]));
+    }
+    return diff == 0u;
+}
+
+static inline void wallet_emit_browservault_result(device bool* isResult,
+                                                   device bool* buffResult,
+                                                   const thread uchar* pass,
+                                                   uint pass_len,
+                                                   uint target_index,
+                                                   uchar profile,
+                                                   const device uchar* vault_hash,
+                                                   device WalletModeResult* wallet_results,
+                                                   device atomic_uint* wallet_count,
+                                                   uint max_founds) {
+    if (buffResult != nullptr) {
+        buffResult[0] = true;
+    }
+    if (isResult != nullptr) {
+        isResult[0] = true;
+    }
+    if (wallet_results == nullptr || wallet_count == nullptr) {
+        return;
+    }
+    const ulong ridx = wallet_atomic_add_count(wallet_count, 1u);
+    if (ridx >= ulong(max_founds)) {
+        return;
+    }
+    device WalletModeResult& out = wallet_results[ridx];
+    wallet_zero_result(out);
+    out.mode = WALLET_MODE_BROWSERVAULT;
+    out.type = profile;
+    out.target_index = target_index;
+    const uint n = (pass_len > WALLET_MAX_PASSWORD_LEN) ? WALLET_MAX_PASSWORD_LEN : pass_len;
+    out.password_len = ushort(n);
+    for (uint i = 0u; i < n; ++i) {
+        out.password[i] = pass[i];
+    }
+    for (int i = 0; i < 32; ++i) {
+        out.payload[i] = vault_hash[i];
+    }
+    out.payload_len = 32u;
+}
+
+#endif

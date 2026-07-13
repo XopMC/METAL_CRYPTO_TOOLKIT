@@ -1,0 +1,86 @@
+#ifndef METAL_CRYPTO_ICP_FUNC_METALH
+#define METAL_CRYPTO_ICP_FUNC_METALH
+
+#include "../KernelState.metalh"
+#include "DeviceSupport.metalh"
+
+constant uchar DER_ED25519_PREFIX[] = {
+    0x30, 0x2a, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x03, 0x21, 0x00
+};
+
+constant uchar DER_SECP256K1_PREFIX[] = {
+    0x30, 0x56, 0x30, 0x10, 0x06, 0x07, 0x2a, 0x86,
+    0x48, 0xce, 0x3d, 0x02, 0x01, 0x06, 0x05, 0x2b,
+    0x81, 0x04, 0x00, 0x0a, 0x03, 0x42, 0x00, 0x04
+};
+
+constant int ICP_SHA224_LEN = 28;
+constant uchar ICP_PRINCIPAL_TYPE_SELF_AUTH = 0x02;
+
+void SHA224(const thread uchar* input, ulong input_len, thread uchar* out);
+uint crc32_ieee(const thread uchar* data, ulong len);
+
+inline void u32_to_be(uint x, thread uchar out[4]) {
+    out[0] = uchar((x >> 24u) & 0xffu);
+    out[1] = uchar((x >> 16u) & 0xffu);
+    out[2] = uchar((x >> 8u) & 0xffu);
+    out[3] = uchar(x & 0xffu);
+}
+
+inline int icp_principal_from_ed25519(const thread uchar pub_ed25519[32],
+                                      thread uchar out_principal[29]) {
+    thread uchar buf[sizeof(DER_ED25519_PREFIX) + 32];
+    for (ulong i = 0; i < sizeof(DER_ED25519_PREFIX); ++i) {
+        buf[i] = DER_ED25519_PREFIX[i];
+    }
+    device_memcpy(buf + sizeof(DER_ED25519_PREFIX), pub_ed25519, 32);
+    SHA224(buf, sizeof(buf), out_principal);
+    out_principal[ICP_SHA224_LEN] = ICP_PRINCIPAL_TYPE_SELF_AUTH;
+    return 0;
+}
+
+inline int icp_principal_from_secp256k1(const thread uchar pub_secp256k1[65],
+                                        thread uchar out_principal[29]) {
+    const thread uchar* xy64 = pub_secp256k1 + 1;
+    thread uchar buf[sizeof(DER_SECP256K1_PREFIX) + 64];
+    for (ulong i = 0; i < sizeof(DER_SECP256K1_PREFIX); ++i) {
+        buf[i] = DER_SECP256K1_PREFIX[i];
+    }
+    device_memcpy(buf + sizeof(DER_SECP256K1_PREFIX), xy64, 64);
+    SHA224(buf, sizeof(buf), out_principal);
+    out_principal[ICP_SHA224_LEN] = ICP_PRINCIPAL_TYPE_SELF_AUTH;
+    return 0;
+}
+
+inline int icp_account_identifier(const thread uchar principal29[29],
+                                  const thread uchar* subaccount32,
+                                  thread uchar out_ai32[32]) {
+    const uchar DOMAIN_TAG_LEN = 0x0a;
+    const char DOMAIN_TAG_STR[] = "account-id";
+    thread uchar zero_sub[32];
+    const thread uchar* effective_subaccount = subaccount32;
+    if (effective_subaccount == nullptr) {
+        device_memset(zero_sub, 0, sizeof(zero_sub));
+        effective_subaccount = zero_sub;
+    }
+
+    thread uchar blob[1 + sizeof(DOMAIN_TAG_STR) - 1 + 29 + 32];
+    ulong off = 0;
+    blob[off++] = DOMAIN_TAG_LEN;
+    for (ulong i = 0; i < sizeof(DOMAIN_TAG_STR) - 1; ++i) {
+        blob[off++] = uchar(DOMAIN_TAG_STR[i]);
+    }
+    device_memcpy(blob + off, principal29, 29);
+    off += 29;
+    device_memcpy(blob + off, effective_subaccount, 32);
+    off += 32;
+
+    thread uchar h[28];
+    SHA224(blob, off, h);
+    const uint crc = crc32_ieee(h, ICP_SHA224_LEN);
+    u32_to_be(crc, out_ai32);
+    device_memcpy(out_ai32 + 4, h, ICP_SHA224_LEN);
+    return 0;
+}
+
+#endif

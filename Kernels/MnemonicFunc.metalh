@@ -1,0 +1,1502 @@
+#ifndef METAL_CRYPTO_MNEMONIC_FUNC_METALH
+#define METAL_CRYPTO_MNEMONIC_FUNC_METALH
+
+#include "DerivationTypes.metalh"
+#include "Words.metalh"
+
+#ifdef memcpy
+#undef memcpy
+#endif
+#ifdef memset
+#undef memset
+#endif
+
+typedef const constant char (*dict_t)[34];
+
+constant uchar mn_seed_version_key[12] = { 'S', 'e', 'e', 'd', ' ', 'v', 'e', 'r', 's', 'i', 'o', 'n' };
+constant char mn_root_seed_chain[] = { 'R', 'o', 'o', 't', ' ', 'S', 'e', 'e', 'd', ' ', 'C', 'h', 'a', 'i', 'n', ' ', 0 };
+
+static inline void mn_memcpy(thread uchar* dst, const thread uchar* src, const ulong len) {
+	for (ulong i = 0; i < len; ++i) {
+		dst[i] = src[i];
+	}
+}
+
+static inline void mn_memcpy(thread uchar* dst, const constant uchar* src, const ulong len) {
+	for (ulong i = 0; i < len; ++i) {
+		dst[i] = src[i];
+	}
+}
+
+static inline void mn_memcpy(thread uchar* dst, const device uchar* src, const ulong len) {
+	for (ulong i = 0; i < len; ++i) {
+		dst[i] = src[i];
+	}
+}
+
+static inline void mn_memcpy(thread uchar* dst, const thread uint32_t* src, const ulong len) {
+	const thread uchar* bytes = reinterpret_cast<const thread uchar*>(src);
+	for (ulong i = 0; i < len; ++i) {
+		dst[i] = bytes[i];
+	}
+}
+
+static inline void mn_memcpy(thread uchar* dst, thread uint32_t* src, const ulong len) {
+	const thread uchar* bytes = reinterpret_cast<const thread uchar*>(src);
+	for (ulong i = 0; i < len; ++i) {
+		dst[i] = bytes[i];
+	}
+}
+
+static inline void mn_memcpy(thread uchar* dst, const thread char* src, const ulong len) {
+	for (ulong i = 0; i < len; ++i) {
+		dst[i] = static_cast<uchar>(src[i]);
+	}
+}
+
+static inline void mn_memcpy(thread char* dst, const constant char* src, const ulong len) {
+	for (ulong i = 0; i < len; ++i) {
+		dst[i] = src[i];
+	}
+}
+
+static inline void mn_memcpy(thread uchar* dst, const constant char* src, const ulong len) {
+	for (ulong i = 0; i < len; ++i) {
+		dst[i] = static_cast<uchar>(src[i]);
+	}
+}
+
+static inline void mn_memset(thread uchar* dst, const uchar value, const ulong len) {
+	for (ulong i = 0; i < len; ++i) {
+		dst[i] = value;
+	}
+}
+
+#define memcpy(DST, SRC, LEN) mn_memcpy(reinterpret_cast<thread uchar*>(DST), SRC, ulong(LEN))
+#define memset(DST, VALUE, LEN) mn_memset(reinterpret_cast<thread uchar*>(DST), uchar(VALUE), ulong(LEN))
+
+REC_DEVICE
+void hardened_private_child_from_private(const thread extended_private_key_t* parent, thread extended_private_key_t* child, uint32_t hardened_child_number) {
+
+	uint32_t hmacsha512_result[16];
+	uint8_t hmac_input[40];
+	hmac_input[0] = 0;
+	memcpy(&hmac_input[1], parent->key, 32);
+	hmac_input[33] = (hardened_child_number >> 24) & 0xFF;
+	hmac_input[34] = (hardened_child_number >> 16) & 0xFF;
+	hmac_input[35] = (hardened_child_number >> 8) & 0xFF;
+	hmac_input[36] = hardened_child_number & 0xFF;
+	hmac_sha512_const((thread uint32_t*)parent->chain_code, (thread uint32_t*)&hmac_input, hmacsha512_result);
+	secp256k1_ec_seckey_tweak_add((thread uint8_t*)hmacsha512_result, (const thread uint8_t*)parent->key);
+	memcpy(child->key, hmacsha512_result, 32);
+	memcpy(child->chain_code, &hmacsha512_result[8], 32);
+}
+
+REC_DEVICE
+void hardened_private_child_from_private_precomp(const thread extended_private_key_t* parent, thread extended_private_key_t* child, uint32_t hardened_child_number, const thread hmac_sha512_precomp_t* hctx) {
+	uint8_t hmacsha512_result[64];
+	uint8_t hmac_input[40];
+	hmac_input[0] = 0;
+	memcpy(&hmac_input[1], parent->key, 32);
+	hmac_input[33] = (hardened_child_number >> 24) & 0xFF;
+	hmac_input[34] = (hardened_child_number >> 16) & 0xFF;
+	hmac_input[35] = (hardened_child_number >> 8) & 0xFF;
+	hmac_input[36] = hardened_child_number & 0xFF;
+	hmac_sha512_const_precomp(hctx, (const thread uint32_t*)hmac_input, (thread uint32_t*)hmacsha512_result);
+	secp256k1_ec_seckey_tweak_add(hmacsha512_result, (const thread uint8_t*)parent->key);
+	memcpy(child->key, hmacsha512_result, 32);
+	memcpy(child->chain_code, hmacsha512_result + 32, 32);
+}
+
+REC_DEVICE
+void normal_private_child_from_private(const constant secp256k1_ge_storage*  precPtr, const size_t precPitch, const thread extended_private_key_t* parent, thread extended_private_key_t* child, uint32_t normal_child_number) {
+	uint32_t hmacsha512_result[16];
+	extended_public_key_t pub;
+	secp256k1_ec_pubkey_create((thread secp256k1_pubkey*)&pub.key, parent->key, precPtr, precPitch);
+
+	uint8_t hmac_input[40];
+	serialized_public_key((thread uint8_t*)&pub.key, (thread uint8_t*)&hmac_input);
+	hmac_input[33] = (normal_child_number >> 24) & 0xFF;
+	hmac_input[34] = (normal_child_number >> 16) & 0xFF;
+	hmac_input[35] = (normal_child_number >> 8) & 0xFF;
+	hmac_input[36] = normal_child_number & 0xFF;
+
+	hmac_sha512_const((thread uint32_t*)parent->chain_code, (thread uint32_t*)&hmac_input, hmacsha512_result);
+	secp256k1_ec_seckey_tweak_add((thread uint8_t*)hmacsha512_result, (const thread uint8_t*)parent->key);
+	memcpy(child->key, hmacsha512_result, 32);
+	memcpy(child->chain_code, &hmacsha512_result[8], 32);
+}
+
+REC_DEVICE
+void normal_private_child_from_private_cached_pub(const thread extended_private_key_t* parent, thread extended_private_key_t* child, uint32_t normal_child_number, const thread uint8_t* cached_serialized_pub) {
+	uint32_t hmacsha512_result[16];
+	uint8_t hmac_input[40];
+	memcpy(hmac_input, cached_serialized_pub, 33);
+	hmac_input[33] = (normal_child_number >> 24) & 0xFF;
+	hmac_input[34] = (normal_child_number >> 16) & 0xFF;
+	hmac_input[35] = (normal_child_number >> 8) & 0xFF;
+	hmac_input[36] = normal_child_number & 0xFF;
+	hmac_sha512_const((thread uint32_t*)parent->chain_code, (thread uint32_t*)&hmac_input, hmacsha512_result);
+	secp256k1_ec_seckey_tweak_add((thread uint8_t*)hmacsha512_result, (const thread uint8_t*)parent->key);
+	memcpy(child->key, hmacsha512_result, 32);
+	memcpy(child->chain_code, &hmacsha512_result[8], 32);
+}
+
+REC_DEVICE
+void normal_private_child_from_private_cached_pub_precomp(const thread extended_private_key_t* parent, thread extended_private_key_t* child, uint32_t normal_child_number, const thread uint8_t* cached_serialized_pub, const thread hmac_sha512_precomp_t* hctx) {
+	uint8_t hmacsha512_result[64];
+	uint8_t hmac_input[40];
+	memcpy(hmac_input, cached_serialized_pub, 33);
+	hmac_input[33] = (normal_child_number >> 24) & 0xFF;
+	hmac_input[34] = (normal_child_number >> 16) & 0xFF;
+	hmac_input[35] = (normal_child_number >> 8) & 0xFF;
+	hmac_input[36] = normal_child_number & 0xFF;
+	hmac_sha512_const_precomp(hctx, (const thread uint32_t*)hmac_input, (thread uint32_t*)hmacsha512_result);
+	secp256k1_ec_seckey_tweak_add(hmacsha512_result, (const thread uint8_t*)parent->key);
+	memcpy(child->key, hmacsha512_result, 32);
+	memcpy(child->chain_code, hmacsha512_result + 32, 32);
+}
+
+REC_DEVICE
+// normal_private_child_from_private_save_pub: saves pub for normal private child from private.
+void normal_private_child_from_private_save_pub(const constant secp256k1_ge_storage*  precPtr, const size_t precPitch, const thread extended_private_key_t* parent, thread extended_private_key_t* child, uint32_t normal_child_number, thread uint8_t* out_serialized_pub) {
+	uint32_t hmacsha512_result[16];
+	extended_public_key_t pub;
+	secp256k1_ec_pubkey_create((thread secp256k1_pubkey*)&pub.key, parent->key, precPtr, precPitch);
+
+	uint8_t hmac_input[40];
+	serialized_public_key((thread uint8_t*)&pub.key, (thread uint8_t*)&hmac_input);
+	memcpy(out_serialized_pub, hmac_input, 33);
+	hmac_input[33] = (normal_child_number >> 24) & 0xFF;
+	hmac_input[34] = (normal_child_number >> 16) & 0xFF;
+	hmac_input[35] = (normal_child_number >> 8) & 0xFF;
+	hmac_input[36] = normal_child_number & 0xFF;
+
+	hmac_sha512_const((thread uint32_t*)parent->chain_code, (thread uint32_t*)&hmac_input, hmacsha512_result);
+	secp256k1_ec_seckey_tweak_add((thread uint8_t*)hmacsha512_result, (const thread uint8_t*)parent->key);
+	memcpy(child->key, hmacsha512_result, 32);
+	memcpy(child->chain_code, &hmacsha512_result[8], 32);
+}
+
+// Device helper: hardened_private_child_from_private_ed25519.
+REC_DEVICE  void hardened_private_child_from_private_ed25519(const thread extended_private_key_t* parent, thread extended_private_key_t* child, uint32_t hardened_child_number) {
+	uint8_t hmacsha512_result[64];
+	uint8_t hmac_input[40];
+	hmac_input[0] = 0;
+	memcpy(&hmac_input[1], parent->key, 32);
+
+	hmac_input[33] = (hardened_child_number >> 24) & 0xFF;
+	hmac_input[34] = (hardened_child_number >> 16) & 0xFF;
+	hmac_input[35] = (hardened_child_number >> 8) & 0xFF;
+	hmac_input[36] = hardened_child_number & 0xFF;
+	hmac_sha512_const((thread uint32_t*)parent->chain_code, (thread uint32_t*)&hmac_input, (thread uint32_t*)&hmacsha512_result);
+
+	memcpy(child->key, hmacsha512_result, 32);
+
+	memcpy(child->chain_code, hmacsha512_result + 32, 32);
+}
+
+// Device helper: hardened_private_child_from_private_ed25519_precomp.
+REC_DEVICE  void hardened_private_child_from_private_ed25519_precomp(const thread extended_private_key_t* parent, thread extended_private_key_t* child, uint32_t hardened_child_number, const thread hmac_sha512_precomp_t* hctx) {
+	uint8_t hmacsha512_result[64];
+	uint8_t hmac_input[40];
+	hmac_input[0] = 0;
+	memcpy(&hmac_input[1], parent->key, 32);
+	hmac_input[33] = (hardened_child_number >> 24) & 0xFF;
+	hmac_input[34] = (hardened_child_number >> 16) & 0xFF;
+	hmac_input[35] = (hardened_child_number >> 8) & 0xFF;
+	hmac_input[36] = hardened_child_number & 0xFF;
+	hmac_sha512_const_precomp(hctx, (const thread uint32_t*)hmac_input, (thread uint32_t*)hmacsha512_result);
+	memcpy(child->key, hmacsha512_result, 32);
+	memcpy(child->chain_code, hmacsha512_result + 32, 32);
+}
+
+REC_DEVICE void ed25519_bip32_ckd_priv_hardened(const thread extended_private_key_t* parent,
+	thread extended_private_key_t* child,
+	uint32_t i_hardened)
+{
+	uint8_t in[1 + 32 + 4];
+	uint8_t out64[64];
+
+	in[0] = 0x00;
+	memcpy(in + 1, parent->key, 32);
+	in[33] = (uint8_t)(i_hardened >> 24);
+	in[34] = (uint8_t)(i_hardened >> 16);
+	in[35] = (uint8_t)(i_hardened >> 8);
+	in[36] = (uint8_t)(i_hardened);
+
+	hmac_sha512_const((const thread uint32_t*)parent->chain_code,
+		(const thread uint32_t*)in,
+		(thread uint32_t*)out64);
+
+	memcpy(child->key, out64, 32);  // IL
+	memcpy(child->chain_code, out64 + 32, 32);  // IR
+}
+
+REC_DEVICE void ed25519_bip32_ckd_priv_normal(const thread extended_private_key_t* parent,
+	thread extended_private_key_t* child,
+	uint32_t i_normal)
+{
+	uint8_t A_par[32];
+	ed25519_publickey(parent->key, A_par);
+
+	uint8_t inZ[1 + 32 + 4];
+	uint8_t Z64[64];
+	inZ[0] = 0x02;
+	memcpy(inZ + 1, A_par, 32);
+	inZ[33] = (uint8_t)(i_normal >> 24);
+	inZ[34] = (uint8_t)(i_normal >> 16);
+	inZ[35] = (uint8_t)(i_normal >> 8);
+	inZ[36] = (uint8_t)(i_normal);
+
+	hmac_sha512_const((const thread uint32_t*)parent->chain_code,
+		(const thread uint32_t*)inZ,
+		(thread uint32_t*)Z64);
+
+	uint8_t inI2[1 + 32 + 4];
+	uint8_t I2[64];
+	inI2[0] = 0x03;
+	memcpy(inI2 + 1, A_par, 32);
+	memcpy(inI2 + 33, inZ + 33, 4);
+
+	hmac_sha512_const((const thread uint32_t*)parent->chain_code,
+		(const thread uint32_t*)inI2,
+		(thread uint32_t*)I2);
+
+	add_modL_from_bytes(child->key, parent->key, Z64 /* IL */);
+
+	memcpy(child->chain_code, I2 + 32, 32);
+}
+
+REC_DEVICE REC_FORCEINLINE void cardano_write_index_le(uint8_t out[4], uint32_t index) {
+	out[0] = (uint8_t)(index);
+	out[1] = (uint8_t)(index >> 8);
+	out[2] = (uint8_t)(index >> 16);
+	out[3] = (uint8_t)(index >> 24);
+}
+
+REC_DEVICE REC_FORCEINLINE void cardano_write_index_be(uint8_t out[4], uint32_t index) {
+	out[0] = (uint8_t)(index >> 24);
+	out[1] = (uint8_t)(index >> 16);
+	out[2] = (uint8_t)(index >> 8);
+	out[3] = (uint8_t)(index);
+}
+
+REC_DEVICE REC_FORCEINLINE uint8_t cardano_ed25519_order_l_byte(uint32_t i) {
+	const uint8_t l[32] = {
+		0xed, 0xd3, 0xf5, 0x5c, 0x1a, 0x63, 0x12, 0x58,
+		0xd6, 0x9c, 0xf7, 0xa2, 0xde, 0xf9, 0xde, 0x14,
+		0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+		0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10
+	};
+	return l[i];
+}
+
+REC_DEVICE REC_FORCEINLINE bool cardano_ge_l_33(const uint8_t a[33]) {
+	if (a[32] != 0) return true;
+	for (int i = 31; i >= 0; --i) {
+		uint8_t lb = cardano_ed25519_order_l_byte((uint32_t)i);
+		if (a[i] > lb) return true;
+		if (a[i] < lb) return false;
+	}
+	return true;
+}
+
+REC_DEVICE REC_FORCEINLINE void cardano_sub_l_33(uint8_t a[33]) {
+	uint16_t borrow = 0;
+	for (uint32_t i = 0; i < 32; ++i) {
+		uint16_t lb = (uint16_t)cardano_ed25519_order_l_byte(i) + borrow;
+		if ((uint16_t)a[i] >= lb) {
+			a[i] = (uint8_t)((uint16_t)a[i] - lb);
+			borrow = 0;
+		}
+		else {
+			a[i] = (uint8_t)((uint16_t)a[i] + 256u - lb);
+			borrow = 1;
+		}
+	}
+	if (borrow != 0 && a[32] != 0) {
+		a[32]--;
+	}
+}
+
+REC_DEVICE REC_FORCEINLINE void cardano_reduce_l_33(uint8_t a[33]) {
+	for (uint32_t i = 0; i < 32 && cardano_ge_l_33(a); ++i) {
+		cardano_sub_l_33(a);
+	}
+}
+
+REC_DEVICE REC_FORCEINLINE void cardano_add_256_le(uint8_t out[32], const uint8_t a[32], const uint8_t b[32]) {
+	uint16_t carry = 0;
+	for (uint32_t i = 0; i < 32; ++i) {
+		uint16_t v = (uint16_t)a[i] + (uint16_t)b[i] + carry;
+		out[i] = (uint8_t)v;
+		carry = (uint16_t)(v >> 8);
+	}
+}
+
+REC_DEVICE REC_FORCEINLINE void cardano_add_no_carry_32(uint8_t out[32], const uint8_t a[32], const uint8_t b[32]) {
+	for (uint32_t i = 0; i < 32; ++i) {
+		out[i] = (uint8_t)(a[i] + b[i]);
+	}
+}
+
+REC_DEVICE REC_FORCEINLINE void cardano_add_8mul_zl_le(uint8_t out[32], const uint8_t kl[32], const uint8_t zl[32]) {
+	uint16_t carry = 0;
+	for (uint32_t i = 0; i < 32; ++i) {
+		uint16_t shifted = 0;
+		if (i < 28) {
+			shifted |= (uint16_t)((zl[i] << 3) & 0xffu);
+		}
+		if (i > 0 && (i - 1) < 28) {
+			shifted |= (uint16_t)(zl[i - 1] >> 5);
+		}
+		uint16_t v = (uint16_t)kl[i] + shifted + carry;
+		out[i] = (uint8_t)v;
+		carry = (uint16_t)(v >> 8);
+	}
+}
+
+REC_DEVICE REC_FORCEINLINE void cardano_byron_legacy_add_8mul_zl_mod_l(uint8_t out[32], const uint8_t kl[32], const uint8_t zl[32]) {
+	uint8_t sum[33] = { 0 };
+	uint16_t carry = 0;
+	for (uint32_t i = 0; i < 32; ++i) {
+		uint8_t zl8 = (uint8_t)(zl[i] * 8u);
+		uint16_t v = (uint16_t)kl[i] + (uint16_t)zl8 + carry;
+		sum[i] = (uint8_t)v;
+		carry = (uint16_t)(v >> 8);
+	}
+	sum[32] = (uint8_t)carry;
+	cardano_reduce_l_33(sum);
+	memcpy(out, sum, 32);
+}
+
+REC_DEVICE REC_FORCEINLINE size_t cardano_cbor_bytes(const thread uint8_t* data, size_t len, thread uint8_t* out) {
+	size_t off = 0;
+	if (len <= 23) {
+		out[off++] = (uint8_t)(0x40u | (uint8_t)len);
+	}
+	else if (len <= 0xffu) {
+		out[off++] = 0x58u;
+		out[off++] = (uint8_t)len;
+	}
+	else {
+		out[off++] = 0x59u;
+		out[off++] = (uint8_t)(len >> 8);
+		out[off++] = (uint8_t)len;
+	}
+	memcpy(out + off, data, len);
+	return off + len;
+}
+
+REC_DEVICE void ed25519_bip32_ckd_priv_hardened(const thread cardano_extended_private_key_t* parent,
+	thread cardano_extended_private_key_t* child,
+	uint32_t i_hardened)
+{
+	uint8_t index_le[4];
+	cardano_write_index_le(index_le, i_hardened);
+
+	uint8_t msg_z[1 + 64 + 4];
+	msg_z[0] = 0x00;
+	memcpy(msg_z + 1, parent->key, 64);
+	memcpy(msg_z + 65, index_le, 4);
+	uint8_t z[64];
+	HMAC_SHA512(parent->chain_code, 32, msg_z, sizeof(msg_z), z);
+
+	uint8_t msg_cc[1 + 64 + 4];
+	msg_cc[0] = 0x01;
+	memcpy(msg_cc + 1, parent->key, 64);
+	memcpy(msg_cc + 65, index_le, 4);
+	uint8_t i2[64];
+	HMAC_SHA512(parent->chain_code, 32, msg_cc, sizeof(msg_cc), i2);
+
+	cardano_add_8mul_zl_le(child->key, parent->key, z);
+	cardano_add_256_le(child->key + 32, parent->key + 32, z + 32);
+	memcpy(child->chain_code, i2 + 32, 32);
+}
+
+REC_DEVICE void ed25519_bip32_ckd_priv_normal(const thread cardano_extended_private_key_t* parent,
+	thread cardano_extended_private_key_t* child,
+	uint32_t i_normal)
+{
+	uint8_t parent_pub[32];
+	cardano_ed25519_publickey_from_scalar(parent->key, parent_pub);
+
+	uint8_t index_le[4];
+	cardano_write_index_le(index_le, i_normal);
+
+	uint8_t msg_z[1 + 32 + 4];
+	msg_z[0] = 0x02;
+	memcpy(msg_z + 1, parent_pub, 32);
+	memcpy(msg_z + 33, index_le, 4);
+	uint8_t z[64];
+	HMAC_SHA512(parent->chain_code, 32, msg_z, sizeof(msg_z), z);
+
+	uint8_t msg_cc[1 + 32 + 4];
+	msg_cc[0] = 0x03;
+	memcpy(msg_cc + 1, parent_pub, 32);
+	memcpy(msg_cc + 33, index_le, 4);
+	uint8_t i2[64];
+	HMAC_SHA512(parent->chain_code, 32, msg_cc, sizeof(msg_cc), i2);
+
+	cardano_add_8mul_zl_le(child->key, parent->key, z);
+	cardano_add_256_le(child->key + 32, parent->key + 32, z + 32);
+	memcpy(child->chain_code, i2 + 32, 32);
+}
+
+REC_DEVICE void cardano_byron_legacy_ckd_priv_hardened(const thread cardano_extended_private_key_t* parent,
+	thread cardano_extended_private_key_t* child,
+	uint32_t i_hardened)
+{
+	uint8_t index_be[4];
+	cardano_write_index_be(index_be, i_hardened);
+
+	uint8_t msg_z[1 + 64 + 4];
+	msg_z[0] = 0x00;
+	memcpy(msg_z + 1, parent->key, 64);
+	memcpy(msg_z + 65, index_be, 4);
+	uint8_t z[64];
+	HMAC_SHA512(parent->chain_code, 32, msg_z, sizeof(msg_z), z);
+
+	uint8_t msg_cc[1 + 64 + 4];
+	msg_cc[0] = 0x01;
+	memcpy(msg_cc + 1, parent->key, 64);
+	memcpy(msg_cc + 65, index_be, 4);
+	uint8_t i2[64];
+	HMAC_SHA512(parent->chain_code, 32, msg_cc, sizeof(msg_cc), i2);
+
+	cardano_byron_legacy_add_8mul_zl_mod_l(child->key, parent->key, z);
+	cardano_add_no_carry_32(child->key + 32, parent->key + 32, z + 32);
+	memcpy(child->chain_code, i2 + 32, 32);
+}
+
+REC_DEVICE void cip3_icarus_master_xprv_from_entropy(
+	const thread uint8_t* entropy, size_t entlen,
+	const thread uint8_t* pass, size_t passlen, thread cardano_extended_private_key_t* master_private
+	)
+{
+	uint8_t out_xprv96[96];
+	fastpbkdf2_hmac_sha512(pass, passlen, entropy, entlen, 4096, out_xprv96, 96);
+
+	out_xprv96[0] &= 0xF8;
+	out_xprv96[31] &= 0x1F;
+	out_xprv96[31] |= 0x40;
+
+	memcpy(master_private->key, out_xprv96, 64);
+	memcpy(master_private->chain_code, out_xprv96 + 64, 32);
+}
+
+REC_DEVICE inline size_t cardano_mk_byron_msg(uint32_t i, thread uint8_t* out)
+{
+	const constant char* P = mn_root_seed_chain;
+	size_t off = 0;
+	for (const constant char* q = P; *q; ++q) out[off++] = (uint8_t)*q;
+
+	char tmp[11];
+	int n = 0;
+	if (i == 0) { tmp[n++] = '0'; }
+	else {
+		char rev[11]; int r = 0;
+		while (i) { rev[r++] = (char)('0' + (i % 10)); i /= 10; }
+		while (r--) tmp[n++] = rev[r];
+	}
+	for (int k = 0; k < n; ++k) out[off++] = (uint8_t)tmp[k];
+	return off;
+}
+
+REC_DEVICE void cip3_byron_master_xprv_from_entropy(
+	const thread uint8_t* entropy, size_t entlen,
+	thread cardano_extended_private_key_t* master_private)
+{
+	uint8_t entropy_cbor[40];
+	size_t entropy_cbor_len = cardano_cbor_bytes(entropy, entlen, entropy_cbor);
+	uint8_t byron_seed[32];
+	Blake2b_256(entropy_cbor, entropy_cbor_len, byron_seed);
+
+	uint8_t byron_seed_cbor[40];
+	size_t byron_seed_cbor_len = cardano_cbor_bytes(byron_seed, 32, byron_seed_cbor);
+
+	uint32_t i = 1;
+	for (;; ++i) {
+		uint8_t msg[32];
+		size_t mlen = cardano_mk_byron_msg(i, msg);
+
+		uint8_t h[64];
+		HMAC_SHA512(byron_seed_cbor, byron_seed_cbor_len, msg, mlen, h);
+
+		uint8_t prv64[64];
+		SHA512(h, 32, prv64);
+
+		prv64[0] &= 0xF8;
+		prv64[31] &= 0x1F;
+		prv64[31] |= 0x40;
+
+		if ((prv64[31] & 0x20) != 0) continue;
+
+		memcpy(master_private->key, prv64, 64);
+		memcpy(master_private->chain_code, h + 32, 32);
+		break;
+	}
+}
+
+REC_DEVICE void cardano_byron_legacy_master_xprv_from_entropy(
+	const thread uint8_t* entropy, size_t entlen,
+	thread cardano_extended_private_key_t* master_private)
+{
+	uint8_t entropy_cbor[40];
+	size_t entropy_cbor_len = cardano_cbor_bytes(entropy, entlen, entropy_cbor);
+	uint8_t byron_seed[32];
+	Blake2b_256(entropy_cbor, entropy_cbor_len, byron_seed);
+
+	uint8_t byron_seed_cbor[40];
+	size_t byron_seed_cbor_len = cardano_cbor_bytes(byron_seed, 32, byron_seed_cbor);
+
+	uint32_t i = 1;
+	for (;; ++i) {
+		uint8_t msg[32];
+		size_t mlen = cardano_mk_byron_msg(i, msg);
+
+		uint8_t h[64];
+		HMAC_SHA512(byron_seed_cbor, byron_seed_cbor_len, msg, mlen, h);
+
+		uint8_t prv64[64];
+		SHA512(h, 32, prv64);
+
+		prv64[0] &= 0xF8;
+		prv64[31] &= 0x7F;
+		prv64[31] |= 0x40;
+
+		if ((prv64[31] & 0x20) != 0) continue;
+
+		memcpy(master_private->key, prv64, 64);
+		memcpy(master_private->chain_code, h + 32, 32);
+		break;
+	}
+}
+
+REC_DEVICE void cardano_kholaw_master_xprv_from_seed(
+	const thread uint8_t* seed, size_t seed_len,
+	thread cardano_extended_private_key_t* master_private)
+{
+	uint8_t prv64[64];
+	HMAC_SHA512(ed_key, 12, seed, seed_len, prv64);
+	for (uint32_t i = 0; i < 64 && (prv64[31] & 0x20u) != 0u; ++i) {
+		uint8_t next64[64];
+		HMAC_SHA512(ed_key, 12, prv64, 64, next64);
+		memcpy(prv64, next64, 64);
+	}
+
+	prv64[0] &= 0xf8u;
+	prv64[31] &= 0x7fu;
+	prv64[31] |= 0x40u;
+	memcpy(master_private->key, prv64, 64);
+
+	uint8_t chain_msg[96];
+	chain_msg[0] = 0x01u;
+	memcpy(chain_msg + 1, seed, seed_len);
+	uint8_t ed_key_thread[12];
+	memcpy(ed_key_thread, ed_key, 12);
+	hmac_sha256(ed_key_thread, 12, chain_msg, seed_len + 1, master_private->chain_code);
+}
+
+REC_DEVICE REC_FORCEINLINE char mnemonic_word_char_at(int dict_lang, const device char* dict_words, size_t word_index, size_t char_index) {
+	if (dict_words != nullptr) {
+		return dict_words[word_index * size_t(kMnemonicWordStride) + char_index];
+	}
+	switch (dict_lang) {
+	default:
+	case 0: return wordsEN[word_index][char_index];
+	case 1: return wordsSP[word_index][char_index];
+	case 2: return wordsJA[word_index][char_index];
+	case 3: return wordsIT[word_index][char_index];
+	case 4: return wordsFR[word_index][char_index];
+	case 5: return wordsCZ[word_index][char_index];
+	case 6: return wordsPO[word_index][char_index];
+	case 7: return wordsKO[word_index][char_index];
+	case 8: return wordsCHS[word_index][char_index];
+	case 9: return wordsCHT[word_index][char_index];
+	}
+}
+
+// Device helper: char.
+REC_DEVICE REC_NOINLINE  void GenerateMnemonic(const thread char*   entropy, size_t entropy_size, thread char*   mnemonic_phrase, int dict_lang, const device char* dict_words, thread size_t& mnemo_len, const uint old_electrum) {
+
+	if (old_electrum == 0u) {
+		size_t checksum_size_bits = entropy_size * 8 / 32;
+		size_t total_bits = entropy_size * 8 + checksum_size_bits;
+		size_t word_count = total_bits / 11;
+
+		uint8_t hash[32];
+		sha256_d((thread uint32_t*)entropy, entropy_size, (thread uint32_t*)hash);
+		size_t bit_offset = 0;
+		size_t offset = 0;
+
+		for (size_t i = 0; i < word_count; ++i) {
+			size_t index = 0;
+
+#pragma unroll 11
+			for (size_t j = 0; j < 11; ++j) {
+				size_t byte_pos = bit_offset / 8;
+				size_t bit_pos = 7 - (bit_offset % 8);
+
+				uint8_t current_byte = (byte_pos < entropy_size) ? entropy[byte_pos] : hash[byte_pos - entropy_size];
+				if (current_byte & (1 << bit_pos)) {
+					index |= 1 << (10 - j);
+				}
+				++bit_offset;
+			}
+
+
+			size_t word_length = 0;
+
+
+			while (mnemonic_word_char_at(dict_lang, dict_words, index, word_length) != '\0') {
+				++word_length;
+			}
+
+			for (size_t k = 0; k < word_length; ++k) {
+				mnemonic_phrase[offset + k] = mnemonic_word_char_at(dict_lang, dict_words, index, k);
+			}
+			offset += word_length;
+
+
+			if (i < word_count - 1) {
+				mnemonic_phrase[offset++] = ' ';
+			}
+		}
+
+		mnemo_len = offset;
+	}
+
+}
+
+REC_DEVICE REC_NOINLINE
+void GenerateMnemonicElectrumV2_Standart(
+	const thread char*  entropy,
+	size_t                         entropy_size,
+	thread char*  mnemonic_phrase,
+	dict_t words,
+	thread size_t& mnemo_len,
+	const uint electrum_segwit)
+{
+	// Electrum-v2 default is SegWit prefix "100" (hex) → 0x100, 12 bits
+	uint32_t PREFIX_VALUE;// = 0x100;
+	int      PREFIX_BITS;// = 12;
+
+	if (electrum_segwit != 0u)
+	{
+		PREFIX_VALUE = 0x100;
+		PREFIX_BITS = 12;
+	}
+	else
+	{
+		PREFIX_VALUE = 0x01;
+		PREFIX_BITS = 8;
+
+	}
+
+	const int      BITS_PER_WORD = 11;
+
+	// total bits and word count (e.g. 17 bytes→136 bits→12 words)
+	size_t total_bits = entropy_size * 8;
+	size_t word_count = (total_bits + BITS_PER_WORD - 1) / BITS_PER_WORD;
+
+	// temporary buffers
+	uint8_t candidate[256];    // must be >= entropy_size
+	uint8_t hmac[64];
+		uint64_t nonce = 0;
+	while (true) {
+		// 1) copy base entropy
+		size_t candidate_bytes = (word_count * BITS_PER_WORD + 7) >> 3;
+		for (size_t i = 0; i < candidate_bytes; ++i) {
+			candidate[i] = 0;
+
+		}
+		memcpy(candidate, entropy, entropy_size);
+
+
+
+		// 2) add nonce to the low bytes (big-endian arithmetic)
+		{
+			uint64_t n = nonce;
+			for (size_t i = entropy_size; n > 0 && i > 0; ) {
+				--i;
+				uint16_t sum = candidate[i] + (n & 0xFFu);
+				candidate[i] = (uint8_t)sum;
+				n = (n >> 8) + (sum >> 8);
+			}
+		}
+
+		// 3) build mnemonic by reading 11-bit groups
+		size_t bit_offset = 0;
+		size_t out_off = 0;
+		for (size_t w = 0; w < word_count; ++w) {
+			uint32_t index = 0;
+#pragma unroll 11
+			for (int b = 0; b < BITS_PER_WORD; ++b) {
+				size_t byte_pos = bit_offset >> 3;
+				size_t bit_pos = 7 - (bit_offset & 7);
+				if (candidate[byte_pos] & (1u << bit_pos)) {
+					index |= 1u << (BITS_PER_WORD - 1 - b);
+				}
+				++bit_offset;
+			}
+			// copy word[index] to output
+			const constant char* wstr = words[index];
+			for (size_t c = 0; wstr[c] != '\0'; ++c) {
+				mnemonic_phrase[out_off++] = wstr[c];
+			}
+			if (w + 1 < word_count) {
+				mnemonic_phrase[out_off++] = ' ';
+			}
+		}
+
+		// 4) compute HMAC-SHA512("Seed version", mnemonic_phrase)
+				HMAC_SHA512_SEED_VERSION((const thread uint8_t*)mnemonic_phrase, out_off, hmac);
+
+		// 5) check the first PREFIX_BITS bits of hmac against PREFIX_VALUE
+		uint32_t acc = 0;
+		int      got_bits = 0;
+		for (int i = 0; got_bits < PREFIX_BITS; ++i) {
+			acc = (acc << 8) | hmac[i];
+			got_bits += 8;
+		}
+		int shift = got_bits - PREFIX_BITS;
+		uint32_t mask = (1u << PREFIX_BITS) - 1;
+		if (((acc >> shift) & mask) == PREFIX_VALUE) {
+			// found valid seed
+			mnemo_len = out_off;
+			return;
+		}
+
+		// else try next nonce
+		++nonce;
+	}
+}
+
+REC_DEVICE REC_FORCEINLINE void mn_add_nonce_be(thread uint8_t* a, size_t len, uint32_t nonce) {
+	size_t i = len;
+	uint32_t carry = nonce;
+	while (i && carry) {
+		--i;
+		uint32_t v = (uint32_t)a[i] + (carry & 0xFFu);
+		a[i] = (uint8_t)v;
+		carry = (carry >> 8) + (v >> 8);
+	}
+}
+
+REC_DEVICE REC_FORCEINLINE size_t mn_bit_length_be(const thread uint8_t* a, size_t len) {
+	size_t i = 0;
+	while (i < len && a[i] == 0) ++i;
+	if (i == len) return 0;
+	uint8_t b = a[i];
+	int lead = 0;
+	for (int k = 7; k >= 0; --k) {
+		if (b & (1u << k)) { lead = k + 1; break; }
+	}
+	size_t rest = len - i - 1u;
+	return rest * 8u + (size_t)lead;
+}
+
+REC_DEVICE REC_FORCEINLINE bool mn_is_zero_be(const thread uint8_t* a, size_t len) {
+	for (size_t i = 0; i < len; ++i) {
+		if (a[i] != 0) return false;
+	}
+	return true;
+}
+
+REC_DEVICE REC_FORCEINLINE uint16_t mn_read11_lsb(const thread uint8_t* a, size_t len, size_t bit_off) {
+	uint32_t v = 0;
+	for (int i = 0; i < 11; ++i) {
+		size_t pos = bit_off + (size_t)i;
+		size_t byte_ix_from_lsb = pos >> 3;
+		if (byte_ix_from_lsb >= len) break;
+		size_t byte_ix = len - 1u - byte_ix_from_lsb;
+		uint8_t b = a[byte_ix];
+		int bit_in = (int)(pos & 7u);
+		uint32_t bit = (b >> bit_in) & 1u;
+		v |= (bit << i);
+	}
+	return (uint16_t)v;
+}
+
+REC_DEVICE REC_NOINLINE
+void GenerateMnemonicElectrumV2_128(
+	const thread uint8_t*  entropy,
+	size_t                      entropy_size,
+	thread char*           mnemonic_phrase,
+	dict_t words,
+	thread size_t& mnemo_len,
+	const uint electrum_segwit
+)
+{
+	mnemo_len = 0;
+
+	const int BITS_PER_WORD = 11;
+	const uint32_t PREFIX_VALUE = electrum_segwit != 0u ? 0x100u : 0x01u;  // segwit: '100', legacy: '01'
+	const int PREFIX_BITS = electrum_segwit != 0u ? 12 : 8;
+	const int DICT_SIZE = 2048;
+
+	const size_t bits_e = entropy_size * 8u;
+	if (bits_e == 0) return;
+	const int MAX_BYTES = 256;
+	const int MAX_WORDS_LOCAL = ((MAX_BYTES * 8) + BITS_PER_WORD - 1) / BITS_PER_WORD;
+
+	if (entropy_size > (size_t)MAX_BYTES) return;
+
+	uint8_t  num[MAX_BYTES];
+	uint8_t  hmac[64];
+	uint16_t idx[MAX_WORDS_LOCAL];
+
+	uint32_t nonce = 0;
+
+	for (;;) {
+		for (size_t i = 0; i < entropy_size; ++i)
+			num[i] = entropy[i];
+
+		mn_add_nonce_be(num, entropy_size, nonce);
+
+		if (mn_is_zero_be(num, entropy_size)) {
+			idx[0] = 0;
+			size_t word_count = 1;
+
+			size_t out_off = 0;
+			for (size_t w = 0; w < word_count; ++w) {
+				const constant char* ws = words[idx[w]];
+				for (; *ws; ++ws)
+					mnemonic_phrase[out_off++] = *ws;
+				if (w + 1u < word_count)
+					mnemonic_phrase[out_off++] = ' ';
+			}
+
+				HMAC_SHA512_SEED_VERSION((const thread uint8_t*)mnemonic_phrase, out_off, hmac);
+
+			uint32_t acc = 0; int got = 0;
+			for (int i = 0; got < PREFIX_BITS; ++i) {
+				acc = (acc << 8) | hmac[i];
+				got += 8;
+			}
+			int      shift = got - PREFIX_BITS;
+			uint32_t mask = (PREFIX_BITS == 32) ? 0xFFFFFFFFu : ((1u << PREFIX_BITS) - 1u);
+
+			if (((acc >> shift) & mask) == PREFIX_VALUE) {
+				mnemo_len = out_off;
+				return;
+			}
+		}
+		else {
+			size_t bit_len = mn_bit_length_be(num, entropy_size);
+			size_t word_count = (bit_len + BITS_PER_WORD - 1u) / BITS_PER_WORD;
+			if (word_count == 0 || word_count > (size_t)MAX_WORDS_LOCAL)
+				return;
+
+			for (size_t w = 0; w < word_count; ++w) {
+				uint16_t v = mn_read11_lsb(num, entropy_size, w * BITS_PER_WORD);
+				if (v >= (uint16_t)DICT_SIZE) return;
+				idx[w] = v;
+			}
+
+			size_t out_off = 0;
+			for (size_t w = 0; w < word_count; ++w) {
+				const constant char* ws = words[idx[w]];
+				for (; *ws; ++ws)
+					mnemonic_phrase[out_off++] = *ws;
+				if (w + 1u < word_count)
+					mnemonic_phrase[out_off++] = ' ';
+			}
+
+				HMAC_SHA512_SEED_VERSION((const thread uint8_t*)mnemonic_phrase, out_off, hmac);
+
+			uint32_t acc = 0; int got = 0;
+			for (int i = 0; got < PREFIX_BITS; ++i) {
+				acc = (acc << 8) | hmac[i];
+				got += 8;
+			}
+			int      shift = got - PREFIX_BITS;
+			uint32_t mask = (PREFIX_BITS == 32) ? 0xFFFFFFFFu : ((1u << PREFIX_BITS) - 1u);
+
+			if (((acc >> shift) & mask) == PREFIX_VALUE) {
+				mnemo_len = out_off;
+				return;
+			}
+		}
+
+		++nonce;
+	}
+}
+
+REC_DEVICE REC_NOINLINE
+void GenerateMnemonicElectrumV2_CakeWallet(
+	const thread uint8_t*  entropy,
+	size_t                      entropy_size,
+	thread char*           mnemonic_phrase,
+	dict_t words,
+	thread size_t& mnemo_len,
+	const uint electrum_segwit)
+{
+	mnemo_len = 0;
+	if (entropy_size != 17) return;
+
+	const int BITS_PER_WORD = 11;
+	const uint32_t PREFIX_VALUE = electrum_segwit != 0u ? 0x100u : 0x01u;
+	const int PREFIX_BITS = electrum_segwit != 0u ? 12 : 8;
+	uint8_t candidate[17];
+	uint8_t hmac[64];
+
+	for (int i = 0; i < 17; ++i) {
+		candidate[i] = entropy[i];
+	}
+	candidate[0] &= 0x0Fu; // Cake strength=132 masks 17 random bytes down to 12 Electrum words.
+
+	size_t out_off = 0;
+	for (int w = 0; w < 12; ++w) {
+		uint32_t index = 0;
+		const int bit_start = w * BITS_PER_WORD + 4;
+#pragma unroll
+		for (int b = 0; b < BITS_PER_WORD; ++b) {
+			const int bit_pos_total = bit_start + b;
+			const int byte_pos = bit_pos_total >> 3;
+			const int bit_pos = 7 - (bit_pos_total & 7);
+			if (candidate[byte_pos] & (1u << bit_pos)) {
+				index |= 1u << (BITS_PER_WORD - 1 - b);
+			}
+		}
+		const constant char* wstr = words[index];
+		for (size_t c = 0; wstr[c] != '\0'; ++c) {
+			mnemonic_phrase[out_off++] = wstr[c];
+		}
+		if (w + 1 < 12) {
+			mnemonic_phrase[out_off++] = ' ';
+		}
+	}
+
+	HMAC_SHA512_SEED_VERSION((const thread uint8_t*)mnemonic_phrase, out_off, hmac);
+
+	uint32_t acc = 0;
+	int got_bits = 0;
+	for (int i = 0; got_bits < PREFIX_BITS; ++i) {
+		acc = (acc << 8) | hmac[i];
+		got_bits += 8;
+	}
+	const int shift = got_bits - PREFIX_BITS;
+	const uint32_t mask = (PREFIX_BITS == 32) ? 0xFFFFFFFFu : ((1u << PREFIX_BITS) - 1u);
+	if (((acc >> shift) & mask) == PREFIX_VALUE) {
+		mnemo_len = out_off;
+	}
+}
+
+
+
+REC_DEVICE REC_NOINLINE
+void GenerateMnemonicElectrumV2(
+	const thread char*  entropy,
+	size_t                 entropy_size,
+	thread char*      mnemonic_phrase,
+	dict_t words,
+	thread size_t& mnemo_len,
+	const uint electrum_segwit,
+	const uint electrum_128,
+	const uint electrum_cake_wallet
+)
+{
+
+	if (electrum_cake_wallet != 0u)
+	{
+		return GenerateMnemonicElectrumV2_CakeWallet((const thread uint8_t*)entropy, entropy_size, mnemonic_phrase, words, mnemo_len, electrum_segwit);
+	}
+
+	if (electrum_128 == 0u)
+	{
+		return GenerateMnemonicElectrumV2_Standart(entropy, entropy_size, mnemonic_phrase, words, mnemo_len, electrum_segwit);
+
+	}
+	else
+	{
+		return GenerateMnemonicElectrumV2_128((thread uint8_t*)entropy, entropy_size, mnemonic_phrase, words, mnemo_len, electrum_segwit);
+
+	}
+
+
+}
+
+constant uint8_t TAG_TAPTWEAK[32] = {
+  0xe8,0x0f,0xe1,0x63,0x9c,0x9c,0xa0,0x50,0xe3,0xaf,0x1b,0x39,0xc1,0x43,0xc6,0x3e,
+  0x42,0x9c,0xbc,0xeb,0x15,0xd9,0x40,0xfb,0xb5,0xc5,0xa1,0xf4,0xaf,0x57,0xc5,0xe9
+};
+
+// Device helper: be32.
+REC_DEVICE REC_FORCEINLINE uint32_t be32(const thread uint8_t* p) {
+	return ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) |
+		((uint32_t)p[2] << 8) | ((uint32_t)p[3]);
+}
+
+REC_DEVICE REC_FORCEINLINE uint32_t be32(const constant uint8_t* p) {
+	return ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) |
+		((uint32_t)p[2] << 8) | ((uint32_t)p[3]);
+}
+
+// Device helper: sha256_taptweak_px.
+REC_DEVICE inline void sha256_taptweak_px(const uint8_t Px[32], uint8_t out[32]) {
+	uint32_t H[8];
+	SHA256Initialize(H);
+
+	uint32_t w0[16];
+#pragma unroll
+	for (int i = 0; i < 8; i++) {
+		w0[i] = be32(&TAG_TAPTWEAK[4 * i]);
+		w0[i + 8] = be32(&TAG_TAPTWEAK[4 * i]);
+	}
+	SHA256Transform(H, w0);
+
+	uint32_t w1[16];
+#pragma unroll
+	for (int i = 0; i < 8; i++) {
+		w1[i] = be32(&Px[4 * i]);
+	}
+	w1[8] = 0x80000000U;
+#pragma unroll
+	for (int i = 9; i < 15; i++) w1[i] = 0;
+	w1[15] = 0x00000300U;
+
+	SHA256Transform(H, w1);
+
+#pragma unroll
+	for (int i = 0; i < 8; i++) {
+		out[4 * i + 0] = (uint8_t)(H[i] >> 24);
+		out[4 * i + 1] = (uint8_t)(H[i] >> 16);
+		out[4 * i + 2] = (uint8_t)(H[i] >> 8);
+		out[4 * i + 3] = (uint8_t)(H[i]);
+	}
+}
+
+REC_DEVICE size_t TweakTaproot_batch(
+	thread uint8_t*  out,
+	const thread uint8_t*  pub_uncomp,
+	const int count,
+	const constant secp256k1_ge_storage*  precPtr,
+	const size_t precPitch
+) {
+	secp256k1_scratch scr;
+	int produced = 0;
+
+#pragma unroll
+	for (int i = 0; i < count; ++i) {
+		const thread uint8_t* p = &pub_uncomp[i * 65];
+		if (p[0] != 0x04) {
+			scr.gej[i].infinity = 1;
+			continue;
+		}
+
+		secp256k1_fe x, y;
+		(void)secp256k1_fe_set_b32(&x, p + 1);
+		(void)secp256k1_fe_set_b32(&y, p + 33);
+		secp256k1_ge P;
+		secp256k1_ge_set_xy(&P, &x, &y);
+
+		secp256k1_fe_normalize_var(&P.y);
+		if (secp256k1_fe_is_odd(&P.y)) {
+			secp256k1_ge Pneg = P;
+			secp256k1_fe_negate(&Pneg.y, &Pneg.y, 1);
+			P = Pneg;
+		}
+
+		uint8_t Px[32], h[32];
+		secp256k1_fe_normalize_var(&P.x);
+		secp256k1_fe_get_b32(Px, &P.x);
+
+		sha256_taptweak_px(Px, h);
+
+		secp256k1_scalar t;
+		secp256k1_scalar_set_b32(&t, h, NULL);
+
+		secp256k1_gej tG;
+#ifdef ECMULT_BIG_TABLE
+		int windowLimit = WINDOWS_SIZE_CONST[0];
+		unsigned int wlimit = ECMULT_WINDOW_SIZE_CONST[0];
+		secp256k1_ecmult_big(&tG, &t, precPtr, precPitch, windowLimit, wlimit);
+#else
+		secp256k1_ecmult_gen(&tG, &t);
+#endif
+
+		secp256k1_gej_add_ge_var(&scr.gej[i], &tG, &P, NULL);
+
+		if (!scr.gej[i].infinity) {
+			scr.fe_in[produced] = scr.gej[i].z;
+			produced++;
+		}
+	}
+
+	if (produced > 0) {
+		secp256k1_fe_inv_all_var(produced, scr.fe_out, scr.fe_in);
+	}
+
+	int used = 0;
+#pragma unroll
+	for (int i = 0; i < count; ++i) {
+		thread uint8_t* xo = &out[i * 32];
+
+		if (scr.gej[i].infinity) {
+#pragma unroll
+			for (int k = 0; k < 32; k++) xo[k] = 0;
+			continue;
+		}
+
+		secp256k1_ge A;
+		secp256k1_ge_set_gej_zinv(&A, &scr.gej[i], &scr.fe_out[used++]);
+
+		secp256k1_fe_normalize_var(&A.y);
+		if (secp256k1_fe_is_odd(&A.y)) {
+			secp256k1_ge_neg(&A, &A);
+		}
+
+		secp256k1_fe_normalize_var(&A.x);
+		secp256k1_fe_get_b32(xo, &A.x);
+	}
+
+	return (size_t)produced;
+}
+
+REC_DEVICE void TweakTaproot_ge(
+	thread uint8_t*  out,
+	const thread secp256k1_ge*  pub_ge,
+	const constant secp256k1_ge_storage*  precPtr,
+	const size_t precPitch
+) {
+	if (pub_ge->infinity != 0) {
+		return;
+	}
+
+	REC_ALIGN(16) secp256k1_scratch3 scr;
+	int produced = 0;
+
+	REC_ALIGN(16) secp256k1_ge P = *pub_ge;
+	secp256k1_fe_normalize_var(&P.y);
+	if (secp256k1_fe_is_odd(&P.y)) {
+		secp256k1_ge Pneg = P;
+		secp256k1_fe_negate(&Pneg.y, &Pneg.y, 1);
+		P = Pneg;
+	}
+
+	REC_ALIGN(16) uint8_t Px[32], h[32];
+	secp256k1_fe_normalize_var(&P.x);
+	secp256k1_fe_get_b32(Px, &P.x);
+
+	sha256_taptweak_px(Px, h);
+
+	REC_ALIGN(16) secp256k1_scalar t;
+	secp256k1_scalar_set_b32(&t, h, NULL);
+
+	REC_ALIGN(16) secp256k1_gej tG;
+#ifdef ECMULT_BIG_TABLE
+	int windowLimit = WINDOWS_SIZE_CONST[0];
+	unsigned int wlimit = ECMULT_WINDOW_SIZE_CONST[0];
+	secp256k1_ecmult_big(&tG, &t, precPtr, precPitch, windowLimit, wlimit);
+#else
+	secp256k1_ecmult_gen(&tG, &t);
+#endif
+
+	secp256k1_gej_add_ge_var(&scr.gej, &tG, &P, NULL);
+
+	if (!scr.gej.infinity) {
+		scr.fe_in = scr.gej.z;
+		produced++;
+	}
+
+	if (produced > 0) {
+		secp256k1_fe_inv_all_var(produced, &scr.fe_out, &scr.fe_in);
+	}
+
+	if (scr.gej.infinity) {
+	#pragma unroll
+		for (int k = 0; k < 32; k++) out[k] = 0;
+		return;
+	}
+
+	REC_ALIGN(16) secp256k1_ge A;
+	secp256k1_ge_set_gej_zinv(&A, &scr.gej, &scr.fe_out);
+
+	secp256k1_fe_normalize_var(&A.y);
+	if (secp256k1_fe_is_odd(&A.y)) {
+		secp256k1_ge_neg(&A, &A);
+	}
+
+	secp256k1_fe_normalize_var(&A.x);
+	secp256k1_fe_get_b32(out, &A.x);
+}
+
+REC_DEVICE void TweakTaproot(
+	thread uint8_t*  out,
+	const thread uint8_t*  pub_uncomp,
+	const constant secp256k1_ge_storage*  precPtr,
+	const size_t precPitch
+) {
+	REC_ALIGN(16) secp256k1_scratch3 scr;
+	int produced = 0;
+
+
+
+	const thread uint8_t* p = &pub_uncomp[0];
+	if (p[0] != 0x04) {
+		scr.gej.infinity = 1;
+		return;
+	}
+
+	REC_ALIGN(16) secp256k1_fe x, y;
+	(void)secp256k1_fe_set_b32(&x, p + 1);
+	(void)secp256k1_fe_set_b32(&y, p + 33);
+	REC_ALIGN(16) secp256k1_ge P;
+	secp256k1_ge_set_xy(&P, &x, &y);
+
+	secp256k1_fe_normalize_var(&P.y);
+	if (secp256k1_fe_is_odd(&P.y)) {
+		secp256k1_ge Pneg = P;
+		secp256k1_fe_negate(&Pneg.y, &Pneg.y, 1);
+		P = Pneg;
+	}
+
+	REC_ALIGN(16) uint8_t Px[32], h[32];
+	secp256k1_fe_normalize_var(&P.x);
+	secp256k1_fe_get_b32(Px, &P.x);
+
+	sha256_taptweak_px(Px, h);
+
+	REC_ALIGN(16) secp256k1_scalar t;
+	secp256k1_scalar_set_b32(&t, h, NULL);
+
+	REC_ALIGN(16) secp256k1_gej tG;
+#ifdef ECMULT_BIG_TABLE
+	int windowLimit = WINDOWS_SIZE_CONST[0];
+	unsigned int wlimit = ECMULT_WINDOW_SIZE_CONST[0];
+	secp256k1_ecmult_big(&tG, &t, precPtr, precPitch, windowLimit, wlimit);
+#else
+	secp256k1_ecmult_gen(&tG, &t);
+#endif
+
+	secp256k1_gej_add_ge_var(&scr.gej, &tG, &P, NULL);
+
+	if (!scr.gej.infinity) {
+		scr.fe_in = scr.gej.z;
+		produced++;
+	}
+
+
+	if (produced > 0) {
+		secp256k1_fe_inv_all_var(produced, &scr.fe_out, &scr.fe_in);
+	}
+
+	int used = 0;
+
+		thread uint8_t* xo = &out[0];
+
+		if (scr.gej.infinity) {
+#pragma unroll
+			for (int k = 0; k < 32; k++) xo[k] = 0;
+			return;
+		}
+
+		REC_ALIGN(16) secp256k1_ge A;
+		secp256k1_ge_set_gej_zinv(&A, &scr.gej, &scr.fe_out);
+
+		secp256k1_fe_normalize_var(&A.y);
+		if (secp256k1_fe_is_odd(&A.y)) {
+			secp256k1_ge_neg(&A, &A);
+		}
+
+		secp256k1_fe_normalize_var(&A.x);
+		secp256k1_fe_get_b32(xo, &A.x);
+
+}
+
+//CIP-3 Icarus
+REC_DEVICE void cip3_icarus_master_xprv_from_entropy(
+	const thread uint8_t* entropy, size_t entlen,
+	const thread uint8_t* pass, size_t passlen, thread extended_private_key_t* master_private
+	)
+{
+	uint8_t out_xprv96[96];
+	// PBKDF2-HMAC-SHA512 (iter=4096, salt=entropy, password=pass, dkLen=96)
+	fastpbkdf2_hmac_sha512(pass, passlen, entropy, entlen, 4096, out_xprv96, 96);
+
+	// (ed25519 scalar)
+	out_xprv96[0] &= 0xF8;
+	out_xprv96[31] &= 0x1F;
+	out_xprv96[31] |= 0x40;
+
+	// key = kL
+	memcpy(master_private->key, out_xprv96 + 0, 32);
+	// chain_code = cc
+	memcpy(master_private->chain_code, out_xprv96 + 64, 32);
+}
+
+//CIP-3 Byron
+
+REC_DEVICE inline size_t mk_byron_msg(uint32_t i, thread uint8_t* out)
+{
+	const constant char* P = mn_root_seed_chain;
+	size_t off = 0;
+	for (const constant char* q = P; *q; ++q) out[off++] = (uint8_t)*q;
+
+	char tmp[11];
+	int n = 0;
+	if (i == 0) { tmp[n++] = '0'; }
+	else {
+		char rev[11]; int r = 0;
+		while (i) { rev[r++] = (char)('0' + (i % 10)); i /= 10; }
+		while (r--) tmp[n++] = rev[r];
+	}
+	for (int k = 0; k < n; ++k) out[off++] = (uint8_t)tmp[k];
+	return off;
+}
+
+REC_DEVICE void cip3_byron_master_xprv_from_entropy(
+	const thread uint8_t* entropy, size_t entlen,
+	thread extended_private_key_t* master_private)
+{
+	uint32_t i = 1;
+	for (;; ++i) {
+		uint8_t msg[32];
+		size_t mlen = mk_byron_msg(i, msg);
+
+		uint8_t h[64];                 // iL||iR
+		HMAC_SHA512(entropy, entlen, msg, mlen, h);
+
+		uint8_t prv64[64];
+		SHA512(h, 32, prv64);
+
+		// clamp kL
+		prv64[0] &= 0xF8;
+		prv64[31] &= 0x1F;
+		prv64[31] |= 0x40;
+
+		if ((prv64[31] & 0x20) != 0) continue;
+
+		memcpy(master_private->key, prv64, 32);      // kL
+		memcpy(master_private->chain_code, h + 32, 32); // iR
+		break;
+	}
+}
+
+//BIP39 Mnemonic to Entropy
+
+REC_DEVICE REC_FORCEINLINE int dict_count() { return 10; }
+// Device helper: dict_at.
+REC_DEVICE REC_FORCEINLINE dict_t dict_at(int i) {
+	switch (i) {
+	default:
+	case 0:  return wordsEN;
+	case 1:  return wordsSP;
+	case 2:  return wordsJA;
+	case 3:  return wordsIT;
+	case 4:  return wordsFR;
+	case 5:  return wordsCZ;
+	case 6:  return wordsPO;
+	case 7:  return wordsKO;
+	case 8:  return wordsCHS;
+	case 9:  return wordsCHT;
+	}
+}
+
+
+// Device helper: cmp_word_len.
+REC_DEVICE REC_FORCEINLINE int cmp_word_len(const thread char* a, int alen, const constant char* b) {
+	for (int i = 0;; ++i) {
+		char ca = (i < alen) ? a[i] : 0, cb = b[i];
+		if (ca != cb) return (unsigned char)ca < (unsigned char)cb ? -1 : 1;
+		if (ca == 0) return 0;
+	}
+}
+
+// Device helper: find_in_dict.
+REC_DEVICE REC_FORCEINLINE int find_in_dict(const thread char* w, int wl, dict_t d) {
+	int lo = 0, hi = 2047;
+	while (lo <= hi) {
+		int mid = (lo + hi) >> 1;
+		int c = cmp_word_len(w, wl, d[mid]);
+		if (c == 0) return mid;
+		if (c < 0) hi = mid - 1; else lo = mid + 1;
+	}
+	return -1;
+}
+
+
+// Device helper: pack_indices.
+REC_DEVICE REC_FORCEINLINE int pack_indices(const thread int* idx, int n, thread uint8_t* bits/*>= (11*n+7)/8 */) {
+	int bitpos = 0;
+	for (int i = 0; i < n; ++i) {
+		int v = idx[i] & 0x7FF;
+		for (int b = 10; b >= 0; --b) {
+			int bit = (v >> b) & 1;
+			bits[bitpos >> 3] |= (uint8_t)(bit << (7 - (bitpos & 7)));
+			++bitpos;
+		}
+	}
+	return bitpos;
+}
+
+// Device helper: take_bits_msb.
+REC_DEVICE REC_FORCEINLINE void take_bits_msb(const thread uint8_t* bits, int ENT_bits, thread uint8_t* out) {
+	int full = ENT_bits >> 3, rem = ENT_bits & 7;
+	for (int i = 0; i < full; ++i) out[i] = bits[i];
+	if (rem) out[full] = bits[full] & (0xFF << (8 - rem));
+}
+
+REC_DEVICE int split_words(const thread char* s, int slen,
+	const thread char* wp[], int wl[], int maxw)
+{
+	const thread char* p = s;
+	const thread char* end = s + slen;
+	int n = 0;
+
+	while (p < end) {
+		while (p < end && *p == ' ') ++p;
+		if (p >= end) break;
+		const thread char* a = p;
+		while (p < end && *p != ' ') ++p;
+
+		if (n < maxw) {
+			wp[n] = a;
+			wl[n] = (int)(p - a);
+			++n;
+		}
+		else {
+			break;
+		}
+	}
+	return n;
+}
+
+// Device helper: mnemonic_to_entropy.
+REC_DEVICE bool mnemonic_to_entropy(const thread char* phrase, int slen, thread uint8_t* out_entropy, thread uint32_t* out_len)
+{
+	const int MAXW = 64;
+	const thread char* wp[MAXW]; int wl[MAXW];
+	int n = split_words(phrase, slen, wp, wl, MAXW);
+	if (n <= 0) return false;
+
+	int idx[MAXW];
+	for (int d = 0; d < dict_count(); ++d) {
+		dict_t dict = dict_at(d);
+		bool ok = true;
+		for (int i = 0; i < n; ++i) {
+			int k = find_in_dict(wp[i], wl[i], dict);
+			if (k < 0) { ok = false; break; }
+			idx[i] = k;
+		}
+		if (!ok) continue;
+
+		const int total_bits = 11 * n;
+		const int bits_bytes = (total_bits + 7) >> 3;
+		uint8_t bits[(64 * 11 + 7) / 8 + 1];
+		for (int i = 0; i < bits_bytes; ++i) bits[i] = 0;
+
+		pack_indices(idx, n, bits);
+
+		int ENT_bits = (total_bits * 32) / 33;
+		take_bits_msb(bits, ENT_bits, out_entropy);
+		*out_len = (uint32_t)((ENT_bits + 7) >> 3);
+		return true;
+	}
+	return false;
+}
+
+#endif

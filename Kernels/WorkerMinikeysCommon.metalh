@@ -1,0 +1,137 @@
+#ifndef METAL_CRYPTO_WORKER_MINIKEYS_COMMON_METALH
+#define METAL_CRYPTO_WORKER_MINIKEYS_COMMON_METALH
+
+#include "../KernelState.metalh"
+#include "GPUHash.metalh"
+
+#define MINIKEY_STAGE_STRIDE 31u
+#define MINIKEY_THREAD_STEPS 32u
+
+static inline constant char* minikey_seed_base58_alphabet() {
+    return "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
+}
+
+static inline bool minikey_seed_check_with_q_fast(const thread uchar* msg_with_q,
+                                                  const uchar target_total_len) {
+    if (msg_with_q == nullptr) {
+        return false;
+    }
+
+    uchar check_hash[32];
+    SHA256(msg_with_q, size_t(target_total_len) + 1u, check_hash);
+    return check_hash[0] == 0u;
+}
+
+static inline uint minikey_stage_reserve(device atomic_uint* out_count,
+                                         bool produced,
+                                         ushort simd_lane) {
+    (void)simd_lane;
+    const uint local_count = produced ? 1u : 0u;
+    const uint prior = simd_prefix_exclusive_sum(local_count);
+    const uint total = simd_sum(local_count);
+    uint base = 0u;
+    if (simd_is_first() && total != 0u) {
+        base = atomic_fetch_add_explicit(out_count, total, memory_order_relaxed);
+    }
+    base = simd_broadcast_first(base);
+    return produced ? (base + prior) : 0xffffffffu;
+}
+
+static inline void minikey_divmod_u64_58(ulong value,
+                                         thread ulong& quotient,
+                                         thread uint& remainder) {
+    quotient = 0ul;
+    remainder = 0u;
+    for (int bit = 63; bit >= 0; --bit) {
+        remainder = (remainder << 1u) | uint((value >> uint(bit)) & 1ul);
+        if (remainder >= 58u) {
+            remainder -= 58u;
+            quotient |= (1ul << uint(bit));
+        }
+    }
+}
+
+static inline bool minikey_mul_u64_checked(ulong a,
+                                           ulong b,
+                                           thread ulong& out) {
+    out = 0ul;
+    while (b != 0ul) {
+        if ((b & 1ul) != 0ul) {
+            if (out > (0xfffffffffffffffful - a)) {
+                return false;
+            }
+            out += a;
+        }
+        b >>= 1u;
+        if (b != 0ul) {
+            if (a > (0xfffffffffffffffful - a)) {
+                return false;
+            }
+            a += a;
+        }
+    }
+    return true;
+}
+
+static inline bool minikey_add_base58_counter(thread uchar* digits,
+                                              const uchar len,
+                                              ulong delta) {
+    for (int pos = int(len) - 1; pos >= 0; --pos) {
+        if (delta == 0ul) {
+            return true;
+        }
+        ulong q = 0ul;
+        uint r = 0u;
+        minikey_divmod_u64_58(delta, q, r);
+        const uint sum = uint(digits[pos]) + r;
+        digits[pos] = uchar(sum % 58u);
+        delta = q + ulong(sum / 58u);
+    }
+    return delta == 0ul;
+}
+
+static inline int minikey_cmp_base58_counter(const thread uchar* a,
+                                             const device uchar* b,
+                                             const uchar len) {
+    for (int i = 0; i < 29; ++i) {
+        if (i >= int(len)) {
+            break;
+        }
+        if (a[i] < b[i]) {
+            return -1;
+        }
+        if (a[i] > b[i]) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static inline void minikey_make_ascii_with_q(thread uchar* msg,
+                                             const thread uchar* digits,
+                                             const uchar suffix_len) {
+    constant char* alpha = minikey_seed_base58_alphabet();
+    msg[0] = uchar('S');
+    for (int i = 0; i < int(suffix_len); ++i) {
+        msg[i + 1] = uchar(alpha[digits[i]]);
+    }
+    msg[uint(suffix_len) + 1u] = uchar('?');
+}
+
+static inline void minikey_stage_emit(device uchar* out_valid_minikeys,
+                                      device uchar* out_valid_minikey_lens,
+                                      const uint out_capacity,
+                                      const uint slot,
+                                      const thread uchar* msg,
+                                      const uchar minikey_len) {
+    if (slot >= out_capacity) {
+        return;
+    }
+    const ulong dst = ulong(slot) * ulong(MINIKEY_STAGE_STRIDE);
+    for (int i = 0; i < int(minikey_len); ++i) {
+        out_valid_minikeys[dst + ulong(i)] = msg[i];
+    }
+    out_valid_minikey_lens[slot] = minikey_len;
+}
+
+#endif

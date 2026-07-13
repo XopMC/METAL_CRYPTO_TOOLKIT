@@ -1,0 +1,2589 @@
+#ifndef METAL_CRYPTO_GPU_HASH_METALH
+#define METAL_CRYPTO_GPU_HASH_METALH
+
+#include "DeviceSupport.metalh"
+#include "HashFunc.metalh"
+
+#undef rotl32
+#undef rotl64
+#undef rotr64
+#undef SHR
+#undef ROTR32
+#undef ROTR64
+#undef SHA512_S0
+#undef SHA512_S1
+
+/*
+ * This file is part of the VanitySearch distribution (https://github.com/JeanLucPons/VanitySearch).
+ * Copyright (c) 2019 Jean Luc PONS.
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+
+ *
+ * This program is distributed in the hope that it will be useful, but
+ * WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
+ * General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program. If not, see <http://www.gnu.org/licenses/>.
+*/
+
+// ---------------------------------------------------------------------------------
+// SHA256
+// ---------------------------------------------------------------------------------
+
+constant uint32_t K[] =
+{
+    0x428A2F98, 0x71374491, 0xB5C0FBCF, 0xE9B5DBA5,
+    0x3956C25B, 0x59F111F1, 0x923F82A4, 0xAB1C5ED5,
+    0xD807AA98, 0x12835B01, 0x243185BE, 0x550C7DC3,
+    0x72BE5D74, 0x80DEB1FE, 0x9BDC06A7, 0xC19BF174,
+    0xE49B69C1, 0xEFBE4786, 0x0FC19DC6, 0x240CA1CC,
+    0x2DE92C6F, 0x4A7484AA, 0x5CB0A9DC, 0x76F988DA,
+    0x983E5152, 0xA831C66D, 0xB00327C8, 0xBF597FC7,
+    0xC6E00BF3, 0xD5A79147, 0x06CA6351, 0x14292967,
+    0x27B70A85, 0x2E1B2138, 0x4D2C6DFC, 0x53380D13,
+    0x650A7354, 0x766A0ABB, 0x81C2C92E, 0x92722C85,
+    0xA2BFE8A1, 0xA81A664B, 0xC24B8B70, 0xC76C51A3,
+    0xD192E819, 0xD6990624, 0xF40E3585, 0x106AA070,
+    0x19A4C116, 0x1E376C08, 0x2748774C, 0x34B0BCB5,
+    0x391C0CB3, 0x4ED8AA4A, 0x5B9CCA4F, 0x682E6FF3,
+    0x748F82EE, 0x78A5636F, 0x84C87814, 0x8CC70208,
+    0x90BEFFFA, 0xA4506CEB, 0xBEF9A3F7, 0xC67178F2,
+};
+
+constant uint32_t I[] = {
+  0x6a09e667ul,
+  0xbb67ae85ul,
+  0x3c6ef372ul,
+  0xa54ff53aul,
+  0x510e527ful,
+  0x9b05688cul,
+  0x1f83d9abul,
+  0x5be0cd19ul,
+};
+
+static inline uint32_t gpuhash_byte_perm(const uint32_t a, const uint32_t b, const uint32_t sel) {
+    uint32_t out = 0u;
+    for (uint32_t i = 0u; i < 4u; ++i) {
+        const uint32_t nibble = (sel >> (i * 4u)) & 0xFu;
+        const uint32_t source = (nibble < 4u) ? a : b;
+        const uint32_t shift = (nibble & 3u) * 8u;
+        out |= ((source >> shift) & 0xffu) << (i * 8u);
+    }
+    return out;
+}
+
+static inline void gpuhash_memcpy(thread uchar* dst, const thread uchar* src, const ulong len) {
+    for (ulong i = 0; i < len; ++i) {
+        dst[i] = src[i];
+    }
+}
+
+static inline void gpuhash_memset(thread uchar* dst, const uchar value, const ulong len) {
+    for (ulong i = 0; i < len; ++i) {
+        dst[i] = value;
+    }
+}
+
+#define memcpy(DST, SRC, LEN) gpuhash_memcpy(reinterpret_cast<thread uchar*>(DST), reinterpret_cast<const thread uchar*>(SRC), ulong(LEN))
+#define memset(DST, VALUE, LEN) gpuhash_memset(reinterpret_cast<thread uchar*>(DST), uchar(VALUE), ulong(LEN))
+
+static inline void u64x4_to_x32(thread uint64_t* px, thread unsigned char* out32);
+static inline void _GetHash160(const thread uint32_t* x32, const thread uint32_t* y32, thread uint8_t* hash);
+static inline uint32_t crc32_ieee(const thread uint8_t* p, size_t n);
+
+#define ROR(x,n) ((x>>n)|(x<<(32-n)))
+#define S0(x) (ROR(x,2) ^ ROR(x,13) ^ ROR(x,22))
+#define S1(x) (ROR(x,6) ^ ROR(x,11) ^ ROR(x,25))
+#define s0(x) (ROR(x,7) ^ ROR(x,18) ^ (x >> 3))
+#define s1(x) (ROR(x,17) ^ ROR(x,19) ^ (x >> 10))
+
+
+#define Maj(x,y,z) ((x & y) | (z & (x | y)))
+#define Ch(x,y,z) (z ^ (x & (y ^ z)))
+
+// SHA-256 inner round
+#define S2Round(a, b, c, d, e, f, g, h, k, w) \
+    t1 = h + S1(e) + Ch(e,f,g) + k + (w); \
+    d += t1; \
+    h = t1 + S0(a) + Maj(a,b,c);
+
+// WMIX
+#define WMIX() { \
+w[0] += s1(w[14]) + w[9] + s0(w[1]);\
+w[1] += s1(w[15]) + w[10] + s0(w[2]);\
+w[2] += s1(w[0]) + w[11] + s0(w[3]);\
+w[3] += s1(w[1]) + w[12] + s0(w[4]);\
+w[4] += s1(w[2]) + w[13] + s0(w[5]);\
+w[5] += s1(w[3]) + w[14] + s0(w[6]);\
+w[6] += s1(w[4]) + w[15] + s0(w[7]);\
+w[7] += s1(w[5]) + w[0] + s0(w[8]);\
+w[8] += s1(w[6]) + w[1] + s0(w[9]);\
+w[9] += s1(w[7]) + w[2] + s0(w[10]);\
+w[10] += s1(w[8]) + w[3] + s0(w[11]);\
+w[11] += s1(w[9]) + w[4] + s0(w[12]);\
+w[12] += s1(w[10]) + w[5] + s0(w[13]);\
+w[13] += s1(w[11]) + w[6] + s0(w[14]);\
+w[14] += s1(w[12]) + w[7] + s0(w[15]);\
+w[15] += s1(w[13]) + w[8] + s0(w[0]);\
+}
+
+// ROUND
+#define SHA256_RND(k) {\
+S2Round(a, b, c, d, e, f, g, h, K[k], w[0]);\
+S2Round(h, a, b, c, d, e, f, g, K[k + 1], w[1]);\
+S2Round(g, h, a, b, c, d, e, f, K[k + 2], w[2]);\
+S2Round(f, g, h, a, b, c, d, e, K[k + 3], w[3]);\
+S2Round(e, f, g, h, a, b, c, d, K[k + 4], w[4]);\
+S2Round(d, e, f, g, h, a, b, c, K[k + 5], w[5]);\
+S2Round(c, d, e, f, g, h, a, b, K[k + 6], w[6]);\
+S2Round(b, c, d, e, f, g, h, a, K[k + 7], w[7]);\
+S2Round(a, b, c, d, e, f, g, h, K[k + 8], w[8]);\
+S2Round(h, a, b, c, d, e, f, g, K[k + 9], w[9]);\
+S2Round(g, h, a, b, c, d, e, f, K[k + 10], w[10]);\
+S2Round(f, g, h, a, b, c, d, e, K[k + 11], w[11]);\
+S2Round(e, f, g, h, a, b, c, d, K[k + 12], w[12]);\
+S2Round(d, e, f, g, h, a, b, c, K[k + 13], w[13]);\
+S2Round(c, d, e, f, g, h, a, b, K[k + 14], w[14]);\
+S2Round(b, c, d, e, f, g, h, a, K[k + 15], w[15]);\
+}
+#define SHA256_RND_NO_1(k) {\
+S2Round(h, a, b, c, d, e, f, g, K[k + 1], w[1]);\
+S2Round(g, h, a, b, c, d, e, f, K[k + 2], w[2]);\
+S2Round(f, g, h, a, b, c, d, e, K[k + 3], w[3]);\
+S2Round(e, f, g, h, a, b, c, d, K[k + 4], w[4]);\
+S2Round(d, e, f, g, h, a, b, c, K[k + 5], w[5]);\
+S2Round(c, d, e, f, g, h, a, b, K[k + 6], w[6]);\
+S2Round(b, c, d, e, f, g, h, a, K[k + 7], w[7]);\
+S2Round(a, b, c, d, e, f, g, h, K[k + 8], w[8]);\
+S2Round(h, a, b, c, d, e, f, g, K[k + 9], w[9]);\
+S2Round(g, h, a, b, c, d, e, f, K[k + 10], w[10]);\
+S2Round(f, g, h, a, b, c, d, e, K[k + 11], w[11]);\
+S2Round(e, f, g, h, a, b, c, d, K[k + 12], w[12]);\
+S2Round(d, e, f, g, h, a, b, c, K[k + 13], w[13]);\
+S2Round(c, d, e, f, g, h, a, b, K[k + 14], w[14]);\
+S2Round(b, c, d, e, f, g, h, a, K[k + 15], w[15]);\
+}
+#define SHA256_RND_NO_2(k) {\
+S2Round(g, h, a, b, c, d, e, f, K[k + 2], w[2]);\
+S2Round(f, g, h, a, b, c, d, e, K[k + 3], w[3]);\
+S2Round(e, f, g, h, a, b, c, d, K[k + 4], w[4]);\
+S2Round(d, e, f, g, h, a, b, c, K[k + 5], w[5]);\
+S2Round(c, d, e, f, g, h, a, b, K[k + 6], w[6]);\
+S2Round(b, c, d, e, f, g, h, a, K[k + 7], w[7]);\
+S2Round(a, b, c, d, e, f, g, h, K[k + 8], w[8]);\
+S2Round(h, a, b, c, d, e, f, g, K[k + 9], w[9]);\
+S2Round(g, h, a, b, c, d, e, f, K[k + 10], w[10]);\
+S2Round(f, g, h, a, b, c, d, e, K[k + 11], w[11]);\
+S2Round(e, f, g, h, a, b, c, d, K[k + 12], w[12]);\
+S2Round(d, e, f, g, h, a, b, c, K[k + 13], w[13]);\
+S2Round(c, d, e, f, g, h, a, b, K[k + 14], w[14]);\
+S2Round(b, c, d, e, f, g, h, a, K[k + 15], w[15]);\
+}
+#define SHA256_RND_NO_3(k) {\
+S2Round(f, g, h, a, b, c, d, e, K[k + 3], w[3]);\
+S2Round(e, f, g, h, a, b, c, d, K[k + 4], w[4]);\
+S2Round(d, e, f, g, h, a, b, c, K[k + 5], w[5]);\
+S2Round(c, d, e, f, g, h, a, b, K[k + 6], w[6]);\
+S2Round(b, c, d, e, f, g, h, a, K[k + 7], w[7]);\
+S2Round(a, b, c, d, e, f, g, h, K[k + 8], w[8]);\
+S2Round(h, a, b, c, d, e, f, g, K[k + 9], w[9]);\
+S2Round(g, h, a, b, c, d, e, f, K[k + 10], w[10]);\
+S2Round(f, g, h, a, b, c, d, e, K[k + 11], w[11]);\
+S2Round(e, f, g, h, a, b, c, d, K[k + 12], w[12]);\
+S2Round(d, e, f, g, h, a, b, c, K[k + 13], w[13]);\
+S2Round(c, d, e, f, g, h, a, b, K[k + 14], w[14]);\
+S2Round(b, c, d, e, f, g, h, a, K[k + 15], w[15]);\
+}
+#define SHA256_RND_NO_4(k) {\
+S2Round(e, f, g, h, a, b, c, d, K[k + 4], w[4]);\
+S2Round(d, e, f, g, h, a, b, c, K[k + 5], w[5]);\
+S2Round(c, d, e, f, g, h, a, b, K[k + 6], w[6]);\
+S2Round(b, c, d, e, f, g, h, a, K[k + 7], w[7]);\
+S2Round(a, b, c, d, e, f, g, h, K[k + 8], w[8]);\
+S2Round(h, a, b, c, d, e, f, g, K[k + 9], w[9]);\
+S2Round(g, h, a, b, c, d, e, f, K[k + 10], w[10]);\
+S2Round(f, g, h, a, b, c, d, e, K[k + 11], w[11]);\
+S2Round(e, f, g, h, a, b, c, d, K[k + 12], w[12]);\
+S2Round(d, e, f, g, h, a, b, c, K[k + 13], w[13]);\
+S2Round(c, d, e, f, g, h, a, b, K[k + 14], w[14]);\
+S2Round(b, c, d, e, f, g, h, a, K[k + 15], w[15]);\
+}
+#define SHA256_RND_NO_5(k) {\
+S2Round(d, e, f, g, h, a, b, c, K[k + 5], w[5]);\
+S2Round(c, d, e, f, g, h, a, b, K[k + 6], w[6]);\
+S2Round(b, c, d, e, f, g, h, a, K[k + 7], w[7]);\
+S2Round(a, b, c, d, e, f, g, h, K[k + 8], w[8]);\
+S2Round(h, a, b, c, d, e, f, g, K[k + 9], w[9]);\
+S2Round(g, h, a, b, c, d, e, f, K[k + 10], w[10]);\
+S2Round(f, g, h, a, b, c, d, e, K[k + 11], w[11]);\
+S2Round(e, f, g, h, a, b, c, d, K[k + 12], w[12]);\
+S2Round(d, e, f, g, h, a, b, c, K[k + 13], w[13]);\
+S2Round(c, d, e, f, g, h, a, b, K[k + 14], w[14]);\
+S2Round(b, c, d, e, f, g, h, a, K[k + 15], w[15]);\
+}
+
+#define bswap32(v) (((v) >> 24) | (((v) >> 8) & 0xff00u) | (((v) << 8) & 0xff0000u) | ((v) << 24))
+
+// Initialise state
+static inline  void SHA256Initialize(uint32_t s[8]) {
+
+    s[0] = I[0];
+    s[1] = I[1];
+    s[2] = I[2];
+    s[3] = I[3];
+    s[4] = I[4];
+    s[5] = I[5];
+    s[6] = I[6];
+    s[7] = I[7];
+
+}
+
+#define DEF(x,y) uint32_t x = s[y]
+
+// Device helper: SHA256TransformPre.
+static inline void SHA256TransformPre(int level, uint32_t s[8], thread uint32_t* w, thread uint32_t* hashPre) {
+    DEF(a, 0);
+    DEF(b, 1);
+    DEF(c, 2);
+    DEF(d, 3);
+    DEF(e, 4);
+    DEF(f, 5);
+    DEF(g, 6);
+    DEF(h, 7);
+    uint32_t t1;
+    if (level >= 1) {
+        S2Round(a, b, c, d, e, f, g, h, K[0], w[0]);
+    }
+    if (level >= 2) {
+        S2Round(h, a, b, c, d, e, f, g, K[1], w[1]);
+    }
+    if (level >= 3) {
+        S2Round(g, h, a, b, c, d, e, f, K[2], w[2]);
+    }
+    if (level >= 4) {
+        S2Round(f, g, h, a, b, c, d, e, K[3], w[3]);
+    }
+    if (level >= 5) {
+        S2Round(e, f, g, h, a, b, c, d, K[4], w[4]);
+    }
+    hashPre[0] = a;
+    hashPre[1] = b;
+    hashPre[2] = c;
+    hashPre[3] = d;
+    hashPre[4] = e;
+    hashPre[5] = f;
+    hashPre[6] = g;
+    hashPre[7] = h;
+}
+
+// Device helper: SHA256TransformFromPre.
+static inline void SHA256TransformFromPre(const int level, uint32_t s[8], thread uint32_t*  w, const thread uint32_t*   hashPre) {
+    DEF(a, 0);
+    DEF(b, 1);
+    DEF(c, 2);
+    DEF(d, 3);
+    DEF(e, 4);
+    DEF(f, 5);
+    DEF(g, 6);
+    DEF(h, 7);
+    uint32_t t1;
+    if (level > 0) {
+        a = hashPre[0];
+        b = hashPre[1];
+        c = hashPre[2];
+        d = hashPre[3];
+        e = hashPre[4];
+        f = hashPre[5];
+        g = hashPre[6];
+        h = hashPre[7];
+        if (level == 4) {
+            SHA256_RND_NO_4(0);
+        }
+        else if (level == 2) {
+            SHA256_RND_NO_2(0);
+        }
+        else if (level == 3) {
+            SHA256_RND_NO_3(0);
+        }
+        else if (level == 1) {
+            SHA256_RND_NO_1(0);
+        }
+        else if (level == 5) {
+            SHA256_RND_NO_5(0);
+        }
+    }
+    else {
+        SHA256_RND(0);
+    }
+
+    WMIX();
+    SHA256_RND(16);
+    WMIX();
+    SHA256_RND(32);
+    WMIX();
+    SHA256_RND(48);
+
+    s[0] += a;
+    s[1] += b;
+    s[2] += c;
+    s[3] += d;
+    s[4] += e;
+    s[5] += f;
+    s[6] += g;
+    s[7] += h;
+}
+
+// Perform SHA-256 transformations, process 64-byte chunks
+static inline void SHA256Transform(uint32_t s[8], thread uint32_t*  w) {
+
+    uint32_t t1;
+
+    DEF(a, 0);
+    DEF(b, 1);
+    DEF(c, 2);
+    DEF(d, 3);
+    DEF(e, 4);
+    DEF(f, 5);
+    DEF(g, 6);
+    DEF(h, 7);
+
+    SHA256_RND(0);
+    WMIX();
+    SHA256_RND(16);
+    WMIX();
+    SHA256_RND(32);
+    WMIX();
+    SHA256_RND(48);
+
+    s[0] += a;
+    s[1] += b;
+    s[2] += c;
+    s[3] += d;
+    s[4] += e;
+    s[5] += f;
+    s[6] += g;
+    s[7] += h;
+
+}
+
+static inline
+// SHA256: computes 256.
+void SHA256(const thread uint8_t*  msg, size_t len, uint8_t out[32]) {
+    uint32_t s[8];
+    SHA256Initialize(s);
+
+    REC_ALIGN(16) uint32_t w[16];
+
+    const thread uint8_t* p = msg;
+    size_t rem = len;
+    while (rem >= 64) {
+#pragma unroll
+        for (int i = 0; i < 16; ++i) {
+            const thread uint8_t* b = p + (i << 2);
+            w[i] = ((uint32_t)b[0] << 24) |
+                ((uint32_t)b[1] << 16) |
+                ((uint32_t)b[2] << 8) |
+                ((uint32_t)b[3]);
+        }
+        SHA256Transform(s, w);
+        p += 64;
+        rem -= 64;
+    }
+#pragma unroll
+    for (int i = 0; i < 16; ++i) w[i] = 0;
+
+    for (uint32_t i = 0; i < rem; ++i) {
+        uint32_t wi = i >> 2;
+        uint32_t sh = (3u - (i & 3u)) * 8u;
+        w[wi] |= ((uint32_t)p[i]) << sh;
+    }
+
+    {
+        uint32_t wi = rem >> 2;
+        uint32_t sh = (3u - (rem & 3u)) * 8u;
+        w[wi] |= (0x80u << sh);
+    }
+
+    uint64_t bitlen = (uint64_t)len * 8ull;
+
+    if (rem <= 55) {
+        w[14] = (uint32_t)(bitlen >> 32);
+        w[15] = (uint32_t)(bitlen & 0xffffffffu);
+        SHA256Transform(s, w);
+    }
+    else {
+        SHA256Transform(s, w);
+#pragma unroll
+        for (int i = 0; i < 16; ++i) w[i] = 0;
+        w[14] = (uint32_t)(bitlen >> 32);
+        w[15] = (uint32_t)(bitlen & 0xffffffffu);
+        SHA256Transform(s, w);
+    }
+
+#pragma unroll
+    for (int i = 0; i < 8; ++i) {
+        uint32_t v = s[i];
+        out[(i << 2) + 0] = (uint8_t)(v >> 24);
+        out[(i << 2) + 1] = (uint8_t)(v >> 16);
+        out[(i << 2) + 2] = (uint8_t)(v >> 8);
+        out[(i << 2) + 3] = (uint8_t)(v);
+    }
+}
+
+//HMAC SHA256
+
+static inline
+// load_be_block: loads be block.
+void load_be_block(const thread uint8_t*  p, uint32_t w[16]) {
+#pragma unroll
+    for (int i = 0; i < 16; ++i) {
+        const thread uint8_t* b = p + (i << 2);
+        w[i] = ((uint32_t)b[0] << 24) |
+            ((uint32_t)b[1] << 16) |
+            ((uint32_t)b[2] << 8) |
+            ((uint32_t)b[3]);
+    }
+}
+
+static inline
+// sha256_process_blocks: computes 256 process blocks.
+void sha256_process_blocks(uint32_t s[8], const thread uint8_t*  data, size_t nblocks) {
+    REC_ALIGN(16) uint32_t w[16];
+    const thread uint8_t* p = data;
+#pragma unroll 1
+    for (size_t i = 0; i < nblocks; ++i, p += 64) {
+        load_be_block(p, w);
+        SHA256Transform(s, w);
+    }
+}
+
+static inline
+void sha256_finalize_from_state(uint32_t s[8],
+    const thread uint8_t*  tail, size_t tail_len,
+    uint64_t total_len_bytes,
+    thread uint8_t* out) {
+    REC_ALIGN(16) uint32_t w[16];
+#pragma unroll
+    for (int i = 0; i < 16; ++i) w[i] = 0;
+
+#pragma unroll 1
+    for (uint32_t i = 0; i < tail_len; ++i) {
+        const uint32_t wi = i >> 2;
+        const uint32_t sh = (3u - (i & 3u)) * 8u;
+        w[wi] |= ((uint32_t)tail[i]) << sh;
+    }
+
+    {
+        uint32_t wi = tail_len >> 2;
+        uint32_t sh = (3u - (tail_len & 3u)) * 8u;
+        w[wi] |= (0x80u << sh);
+    }
+
+    const uint64_t bitlen = total_len_bytes * 8ull;
+
+    if (tail_len <= 55) {
+        w[14] = (uint32_t)(bitlen >> 32);
+        w[15] = (uint32_t)(bitlen & 0xffffffffu);
+        SHA256Transform(s, w);
+    }
+    else {
+        SHA256Transform(s, w);
+#pragma unroll
+        for (int i = 0; i < 14; ++i) w[i] = 0;
+        w[14] = (uint32_t)(bitlen >> 32);
+        w[15] = (uint32_t)(bitlen & 0xffffffffu);
+        SHA256Transform(s, w);
+
+    }
+
+#pragma unroll
+    for (int i = 0; i < 8; ++i) {
+        uint32_t v = s[i];
+        out[(i << 2) + 0] = (uint8_t)(v >> 24);
+        out[(i << 2) + 1] = (uint8_t)(v >> 16);
+        out[(i << 2) + 2] = (uint8_t)(v >> 8);
+        out[(i << 2) + 3] = (uint8_t)(v);
+    }
+}
+
+static inline
+void sha256_of_prefix64_plus_msg(const uint8_t prefix64[64],
+    const thread uint8_t*  msg, size_t msg_len,
+    thread uint8_t* out) {
+    REC_ALIGN(16) uint32_t s[8];
+    SHA256Initialize(s);
+
+    {
+        REC_ALIGN(16) uint32_t w[16];
+        load_be_block(prefix64, w);
+        SHA256Transform(s, w);
+    }
+
+    const size_t nblocks = msg_len / 64;
+    const size_t rem = msg_len & 63u;
+    if (nblocks) {
+        sha256_process_blocks(s, msg, nblocks);
+    }
+
+    const thread uint8_t* tail = msg + (nblocks << 6);
+    sha256_finalize_from_state(s, tail, rem, 64ull + (uint64_t)msg_len, out);
+}
+
+static inline
+void sha256_prefix32_plus_msg(const uint8_t prefix32[32],
+    const thread uint8_t*  msg, size_t msg_len,
+    uint8_t out[32])
+{
+    REC_ALIGN(16) uint32_t s[8];
+    SHA256Initialize(s);
+
+    REC_ALIGN(16) uint8_t tail[64];
+    memcpy(tail, prefix32, 32);
+    memcpy(tail + 32, msg, msg_len);
+
+    sha256_finalize_from_state(s, tail, 32u + (uint32_t)msg_len, 32ull + (uint64_t)msg_len, out);
+}
+
+static inline
+// sha256_of_64bytes: computes 256 of 64 bytes.
+void sha256_of_64bytes(const uint8_t block64[64], uint8_t out[32])
+{
+    REC_ALIGN(16) uint32_t s[8];
+    SHA256Initialize(s);
+
+    REC_ALIGN(16) uint32_t w[16];
+    load_be_block(block64, w);
+    SHA256Transform(s, w);
+
+    uint8_t dummy[1] = { 0 };
+    sha256_finalize_from_state(s, dummy, 0, 64ull, out);
+}
+
+// Device helper: armory_to_chain.
+static inline void armory_to_chain(const thread uint8_t* rootkey, thread uint8_t* chaincode)
+{
+
+    uint8_t h1[32], h[32];
+    SHA256(&rootkey[0], 32, &h1[0]);
+    SHA256(&h1[0], 32, &h[0]);
+    const uint8_t msg[] = "Derive Chaincode from Root Key";
+    uint8_t inner_key[32];
+#pragma unroll
+    for (int i = 0; i < 32; ++i) inner_key[i] = h[i] ^ 0x36;
+
+    uint8_t inner_hash[32];
+    sha256_prefix32_plus_msg(inner_key, msg, sizeof(msg) - 1, inner_hash);
+
+    uint8_t outer_block[64];
+#pragma unroll
+    for (int i = 0; i < 32; ++i) outer_block[i] = h[i] ^ 0x5c;
+    memcpy(outer_block + 32, inner_hash, 32);
+
+    sha256_of_64bytes(outer_block, &chaincode[0]);
+
+}
+// ===== HMAC-SHA256 =====
+
+static inline
+void hmac_sha256(const thread uint8_t*  key, size_t key_len,
+    const thread uint8_t*  msg, size_t msg_len,
+    thread uint8_t* out_mac) {
+    REC_ALIGN(16) uint8_t  K0[64];
+    REC_ALIGN(16) uint8_t  ipad[64];
+    REC_ALIGN(16) uint8_t  opad[64];
+
+#pragma unroll
+    for (int i = 0; i < 16; ++i) ((thread uint32_t*)K0)[i] = 0;
+
+    if (key_len > 64) {
+        REC_ALIGN(16) uint8_t kh[32];
+        SHA256(key, key_len, kh);
+#pragma unroll
+        for (int i = 0; i < 8; ++i) {
+            ((thread uint32_t*)K0)[i] = ((const thread uint32_t*)kh)[i];
+        }
+    }
+    else {
+        memcpy(&K0[0], &key[0], key_len);
+    }
+
+#pragma unroll
+    for (int i = 0; i < 16; ++i) {
+        uint32_t kw = ((thread uint32_t*)K0)[i];
+        ((thread uint32_t*)ipad)[i] = kw ^ 0x36363636u;
+        ((thread uint32_t*)opad)[i] = kw ^ 0x5c5c5c5cu;
+    }
+
+    uint8_t ihash[32];
+    sha256_of_prefix64_plus_msg(ipad, msg, msg_len, ihash);
+
+    sha256_of_prefix64_plus_msg(opad, ihash, 32, out_mac);
+}
+
+
+
+
+// ---------------------------------------------------------------------------------
+// RIPEMD160
+// ---------------------------------------------------------------------------------
+constant uint64_t ripemd160_sizedesc_32 = 32 << 3;
+
+// Device helper: ripemd160_prepare_block32.
+static inline void ripemd160_prepare_block32(uint32_t s[16]) {
+    s[8] = 0x00000080u;
+    s[9] = 0u;
+    s[10] = 0u;
+    s[11] = 0u;
+    s[12] = 0u;
+    s[13] = 0u;
+    s[14] = (uint32_t)(ripemd160_sizedesc_32 & 0xFFFFFFFFULL);
+    s[15] = (uint32_t)(ripemd160_sizedesc_32 >> 32);
+}
+
+// Device helper: RIPEMD160Initialize.
+static inline void RIPEMD160Initialize(uint32_t s[5]) {
+
+    s[0] = 0x67452301ul;
+    s[1] = 0xEFCDAB89ul;
+    s[2] = 0x98BADCFEul;
+    s[3] = 0x10325476ul;
+    s[4] = 0xC3D2E1F0ul;
+
+}
+
+
+#define ROL(x,n) ((x>>(32-n))|(x<<n))
+#define f1(x, y, z) (x ^ y ^ z)
+#define f2(x, y, z) ((x & y) | (~x & z))
+#define f3(x, y, z) ((x | ~y) ^ z)
+#define f4(x, y, z) ((x & z) | (~z & y))
+#define f5(x, y, z) (x ^ (y | ~z))
+
+#define RPRound(a,b,c,d,e,f,x,k,r) \
+  u = a + f + x + k; \
+  a = ROL(u, r) + e; \
+  c = ROL(c, 10);
+
+#define R11(a,b,c,d,e,x,r) RPRound(a, b, c, d, e, f1(b, c, d), x, 0, r)
+#define R21(a,b,c,d,e,x,r) RPRound(a, b, c, d, e, f2(b, c, d), x, 0x5A827999ul, r)
+#define R31(a,b,c,d,e,x,r) RPRound(a, b, c, d, e, f3(b, c, d), x, 0x6ED9EBA1ul, r)
+#define R41(a,b,c,d,e,x,r) RPRound(a, b, c, d, e, f4(b, c, d), x, 0x8F1BBCDCul, r)
+#define R51(a,b,c,d,e,x,r) RPRound(a, b, c, d, e, f5(b, c, d), x, 0xA953FD4Eul, r)
+#define R12(a,b,c,d,e,x,r) RPRound(a, b, c, d, e, f5(b, c, d), x, 0x50A28BE6ul, r)
+#define R22(a,b,c,d,e,x,r) RPRound(a, b, c, d, e, f4(b, c, d), x, 0x5C4DD124ul, r)
+#define R32(a,b,c,d,e,x,r) RPRound(a, b, c, d, e, f3(b, c, d), x, 0x6D703EF3ul, r)
+#define R42(a,b,c,d,e,x,r) RPRound(a, b, c, d, e, f2(b, c, d), x, 0x7A6D76E9ul, r)
+#define R52(a,b,c,d,e,x,r) RPRound(a, b, c, d, e, f1(b, c, d), x, 0, r)
+
+
+/** Perform a RIPEMD-160 transformation, processing a 64-byte chunk. */
+static inline  void RIPEMD160Transform(uint32_t s[5], thread uint32_t*   w) {
+
+    uint32_t u;
+    uint32_t a1 = s[0], b1 = s[1], c1 = s[2], d1 = s[3], e1 = s[4];
+    uint32_t a2 = a1, b2 = b1, c2 = c1, d2 = d1, e2 = e1;
+
+    R11(a1, b1, c1, d1, e1, w[0], 11);
+    R12(a2, b2, c2, d2, e2, w[5], 8);
+    R11(e1, a1, b1, c1, d1, w[1], 14);
+    R12(e2, a2, b2, c2, d2, w[14], 9);
+    R11(d1, e1, a1, b1, c1, w[2], 15);
+    R12(d2, e2, a2, b2, c2, w[7], 9);
+    R11(c1, d1, e1, a1, b1, w[3], 12);
+    R12(c2, d2, e2, a2, b2, w[0], 11);
+    R11(b1, c1, d1, e1, a1, w[4], 5);
+    R12(b2, c2, d2, e2, a2, w[9], 13);
+    R11(a1, b1, c1, d1, e1, w[5], 8);
+    R12(a2, b2, c2, d2, e2, w[2], 15);
+    R11(e1, a1, b1, c1, d1, w[6], 7);
+    R12(e2, a2, b2, c2, d2, w[11], 15);
+    R11(d1, e1, a1, b1, c1, w[7], 9);
+    R12(d2, e2, a2, b2, c2, w[4], 5);
+    R11(c1, d1, e1, a1, b1, w[8], 11);
+    R12(c2, d2, e2, a2, b2, w[13], 7);
+    R11(b1, c1, d1, e1, a1, w[9], 13);
+    R12(b2, c2, d2, e2, a2, w[6], 7);
+    R11(a1, b1, c1, d1, e1, w[10], 14);
+    R12(a2, b2, c2, d2, e2, w[15], 8);
+    R11(e1, a1, b1, c1, d1, w[11], 15);
+    R12(e2, a2, b2, c2, d2, w[8], 11);
+    R11(d1, e1, a1, b1, c1, w[12], 6);
+    R12(d2, e2, a2, b2, c2, w[1], 14);
+    R11(c1, d1, e1, a1, b1, w[13], 7);
+    R12(c2, d2, e2, a2, b2, w[10], 14);
+    R11(b1, c1, d1, e1, a1, w[14], 9);
+    R12(b2, c2, d2, e2, a2, w[3], 12);
+    R11(a1, b1, c1, d1, e1, w[15], 8);
+    R12(a2, b2, c2, d2, e2, w[12], 6);
+
+    R21(e1, a1, b1, c1, d1, w[7], 7);
+    R22(e2, a2, b2, c2, d2, w[6], 9);
+    R21(d1, e1, a1, b1, c1, w[4], 6);
+    R22(d2, e2, a2, b2, c2, w[11], 13);
+    R21(c1, d1, e1, a1, b1, w[13], 8);
+    R22(c2, d2, e2, a2, b2, w[3], 15);
+    R21(b1, c1, d1, e1, a1, w[1], 13);
+    R22(b2, c2, d2, e2, a2, w[7], 7);
+    R21(a1, b1, c1, d1, e1, w[10], 11);
+    R22(a2, b2, c2, d2, e2, w[0], 12);
+    R21(e1, a1, b1, c1, d1, w[6], 9);
+    R22(e2, a2, b2, c2, d2, w[13], 8);
+    R21(d1, e1, a1, b1, c1, w[15], 7);
+    R22(d2, e2, a2, b2, c2, w[5], 9);
+    R21(c1, d1, e1, a1, b1, w[3], 15);
+    R22(c2, d2, e2, a2, b2, w[10], 11);
+    R21(b1, c1, d1, e1, a1, w[12], 7);
+    R22(b2, c2, d2, e2, a2, w[14], 7);
+    R21(a1, b1, c1, d1, e1, w[0], 12);
+    R22(a2, b2, c2, d2, e2, w[15], 7);
+    R21(e1, a1, b1, c1, d1, w[9], 15);
+    R22(e2, a2, b2, c2, d2, w[8], 12);
+    R21(d1, e1, a1, b1, c1, w[5], 9);
+    R22(d2, e2, a2, b2, c2, w[12], 7);
+    R21(c1, d1, e1, a1, b1, w[2], 11);
+    R22(c2, d2, e2, a2, b2, w[4], 6);
+    R21(b1, c1, d1, e1, a1, w[14], 7);
+    R22(b2, c2, d2, e2, a2, w[9], 15);
+    R21(a1, b1, c1, d1, e1, w[11], 13);
+    R22(a2, b2, c2, d2, e2, w[1], 13);
+    R21(e1, a1, b1, c1, d1, w[8], 12);
+    R22(e2, a2, b2, c2, d2, w[2], 11);
+
+    R31(d1, e1, a1, b1, c1, w[3], 11);
+    R32(d2, e2, a2, b2, c2, w[15], 9);
+    R31(c1, d1, e1, a1, b1, w[10], 13);
+    R32(c2, d2, e2, a2, b2, w[5], 7);
+    R31(b1, c1, d1, e1, a1, w[14], 6);
+    R32(b2, c2, d2, e2, a2, w[1], 15);
+    R31(a1, b1, c1, d1, e1, w[4], 7);
+    R32(a2, b2, c2, d2, e2, w[3], 11);
+    R31(e1, a1, b1, c1, d1, w[9], 14);
+    R32(e2, a2, b2, c2, d2, w[7], 8);
+    R31(d1, e1, a1, b1, c1, w[15], 9);
+    R32(d2, e2, a2, b2, c2, w[14], 6);
+    R31(c1, d1, e1, a1, b1, w[8], 13);
+    R32(c2, d2, e2, a2, b2, w[6], 6);
+    R31(b1, c1, d1, e1, a1, w[1], 15);
+    R32(b2, c2, d2, e2, a2, w[9], 14);
+    R31(a1, b1, c1, d1, e1, w[2], 14);
+    R32(a2, b2, c2, d2, e2, w[11], 12);
+    R31(e1, a1, b1, c1, d1, w[7], 8);
+    R32(e2, a2, b2, c2, d2, w[8], 13);
+    R31(d1, e1, a1, b1, c1, w[0], 13);
+    R32(d2, e2, a2, b2, c2, w[12], 5);
+    R31(c1, d1, e1, a1, b1, w[6], 6);
+    R32(c2, d2, e2, a2, b2, w[2], 14);
+    R31(b1, c1, d1, e1, a1, w[13], 5);
+    R32(b2, c2, d2, e2, a2, w[10], 13);
+    R31(a1, b1, c1, d1, e1, w[11], 12);
+    R32(a2, b2, c2, d2, e2, w[0], 13);
+    R31(e1, a1, b1, c1, d1, w[5], 7);
+    R32(e2, a2, b2, c2, d2, w[4], 7);
+    R31(d1, e1, a1, b1, c1, w[12], 5);
+    R32(d2, e2, a2, b2, c2, w[13], 5);
+
+    R41(c1, d1, e1, a1, b1, w[1], 11);
+    R42(c2, d2, e2, a2, b2, w[8], 15);
+    R41(b1, c1, d1, e1, a1, w[9], 12);
+    R42(b2, c2, d2, e2, a2, w[6], 5);
+    R41(a1, b1, c1, d1, e1, w[11], 14);
+    R42(a2, b2, c2, d2, e2, w[4], 8);
+    R41(e1, a1, b1, c1, d1, w[10], 15);
+    R42(e2, a2, b2, c2, d2, w[1], 11);
+    R41(d1, e1, a1, b1, c1, w[0], 14);
+    R42(d2, e2, a2, b2, c2, w[3], 14);
+    R41(c1, d1, e1, a1, b1, w[8], 15);
+    R42(c2, d2, e2, a2, b2, w[11], 14);
+    R41(b1, c1, d1, e1, a1, w[12], 9);
+    R42(b2, c2, d2, e2, a2, w[15], 6);
+    R41(a1, b1, c1, d1, e1, w[4], 8);
+    R42(a2, b2, c2, d2, e2, w[0], 14);
+    R41(e1, a1, b1, c1, d1, w[13], 9);
+    R42(e2, a2, b2, c2, d2, w[5], 6);
+    R41(d1, e1, a1, b1, c1, w[3], 14);
+    R42(d2, e2, a2, b2, c2, w[12], 9);
+    R41(c1, d1, e1, a1, b1, w[7], 5);
+    R42(c2, d2, e2, a2, b2, w[2], 12);
+    R41(b1, c1, d1, e1, a1, w[15], 6);
+    R42(b2, c2, d2, e2, a2, w[13], 9);
+    R41(a1, b1, c1, d1, e1, w[14], 8);
+    R42(a2, b2, c2, d2, e2, w[9], 12);
+    R41(e1, a1, b1, c1, d1, w[5], 6);
+    R42(e2, a2, b2, c2, d2, w[7], 5);
+    R41(d1, e1, a1, b1, c1, w[6], 5);
+    R42(d2, e2, a2, b2, c2, w[10], 15);
+    R41(c1, d1, e1, a1, b1, w[2], 12);
+    R42(c2, d2, e2, a2, b2, w[14], 8);
+
+    R51(b1, c1, d1, e1, a1, w[4], 9);
+    R52(b2, c2, d2, e2, a2, w[12], 8);
+    R51(a1, b1, c1, d1, e1, w[0], 15);
+    R52(a2, b2, c2, d2, e2, w[15], 5);
+    R51(e1, a1, b1, c1, d1, w[5], 5);
+    R52(e2, a2, b2, c2, d2, w[10], 12);
+    R51(d1, e1, a1, b1, c1, w[9], 11);
+    R52(d2, e2, a2, b2, c2, w[4], 9);
+    R51(c1, d1, e1, a1, b1, w[7], 6);
+    R52(c2, d2, e2, a2, b2, w[1], 12);
+    R51(b1, c1, d1, e1, a1, w[12], 8);
+    R52(b2, c2, d2, e2, a2, w[5], 5);
+    R51(a1, b1, c1, d1, e1, w[2], 13);
+    R52(a2, b2, c2, d2, e2, w[8], 14);
+    R51(e1, a1, b1, c1, d1, w[10], 12);
+    R52(e2, a2, b2, c2, d2, w[7], 6);
+    R51(d1, e1, a1, b1, c1, w[14], 5);
+    R52(d2, e2, a2, b2, c2, w[6], 8);
+    R51(c1, d1, e1, a1, b1, w[1], 12);
+    R52(c2, d2, e2, a2, b2, w[2], 13);
+    R51(b1, c1, d1, e1, a1, w[3], 13);
+    R52(b2, c2, d2, e2, a2, w[13], 6);
+    R51(a1, b1, c1, d1, e1, w[8], 14);
+    R52(a2, b2, c2, d2, e2, w[14], 5);
+    R51(e1, a1, b1, c1, d1, w[11], 11);
+    R52(e2, a2, b2, c2, d2, w[0], 15);
+    R51(d1, e1, a1, b1, c1, w[6], 8);
+    R52(d2, e2, a2, b2, c2, w[3], 13);
+    R51(c1, d1, e1, a1, b1, w[15], 5);
+    R52(c2, d2, e2, a2, b2, w[9], 11);
+    R51(b1, c1, d1, e1, a1, w[13], 6);
+    R52(b2, c2, d2, e2, a2, w[11], 11);
+
+    uint32_t t = s[0];
+    s[0] = s[1] + c1 + d2;
+    s[1] = s[2] + d1 + e2;
+    s[2] = s[3] + e1 + a2;
+    s[3] = s[4] + a1 + b2;
+    s[4] = t + b1 + c2;
+}
+
+// ---------------------------------------------------------------------------------
+// Key encoding
+// ---------------------------------------------------------------------------------
+static inline uint32_t gpu_hash_pack_be4_pubkey(const thread unsigned char* pubkey, thread int& keyLenSkip) {
+    const uint32_t out =
+        (uint32_t(pubkey[keyLenSkip]) << 24) |
+        (uint32_t(pubkey[keyLenSkip + 1]) << 16) |
+        (uint32_t(pubkey[keyLenSkip + 2]) << 8) |
+        uint32_t(pubkey[keyLenSkip + 3]);
+    keyLenSkip += 4;
+    return out;
+}
+
+static inline uint32_t gpu_hash_pack_prefix_be3_pubkey(uint8_t prefix,
+                                                       const thread unsigned char* pubkey,
+                                                       thread int& keyLenSkip) {
+    const uint32_t out =
+        (uint32_t(prefix) << 24) |
+        (uint32_t(pubkey[keyLenSkip]) << 16) |
+        (uint32_t(pubkey[keyLenSkip + 1]) << 8) |
+        uint32_t(pubkey[keyLenSkip + 2]);
+    keyLenSkip += 3;
+    return out;
+}
+
+static inline   void _GetHash160(const thread unsigned char*   pubkey, thread int& keyLen, thread uint8_t*  hash) {
+    int keyLenSkip = keyLen;
+    REC_ALIGN(16) uint32_t publicKeyBytes[32];
+    REC_ALIGN(16) uint32_t s[16];
+    for (int i = 0; i < 16; ++i) {
+        publicKeyBytes[i] = gpu_hash_pack_be4_pubkey(pubkey, keyLenSkip);
+    }
+    publicKeyBytes[16] = (uint32_t)pubkey[keyLenSkip++] << 24 | 0x800000;
+    publicKeyBytes[17] = 0;
+    publicKeyBytes[18] = 0;
+    publicKeyBytes[19] = 0;
+    publicKeyBytes[20] = 0;
+    publicKeyBytes[21] = 0;
+    publicKeyBytes[22] = 0;
+    publicKeyBytes[23] = 0;
+    publicKeyBytes[24] = 0;
+    publicKeyBytes[25] = 0;
+    publicKeyBytes[26] = 0;
+    publicKeyBytes[27] = 0;
+    publicKeyBytes[28] = 0;
+    publicKeyBytes[29] = 0;
+    publicKeyBytes[30] = 0;
+    publicKeyBytes[31] = 0x208;
+
+    SHA256Initialize(s);
+    SHA256Transform(s, publicKeyBytes);
+    SHA256Transform(s, publicKeyBytes + 16);
+
+#pragma unroll 8
+    for (int i = 0; i < 8; i++)
+        s[i] = bswap32(s[i]);
+
+    ripemd160_prepare_block32(s);
+
+    RIPEMD160Initialize((thread uint32_t*)hash);
+    RIPEMD160Transform((thread uint32_t*)hash, s);
+}
+
+
+// Device helper: _GetHash160Comp.
+static inline   void _GetHash160Comp(thread unsigned char* pubkey, thread int& keyLen, thread uint8_t* hash) {
+    int keyLenSkip = keyLen;
+    REC_ALIGN(16) uint32_t publicKeyBytes[16];
+    REC_ALIGN(16) uint32_t s[16];
+    // Compressed public key
+    uint8_t prefix = 0x2 + (pubkey[keyLenSkip + 64] & 1);
+    keyLenSkip++;
+    publicKeyBytes[0] = gpu_hash_pack_prefix_be3_pubkey(prefix, pubkey, keyLenSkip);
+    for (int i = 1; i < 8; ++i) {
+        publicKeyBytes[i] = gpu_hash_pack_be4_pubkey(pubkey, keyLenSkip);
+    }
+    publicKeyBytes[8] = (uint32_t)pubkey[keyLenSkip++] << 24 | 0x800000;
+    publicKeyBytes[9] = 0;
+    publicKeyBytes[10] = 0;
+    publicKeyBytes[11] = 0;
+    publicKeyBytes[12] = 0;
+    publicKeyBytes[13] = 0;
+    publicKeyBytes[14] = 0;
+    publicKeyBytes[15] = 0x108;
+
+    SHA256Initialize(s);
+    SHA256Transform(s, publicKeyBytes);
+
+#pragma unroll 8
+    for (int i = 0; i < 8; i++)
+        s[i] = bswap32(s[i]);
+
+    ripemd160_prepare_block32(s);
+
+    RIPEMD160Initialize((thread uint32_t*)hash);
+    RIPEMD160Transform((thread uint32_t*)hash, s);
+}
+
+// Fast version for VanitySearch-style ECC walk (Block D from OPTIMIZATION_PLAN).
+// Takes X-coordinate as uint64[4] and Y parity. No pubkey serialization needed.
+static inline void _GetHash160Comp_fast(
+    thread uint64_t* x, uint8_t isOdd, thread uint8_t* hash)
+{
+    thread uint32_t* x32 = (thread uint32_t*)(x);
+    REC_ALIGN(16) uint32_t publicKeyBytes[16];
+    REC_ALIGN(16) uint32_t s[16];
+
+    publicKeyBytes[0] = gpuhash_byte_perm(x32[7], 0x2 + isOdd, 0x4321);
+    publicKeyBytes[1] = gpuhash_byte_perm(x32[7], x32[6], 0x0765);
+    publicKeyBytes[2] = gpuhash_byte_perm(x32[6], x32[5], 0x0765);
+    publicKeyBytes[3] = gpuhash_byte_perm(x32[5], x32[4], 0x0765);
+    publicKeyBytes[4] = gpuhash_byte_perm(x32[4], x32[3], 0x0765);
+    publicKeyBytes[5] = gpuhash_byte_perm(x32[3], x32[2], 0x0765);
+    publicKeyBytes[6] = gpuhash_byte_perm(x32[2], x32[1], 0x0765);
+    publicKeyBytes[7] = gpuhash_byte_perm(x32[1], x32[0], 0x0765);
+    publicKeyBytes[8] = gpuhash_byte_perm(x32[0], 0x80, 0x0456);
+    publicKeyBytes[9] = 0;
+    publicKeyBytes[10] = 0;
+    publicKeyBytes[11] = 0;
+    publicKeyBytes[12] = 0;
+    publicKeyBytes[13] = 0;
+    publicKeyBytes[14] = 0;
+    publicKeyBytes[15] = 0x108;
+
+    SHA256Initialize(s);
+    SHA256Transform(s, publicKeyBytes);
+
+#pragma unroll 8
+    for (int i = 0; i < 8; i++)
+        s[i] = bswap32(s[i]);
+
+    ripemd160_prepare_block32(s);
+
+    RIPEMD160Initialize((thread uint32_t*)hash);
+    RIPEMD160Transform((thread uint32_t*)hash, s);
+}
+
+static inline void _GetP2WSHCompFromX32(
+    const thread uint8_t*  x32_be,
+    uint8_t prefix,
+    thread uint8_t*  script_hash32,
+    thread uint32_t*  hash160)
+{
+    REC_ALIGN(16) uint32_t scriptBytes[16];
+    REC_ALIGN(16) uint32_t s[16];
+
+    scriptBytes[0] = (0x21u << 24) | ((uint32_t)prefix << 16) | ((uint32_t)x32_be[0] << 8) | (uint32_t)x32_be[1];
+    scriptBytes[1] = ((uint32_t)x32_be[2] << 24) | ((uint32_t)x32_be[3] << 16) | ((uint32_t)x32_be[4] << 8) | (uint32_t)x32_be[5];
+    scriptBytes[2] = ((uint32_t)x32_be[6] << 24) | ((uint32_t)x32_be[7] << 16) | ((uint32_t)x32_be[8] << 8) | (uint32_t)x32_be[9];
+    scriptBytes[3] = ((uint32_t)x32_be[10] << 24) | ((uint32_t)x32_be[11] << 16) | ((uint32_t)x32_be[12] << 8) | (uint32_t)x32_be[13];
+    scriptBytes[4] = ((uint32_t)x32_be[14] << 24) | ((uint32_t)x32_be[15] << 16) | ((uint32_t)x32_be[16] << 8) | (uint32_t)x32_be[17];
+    scriptBytes[5] = ((uint32_t)x32_be[18] << 24) | ((uint32_t)x32_be[19] << 16) | ((uint32_t)x32_be[20] << 8) | (uint32_t)x32_be[21];
+    scriptBytes[6] = ((uint32_t)x32_be[22] << 24) | ((uint32_t)x32_be[23] << 16) | ((uint32_t)x32_be[24] << 8) | (uint32_t)x32_be[25];
+    scriptBytes[7] = ((uint32_t)x32_be[26] << 24) | ((uint32_t)x32_be[27] << 16) | ((uint32_t)x32_be[28] << 8) | (uint32_t)x32_be[29];
+    scriptBytes[8] = ((uint32_t)x32_be[30] << 24) | ((uint32_t)x32_be[31] << 16) | (0xacu << 8) | 0x80u;
+    scriptBytes[9] = 0;
+    scriptBytes[10] = 0;
+    scriptBytes[11] = 0;
+    scriptBytes[12] = 0;
+    scriptBytes[13] = 0;
+    scriptBytes[14] = 0;
+    scriptBytes[15] = 0x118;
+
+    SHA256Initialize(s);
+    SHA256Transform(s, scriptBytes);
+
+#pragma unroll 8
+    for (int i = 0; i < 8; i++)
+        s[i] = bswap32(s[i]);
+
+    memcpy(script_hash32, s, 32);
+    ripemd160_prepare_block32(s);
+
+    RIPEMD160Initialize(hash160);
+    RIPEMD160Transform(hash160, s);
+}
+
+static inline void _GetP2WSHComp(const thread unsigned char* pubkey65, thread uint8_t* script_hash32, thread uint32_t* hash160)
+{
+    const uint8_t prefix = 0x02u + (pubkey65[64] & 1u);
+    _GetP2WSHCompFromX32(pubkey65 + 1, prefix, script_hash32, hash160);
+}
+
+static inline void _GetP2WSHComp_fast(thread uint64_t* x, uint8_t isOdd, thread uint8_t* script_hash32, thread uint32_t* hash160)
+{
+    thread uint32_t* x32 = reinterpret_cast<thread uint32_t*>(x);
+    REC_ALIGN(16) uint32_t scriptBytes[16];
+    REC_ALIGN(16) uint32_t s[16];
+
+    const uint32_t prefix = 0x02u + (uint32_t(isOdd) & 1u);
+    scriptBytes[0] = gpuhash_byte_perm(x32[7], (0x21u << 8) | prefix, 0x5432);
+    scriptBytes[1] = gpuhash_byte_perm(x32[7], x32[6], 0x1076);
+    scriptBytes[2] = gpuhash_byte_perm(x32[6], x32[5], 0x1076);
+    scriptBytes[3] = gpuhash_byte_perm(x32[5], x32[4], 0x1076);
+    scriptBytes[4] = gpuhash_byte_perm(x32[4], x32[3], 0x1076);
+    scriptBytes[5] = gpuhash_byte_perm(x32[3], x32[2], 0x1076);
+    scriptBytes[6] = gpuhash_byte_perm(x32[2], x32[1], 0x1076);
+    scriptBytes[7] = gpuhash_byte_perm(x32[1], x32[0], 0x1076);
+    scriptBytes[8] = gpuhash_byte_perm(x32[0], (0x80u << 8) | 0xacu, 0x1045);
+    scriptBytes[9] = 0;
+    scriptBytes[10] = 0;
+    scriptBytes[11] = 0;
+    scriptBytes[12] = 0;
+    scriptBytes[13] = 0;
+    scriptBytes[14] = 0;
+    scriptBytes[15] = 0x118;
+
+    SHA256Initialize(s);
+    SHA256Transform(s, scriptBytes);
+
+#pragma unroll 8
+    for (int i = 0; i < 8; i++)
+        s[i] = bswap32(s[i]);
+
+    memcpy(script_hash32, s, 32);
+    ripemd160_prepare_block32(s);
+
+    RIPEMD160Initialize(hash160);
+    RIPEMD160Transform(hash160, s);
+}
+
+// Both odd (0x03) and even (0x02) compressed pubkey hashes from x - for endomorphism 2x speedup.
+static inline void _GetHash160CompSym(thread uint64_t* x, thread uint8_t* hash_odd, thread uint8_t* hash_even) {
+    _GetHash160Comp_fast(x, 1, hash_odd);
+    _GetHash160Comp_fast(x, 0, hash_even);
+}
+
+// Device helper: _GetHash160ED.
+static inline   void _GetHash160ED(thread unsigned char* pubkey, thread int& keyLen, thread uint8_t* hash) {
+    int keyLenSkip = keyLen;
+    REC_ALIGN(16) uint32_t publicKeyBytes[16];
+    REC_ALIGN(16) uint32_t s[16];
+    // Compressed public key
+    uint8_t prefix = 0xED;
+    publicKeyBytes[0] = gpu_hash_pack_prefix_be3_pubkey(prefix, pubkey, keyLenSkip);
+    for (int i = 1; i < 8; ++i) {
+        publicKeyBytes[i] = gpu_hash_pack_be4_pubkey(pubkey, keyLenSkip);
+    }
+    publicKeyBytes[8] = (uint32_t)pubkey[keyLenSkip++] << 24 | 0x800000;
+    publicKeyBytes[9] = 0;
+    publicKeyBytes[10] = 0;
+    publicKeyBytes[11] = 0;
+    publicKeyBytes[12] = 0;
+    publicKeyBytes[13] = 0;
+    publicKeyBytes[14] = 0;
+    publicKeyBytes[15] = 0x108;
+
+    SHA256Initialize(s);
+    SHA256Transform(s, publicKeyBytes);
+
+#pragma unroll 8
+    for (int i = 0; i < 8; i++)
+        s[i] = bswap32(s[i]);
+
+    ripemd160_prepare_block32(s);
+
+    RIPEMD160Initialize((thread uint32_t*)hash);
+    RIPEMD160Transform((thread uint32_t*)hash, s);
+}
+
+// Uncompressed Hash160 from VanitySearch-style (thread uint64_t* x, thread uint64_t* y)
+static inline void _GetHash160Uncomp_fast(thread uint64_t* x, thread uint64_t* y, thread uint8_t* hash) {
+    _GetHash160((thread uint32_t*)x, (thread uint32_t*)y, hash);
+}
+
+// Extract 32 bytes of X coordinate (big-endian) from px
+static inline void u64x4_to_x32(thread uint64_t* px, thread unsigned char* out32) {
+    for (int w = 3; w >= 0; w--) {
+        uint64_t val = px[w];
+        for (int b = 7; b >= 0; b--) {
+            out32[(3 - w) * 8 + (7 - b)] = (unsigned char)((val >> (b * 8)) & 0xFF);
+        }
+    }
+}
+
+// Build 65-byte uncompressed pubkey from uint64[4] X and Y
+static inline void u64x4_to_pubkey65(thread uint64_t* px, thread uint64_t* py, thread unsigned char* out65) {
+    out65[0] = 0x04;
+    for (int w = 3; w >= 0; w--) {
+        uint64_t val = px[w];
+        for (int b = 7; b >= 0; b--) {
+            out65[1 + (3 - w) * 8 + (7 - b)] = (unsigned char)((val >> (b * 8)) & 0xFF);
+        }
+    }
+    for (int w = 3; w >= 0; w--) {
+        uint64_t val = py[w];
+        for (int b = 7; b >= 0; b--) {
+            out65[33 + (3 - w) * 8 + (7 - b)] = (unsigned char)((val >> (b * 8)) & 0xFF);
+        }
+    }
+}
+
+// Device helper: _GetHash160.
+static inline void _GetHash160(const thread uint32_t* x32, const thread uint32_t* y32, thread uint8_t* hash) {
+
+    REC_ALIGN(16) uint32_t publicKeyBytes[32];
+    REC_ALIGN(16) uint32_t s[16];
+
+    // Uncompressed public key
+    publicKeyBytes[0] = gpuhash_byte_perm(x32[7], 0x04, 0x4321);
+    publicKeyBytes[1] = gpuhash_byte_perm(x32[7], x32[6], 0x0765);
+    publicKeyBytes[2] = gpuhash_byte_perm(x32[6], x32[5], 0x0765);
+    publicKeyBytes[3] = gpuhash_byte_perm(x32[5], x32[4], 0x0765);
+    publicKeyBytes[4] = gpuhash_byte_perm(x32[4], x32[3], 0x0765);
+    publicKeyBytes[5] = gpuhash_byte_perm(x32[3], x32[2], 0x0765);
+    publicKeyBytes[6] = gpuhash_byte_perm(x32[2], x32[1], 0x0765);
+    publicKeyBytes[7] = gpuhash_byte_perm(x32[1], x32[0], 0x0765);
+    publicKeyBytes[8] = gpuhash_byte_perm(x32[0], y32[7], 0x0765);
+    publicKeyBytes[9] = gpuhash_byte_perm(y32[7], y32[6], 0x0765);
+    publicKeyBytes[10] = gpuhash_byte_perm(y32[6], y32[5], 0x0765);
+    publicKeyBytes[11] = gpuhash_byte_perm(y32[5], y32[4], 0x0765);
+    publicKeyBytes[12] = gpuhash_byte_perm(y32[4], y32[3], 0x0765);
+    publicKeyBytes[13] = gpuhash_byte_perm(y32[3], y32[2], 0x0765);
+    publicKeyBytes[14] = gpuhash_byte_perm(y32[2], y32[1], 0x0765);
+    publicKeyBytes[15] = gpuhash_byte_perm(y32[1], y32[0], 0x0765);
+    publicKeyBytes[16] = gpuhash_byte_perm(y32[0], 0x80, 0x0456);
+    publicKeyBytes[17] = 0;
+    publicKeyBytes[18] = 0;
+    publicKeyBytes[19] = 0;
+    publicKeyBytes[20] = 0;
+    publicKeyBytes[21] = 0;
+    publicKeyBytes[22] = 0;
+    publicKeyBytes[23] = 0;
+    publicKeyBytes[24] = 0;
+    publicKeyBytes[25] = 0;
+    publicKeyBytes[26] = 0;
+    publicKeyBytes[27] = 0;
+    publicKeyBytes[28] = 0;
+    publicKeyBytes[29] = 0;
+    publicKeyBytes[30] = 0;
+    publicKeyBytes[31] = 0x208;
+
+    SHA256Initialize(s);
+    SHA256Transform(s, publicKeyBytes);
+    SHA256Transform(s, publicKeyBytes + 16);
+
+#pragma unroll 8
+    for (int i = 0; i < 8; i++)
+        s[i] = bswap32(s[i]);
+
+    ripemd160_prepare_block32(s);
+
+    RIPEMD160Initialize((thread uint32_t*)hash);
+    RIPEMD160Transform((thread uint32_t*)hash, s);
+}
+
+// Device helper: _GetHash160P2SHCompFromHash.
+static inline  void _GetHash160P2SHCompFromHash(thread uint32_t* h, thread uint32_t* hash) {
+    REC_ALIGN(16) uint32_t scriptBytes[16];
+    REC_ALIGN(16) uint32_t s[16];
+
+    // P2SH script script
+    scriptBytes[0] = gpuhash_byte_perm(h[0], 0x14, 0x5401);
+    scriptBytes[1] = gpuhash_byte_perm(h[0], h[1], 0x2345);
+    scriptBytes[2] = gpuhash_byte_perm(h[1], h[2], 0x2345);
+    scriptBytes[3] = gpuhash_byte_perm(h[2], h[3], 0x2345);
+    scriptBytes[4] = gpuhash_byte_perm(h[3], h[4], 0x2345);
+    scriptBytes[5] = gpuhash_byte_perm(h[4], 0x80, 0x2345);
+    scriptBytes[6] = 0;
+    scriptBytes[7] = 0;
+    scriptBytes[8] = 0;
+    scriptBytes[9] = 0;
+    scriptBytes[10] = 0;
+    scriptBytes[11] = 0;
+    scriptBytes[12] = 0;
+    scriptBytes[13] = 0;
+    scriptBytes[14] = 0;
+    scriptBytes[15] = 0xB0;
+
+    SHA256Initialize(s);
+    SHA256Transform(s, scriptBytes);
+
+#pragma unroll 8
+    for (int i = 0; i < 8; i++)
+        s[i] = bswap32(s[i]);
+
+    ripemd160_prepare_block32(s);
+
+    RIPEMD160Initialize(hash);
+    RIPEMD160Transform(hash, s);
+}
+
+
+
+
+
+/*** Constants. ***/
+constant uint64_t const RC[24] = \
+{1ULL, 0x8082ULL, 0x800000000000808aULL, 0x8000000080008000ULL,
+0x808bULL, 0x80000001ULL, 0x8000000080008081ULL, 0x8000000000008009ULL,
+0x8aULL, 0x88ULL, 0x80008009ULL, 0x8000000aULL,
+0x8000808bULL, 0x800000000000008bULL, 0x8000000000008089ULL, 0x8000000000008003ULL,
+0x8000000000008002ULL, 0x8000000000000080ULL, 0x800aULL, 0x800000008000000aULL,
+0x8000000080008081ULL, 0x8000000000008080ULL, 0x80000001ULL, 0x8000000080008008ULL};
+
+/*** Helper macros to unroll the permutation. ***/
+#define rol(x, s) (((x) << s) | ((x) >> (64 - s)))
+#define REPEAT6(e) e e e e e e
+#define REPEAT24(e) REPEAT6(e e e e)
+#define REPEAT5(e) e e e e e
+#define FOR5(type, v, s, e) \
+	v = 0;            \
+	REPEAT5(e; v = static_cast<type>(v + s);)
+
+/*** Keccak-f[1600] ***/
+static inline void keccakf(thread void* state)
+{
+    thread uint64_t* st = (thread uint64_t*)state;
+    uint64_t t0, t1, t2, t3, t4;
+#define GPUHASH_TH_ELT(t, c0, c1, c2, c3, c4, d0, d1, d2, d3, d4) \
+    t = rol((uint64_t)(d0 ^ d1 ^ d2 ^ d3 ^ d4), 1) ^ (c0 ^ c1 ^ c2 ^ c3 ^ c4)
+#define GPUHASH_THETA(s00, s01, s02, s03, s04, s10, s11, s12, s13, s14, s20, s21, s22, s23, s24, s30, s31, s32, s33, s34, s40, s41, s42, s43, s44) \
+    GPUHASH_TH_ELT(t0, s40, s41, s42, s43, s44, s10, s11, s12, s13, s14); \
+    GPUHASH_TH_ELT(t1, s00, s01, s02, s03, s04, s20, s21, s22, s23, s24); \
+    GPUHASH_TH_ELT(t2, s10, s11, s12, s13, s14, s30, s31, s32, s33, s34); \
+    GPUHASH_TH_ELT(t3, s20, s21, s22, s23, s24, s40, s41, s42, s43, s44); \
+    GPUHASH_TH_ELT(t4, s30, s31, s32, s33, s34, s00, s01, s02, s03, s04); \
+    s00 ^= t0; s01 ^= t0; s02 ^= t0; s03 ^= t0; s04 ^= t0; \
+    s10 ^= t1; s11 ^= t1; s12 ^= t1; s13 ^= t1; s14 ^= t1; \
+    s20 ^= t2; s21 ^= t2; s22 ^= t2; s23 ^= t2; s24 ^= t2; \
+    s30 ^= t3; s31 ^= t3; s32 ^= t3; s33 ^= t3; s34 ^= t3; \
+    s40 ^= t4; s41 ^= t4; s42 ^= t4; s43 ^= t4; s44 ^= t4
+#define GPUHASH_RHOPI(s00, s01, s02, s03, s04, s10, s11, s12, s13, s14, s20, s21, s22, s23, s24, s30, s31, s32, s33, s34, s40, s41, s42, s43, s44) \
+    t0 = rol(s10, 1);  s10 = rol(s11,44); s11 = rol(s41,20); s41 = rol(s24,61); \
+    s24 = rol(s42,39); s42 = rol(s04,18); s04 = rol(s20,62); s20 = rol(s22,43); \
+    s22 = rol(s32,25); s32 = rol(s43, 8); s43 = rol(s34,56); s34 = rol(s03,41); \
+    s03 = rol(s40,27); s40 = rol(s44,14); s44 = rol(s14, 2); s14 = rol(s31,55); \
+    s31 = rol(s13,45); s13 = rol(s01,36); s01 = rol(s30,28); s30 = rol(s33,21); \
+    s33 = rol(s23,15); s23 = rol(s12,10); s12 = rol(s21, 6); s21 = rol(s02, 3); s02 = t0
+#define GPUHASH_KHI5(a,b,c,d,e) t0 = a ^ (~b & c); t1 = b ^ (~c & d); t2 = c ^ (~d & e); t3 = d ^ (~e & a); t4 = e ^ (~a & b); a = t0; b = t1; c = t2; d = t3; e = t4
+#define GPUHASH_KHI(s00, s01, s02, s03, s04, s10, s11, s12, s13, s14, s20, s21, s22, s23, s24, s30, s31, s32, s33, s34, s40, s41, s42, s43, s44) \
+    GPUHASH_KHI5(s00,s10,s20,s30,s40); GPUHASH_KHI5(s01,s11,s21,s31,s41); GPUHASH_KHI5(s02,s12,s22,s32,s42); GPUHASH_KHI5(s03,s13,s23,s33,s43); GPUHASH_KHI5(s04,s14,s24,s34,s44)
+#pragma unroll 24
+    for (int i = 0; i < 24; ++i) {
+        GPUHASH_THETA(st[0], st[5], st[10], st[15], st[20], st[1], st[6], st[11], st[16], st[21], st[2], st[7], st[12], st[17], st[22], st[3], st[8], st[13], st[18], st[23], st[4], st[9], st[14], st[19], st[24]);
+        GPUHASH_RHOPI(st[0], st[5], st[10], st[15], st[20], st[1], st[6], st[11], st[16], st[21], st[2], st[7], st[12], st[17], st[22], st[3], st[8], st[13], st[18], st[23], st[4], st[9], st[14], st[19], st[24]);
+        GPUHASH_KHI(st[0], st[5], st[10], st[15], st[20], st[1], st[6], st[11], st[16], st[21], st[2], st[7], st[12], st[17], st[22], st[3], st[8], st[13], st[18], st[23], st[4], st[9], st[14], st[19], st[24]);
+        st[0] ^= RC[i];
+    }
+#undef GPUHASH_TH_ELT
+#undef GPUHASH_THETA
+#undef GPUHASH_RHOPI
+#undef GPUHASH_KHI5
+#undef GPUHASH_KHI
+}
+
+/******** The FIPS202-defined functions. ********/
+
+/*** Some helper macros. ***/
+
+#define _(S) do { S } while (0)
+#define FOR(i, ST, L, S) \
+	_(for (size_t i = 0; i < L; i += ST) { S; })
+#define mkapply_ds(NAME, S)                                          \
+	static inline void NAME(thread uint8_t* dst,                              \
+							const thread uint8_t* src,                        \
+							size_t len) {                              \
+		FOR(i, 1, len, S);                                               \
+	}
+#define mkapply_sd(NAME, S)                                          \
+	static inline void NAME(const thread uint8_t* src,                        \
+							thread uint8_t* dst,                              \
+							size_t len) {                              \
+		FOR(i, 1, len, S);                                               \
+	}
+
+mkapply_ds(xorin, dst[i] ^= src[i])  // xorin
+mkapply_sd(setout, dst[i] = src[i])  // setout
+
+#define P keccakf
+#define Plen 200
+
+static inline void keccak_eth64_fast(const thread uint8_t*  message, thread unsigned char*  output)
+{
+    union {
+        uint8_t b[200];
+        uint64_t q[25];
+        uint32_t d[50];
+    } h;
+#pragma unroll
+    for (int i = 0; i < 200; ++i) h.b[i] = 0;
+#pragma unroll
+    for (int i = 0; i < 64; ++i) h.b[i] = message[i];
+    h.d[16] ^= 0x01u;
+    h.d[33] ^= 0x80000000u;
+    keccakf(h.q);
+#pragma unroll
+    for (int i = 0; i < 32; ++i) output[i] = h.b[i];
+}
+
+static inline uint64_t gpuhash_bswap64(uint64_t v)
+{
+    return ((uint64_t)bswap32((uint32_t)v) << 32) | (uint64_t)bswap32((uint32_t)(v >> 32));
+}
+
+static inline uint64_t gpuhash_load_le64(const thread uint8_t*  p)
+{
+    uint64_t v = 0ull;
+#pragma unroll
+    for (int i = 0; i < 8; ++i) {
+        v |= ((uint64_t)p[i]) << (i * 8);
+    }
+    return v;
+}
+
+static inline void keccak_eth64_tail20_from_state(thread uint64_t*  q, thread uint8_t*  b, thread uint32_t*  out5)
+{
+    q[8] = 0x01ull;
+    q[16] = 0x8000000000000000ull;
+
+    keccakf(q);
+
+#pragma unroll
+    for (int i = 0; i < 5; ++i) {
+        const int hpos = 12 + i * 4;
+        out5[i] = ((uint32_t)b[hpos]) |
+            ((uint32_t)b[hpos + 1] << 8) |
+            ((uint32_t)b[hpos + 2] << 16) |
+            ((uint32_t)b[hpos + 3] << 24);
+    }
+}
+
+static inline void keccak_eth64_tail20_bytes(const thread uint8_t*  message, thread uint32_t*  out5)
+{
+    union {
+        uint8_t b[200];
+        uint64_t q[25];
+    } h;
+
+#pragma unroll
+    for (int i = 0; i < 25; ++i) h.q[i] = 0ull;
+
+#pragma unroll
+    for (int i = 0; i < 8; ++i) {
+        h.q[i] = gpuhash_load_le64(message + i * 8);
+    }
+
+    keccak_eth64_tail20_from_state(h.q, h.b, out5);
+}
+
+static inline void keccak_eth64_tail20_from_xy(const thread uint64_t*  px, const thread uint64_t*  py, thread uint32_t*  out5)
+{
+    union {
+        uint8_t b[200];
+        uint64_t q[25];
+    } h;
+
+#pragma unroll
+    for (int i = 0; i < 25; ++i) h.q[i] = 0ull;
+
+    h.q[0] = gpuhash_bswap64(px[3]);
+    h.q[1] = gpuhash_bswap64(px[2]);
+    h.q[2] = gpuhash_bswap64(px[1]);
+    h.q[3] = gpuhash_bswap64(px[0]);
+    h.q[4] = gpuhash_bswap64(py[3]);
+    h.q[5] = gpuhash_bswap64(py[2]);
+    h.q[6] = gpuhash_bswap64(py[1]);
+    h.q[7] = gpuhash_bswap64(py[0]);
+
+    keccak_eth64_tail20_from_state(h.q, h.b, out5);
+}
+
+static inline bool keccak_keystore_mac_16_plus(
+    const thread uint8_t*  prefix16,
+    const thread uint8_t*  tail,
+    uint32_t tail_len,
+    thread uint8_t*  output32)
+{
+    if (tail_len >= 120u) {
+        return false;
+    }
+
+    union {
+        uint8_t b[200];
+        uint64_t q[25];
+    } h;
+
+#pragma unroll
+    for (int i = 0; i < 25; ++i) h.q[i] = 0ull;
+
+#pragma unroll
+    for (int i = 0; i < 16; ++i) {
+        h.b[i] = prefix16[i];
+    }
+    for (uint32_t i = 0; i < tail_len; ++i) {
+        h.b[16u + i] = tail[i];
+    }
+
+    const uint32_t len = 16u + tail_len;
+    h.b[len] ^= 0x01u;
+    h.b[135] ^= 0x80u;
+    keccakf(h.q);
+
+#pragma unroll
+    for (int i = 0; i < 32; ++i) {
+        output32[i] = h.b[i];
+    }
+    return true;
+}
+
+// Fold P*F over the full blocks of an input.
+#define foldP(I, L, F) \
+	while (L >= rate) {  \
+		F(a, I, rate);     \
+		P(a);              \
+		I += rate;         \
+		L -= rate;         \
+	}
+
+
+/** The sponge-based hash construction. **/
+static inline void hashing(
+    thread uint8_t* out,
+    size_t outlen,
+    const thread uint8_t* in,
+    size_t inlen,
+    size_t rate,
+    uint8_t delim
+)
+{
+
+    REC_ALIGN(16) uint8_t a[Plen] = { 0 };
+    // Absorb input.
+    foldP(in, inlen, xorin);
+    // Xor in the DS and pad frame.
+    a[inlen] ^= delim;
+    a[rate - 1] ^= 0x80;
+    // Xor in the last block.
+    xorin(a, in, inlen);
+    // Apply P
+    P(a);
+    // Squeeze output.
+    foldP(out, outlen, setout);
+    setout(a, out, outlen);
+    memset(a, 0, 200);
+}
+
+
+// Device helper: keccak.
+static inline void keccak(const thread char*  message, int message_len, thread unsigned char*  output, int output_len)
+{
+    if (message_len == 64 && output_len == 32) {
+        keccak_eth64_fast((const thread uint8_t*)message, output);
+        return;
+    }
+    hashing(output, output_len, (thread uint8_t*)message, message_len, 200 - (256 / 4), 0x01);
+}
+
+// Device helper: sha3_256.
+static inline void sha3_256(const thread char*  message, int message_len, thread unsigned char*  output)
+{
+
+    hashing(output, 32, (thread uint8_t*)message, message_len, 200 - (256 / 4), 0x06);
+
+}
+
+// ---------------- Keccak-f[1600] -----------------------------------------
+
+constant uint64_t KeccakF_RoundConstants[24] = {
+    0x0000000000000001ULL, 0x0000000000008082ULL,
+    0x800000000000808aULL, 0x8000000080008000ULL,
+    0x000000000000808bULL, 0x0000000080000001ULL,
+    0x8000000080008081ULL, 0x8000000000008009ULL,
+    0x000000000000008aULL, 0x0000000000000088ULL,
+    0x0000000080008009ULL, 0x000000008000000aULL,
+    0x000000008000808bULL, 0x800000000000008bULL,
+    0x8000000000008089ULL, 0x8000000000008003ULL,
+    0x8000000000008002ULL, 0x8000000000000080ULL,
+    0x000000000000800aULL, 0x800000008000000aULL,
+    0x8000000080008081ULL, 0x8000000000008080ULL,
+    0x0000000080000001ULL, 0x8000000080008008ULL
+};
+
+constant int KeccakF_RotationConstants[5][5] = {
+     {   0,  36,   3,  41,  18},
+{   1,  44,  10,  45,   2},
+{  62,   6,  43,  15,  61},
+{  28,  55,  25,  21,  56},
+{  27,  20,  39,   8,  14}
+};
+
+// Device helper: keccak_f1600.
+static inline  void keccak_f1600(uint64_t state[25]) {
+#pragma unroll
+    for (int round = 0; round < 24; ++round) {
+        // θ step
+        REC_ALIGN(16) uint64_t C[5];
+        for (int x = 0; x < 5; ++x) {
+            C[x] = state[x] ^ state[x + 5] ^ state[x + 10]
+                ^ state[x + 15] ^ state[x + 20];
+        }
+        for (int x = 0; x < 5; ++x) {
+            uint64_t D = C[(x + 4) % 5] ^ rol(C[(x + 1) % 5], 1);
+            for (int y = 0; y < 25; y += 5) {
+                state[y + x] ^= D;
+            }
+        }
+        // ρ and π steps
+        REC_ALIGN(16) uint64_t B[25];
+        for (int x = 0; x < 5; ++x) {
+            for (int y = 0; y < 5; ++y) {
+                int idx = y * 5 + x;
+                int r = KeccakF_RotationConstants[x][y];
+                int newX = y;
+                int newY = (2 * x + 3 * y) % 5;
+                B[newY * 5 + newX] = rol(state[idx], r);
+            }
+        }
+        // χ step
+        for (int y = 0; y < 5; ++y) {
+            for (int x = 0; x < 5; ++x) {
+                state[y * 5 + x] = B[y * 5 + x]
+                    ^ ((~B[y * 5 + ((x + 1) % 5)]) & B[y * 5 + ((x + 2) % 5)]);
+            }
+        }
+        // ι step
+        state[0] ^= KeccakF_RoundConstants[round];
+    }
+}
+
+// ---------------- SHA3-256 (Keccak) --------------------------------------
+
+static inline  void sha3_256_old(const thread uint8_t* in, size_t in_len, thread uint8_t* out) {
+    const size_t rate = 136;
+    REC_ALIGN(16) uint8_t block[136];
+    REC_ALIGN(16) uint64_t state[25];
+    memset(state, 0, sizeof(state));
+
+    // Absorb
+    size_t offset = 0;
+    while (in_len - offset >= rate) {
+        for (size_t i = 0; i < rate / 8; ++i) {
+            uint64_t t;
+            memcpy(&t, in + offset + 8 * i, 8);
+            state[i] ^= t;
+        }
+        keccak_f1600(state);
+        offset += rate;
+    }
+    // Last block + padding
+    size_t rem = in_len - offset;
+    memset(block, 0, rate);
+    memcpy(block, in + offset, rem);
+    block[rem] = 0x06;
+    block[rate - 1] |= 0x80;
+    for (size_t i = 0; i < rate / 8; ++i) {
+        uint64_t t;
+        memcpy(&t, block + 8 * i, 8);
+        state[i] ^= t;
+    }
+    keccak_f1600(state);
+
+    // Squeeze
+    for (size_t i = 0; i < 4; ++i) { // 4*8 = 32 bytes
+        uint64_t t = state[i];
+        memcpy(out + 8 * i, &t, 8);
+
+    }
+}
+
+// ---------------- BLAKE2b-256 --------------------------------------------
+#define rot(x, n) (((x) >> (n)) | ((x) << (64 - (n))))
+
+
+constant uint64_t blake2b_IV[8] = {
+    0x6A09E667F3BCC908ULL, 0xBB67AE8584CAA73BULL,
+    0x3C6EF372FE94F82BULL, 0xA54FF53A5F1D36F1ULL,
+    0x510E527FADE682D1ULL, 0x9B05688C2B3E6C1FULL,
+    0x1F83D9ABFB41BD6BULL, 0x5BE0CD19137E2179ULL
+};
+
+constant uint8_t blake2b_sigma[12][16] = {
+    { 0, 1, 2, 3, 4, 5, 6, 7, 8, 9,10,11,12,13,14,15 },
+    {14,10, 4, 8, 9,15,13, 6, 1,12, 0, 2,11, 7, 5, 3 },
+    {11, 8,12, 0, 5, 2,15,13,10,14, 3, 6, 7, 1, 9, 4 },
+    { 7, 9, 3, 1,13,12,11,14, 2, 6, 5,10, 4, 0,15, 8 },
+    { 9, 0, 5, 7, 2, 4,10,15,14, 1,11,12, 6, 8, 3,13 },
+    { 2,12, 6,10, 0,11, 8, 3, 4,13, 7, 5,15,14, 1, 9 },
+    {12, 5, 1,15,14,13, 4,10, 0, 7, 6, 3, 9, 2, 8,11 },
+    {13,11, 7,14,12, 1, 3, 9, 5, 0,15, 4, 8, 6, 2,10 },
+    { 6,15,14, 9,11, 3, 0, 8,12, 2,13, 7, 1, 4,10, 5 },
+    {10, 2, 8, 4, 7, 6, 1, 5,15,11, 9,14, 3,12,13, 0 },
+    { 0, 1, 2, 3, 4, 5, 6, 7, 8, 9,10,11,12,13,14,15 },
+    {14,10, 4, 8, 9,15,13, 6, 1,12, 0, 2,11, 7, 5, 3 }
+};
+
+// Device helper: load64.
+static inline uint64_t load64(const thread uint8_t* p) {
+    return  ((uint64_t)p[0]) |
+        (((uint64_t)p[1]) << 8) |
+        (((uint64_t)p[2]) << 16) |
+        (((uint64_t)p[3]) << 24) |
+        (((uint64_t)p[4]) << 32) |
+        (((uint64_t)p[5]) << 40) |
+        (((uint64_t)p[6]) << 48) |
+        (((uint64_t)p[7]) << 56);
+}
+
+// Device helper: store32.
+static inline void store32(thread uint8_t* out, uint32_t w) {
+    out[0] = (uint8_t)(w & 0xFF);
+    out[1] = (uint8_t)((w >> 8) & 0xFF);
+    out[2] = (uint8_t)((w >> 16) & 0xFF);
+    out[3] = (uint8_t)((w >> 24) & 0xFF);
+}
+
+// Device helper: G.
+static inline void G(thread uint64_t& a, thread uint64_t& b, thread uint64_t& c, thread uint64_t& d, uint64_t x, uint64_t y) {
+    a = a + b + x;
+    d = rot(d ^ a, 32);
+    c = c + d;
+    b = rot(b ^ c, 24);
+    a = a + b + y;
+    d = rot(d ^ a, 16);
+    c = c + d;
+    b = rot(b ^ c, 63);
+}
+
+static inline void blake2b_compress(
+    uint64_t h[8],
+    const uint8_t block[128],
+    uint64_t t0, uint64_t t1,
+    bool last)
+{
+    uint64_t m[16];
+#pragma unroll
+    for (int i = 0; i < 16; i++) {
+        m[i] = load64(block + i * 8);
+    }
+
+    uint64_t v[16];
+#pragma unroll
+    for (int i = 0; i < 8; i++) {
+        v[i] = h[i];
+        v[i + 8] = blake2b_IV[i];
+    }
+
+    // v12 = t0 ⊕ IV[0], v13 = t0 >> 64 ⊕ IV[1]
+    v[12] ^= t0;
+    v[13] ^= t1;
+
+    if (last) {
+        v[14] = ~v[14];
+    }
+
+#pragma unroll
+    for (int round = 0; round < 12; round++) {
+        const constant uint8_t* sigma = blake2b_sigma[round];
+        G(v[0], v[4], v[8], v[12], m[sigma[0]], m[sigma[1]]);
+        G(v[1], v[5], v[9], v[13], m[sigma[2]], m[sigma[3]]);
+        G(v[2], v[6], v[10], v[14], m[sigma[4]], m[sigma[5]]);
+        G(v[3], v[7], v[11], v[15], m[sigma[6]], m[sigma[7]]);
+        G(v[0], v[5], v[10], v[15], m[sigma[8]], m[sigma[9]]);
+        G(v[1], v[6], v[11], v[12], m[sigma[10]], m[sigma[11]]);
+        G(v[2], v[7], v[8], v[13], m[sigma[12]], m[sigma[13]]);
+        G(v[3], v[4], v[9], v[14], m[sigma[14]], m[sigma[15]]);
+    }
+
+#pragma unroll
+    for (int i = 0; i < 8; i++) {
+        h[i] ^= v[i] ^ v[i + 8];
+    }
+}
+
+
+// Device helper: blake2b_param_init.
+static inline void blake2b_param_init(uint64_t param[8], uint8_t outlen) {
+    uint8_t P0[8];
+    P0[0] = outlen;
+    P0[1] = 0;       // key_length = 0
+    P0[2] = 1;       // fanout = 1
+    P0[3] = 1;       // depth = 1
+    P0[4] = 0; P0[5] = 0; P0[6] = 0; P0[7] = 0; // leaf_length
+    param[0] = load64(P0);
+
+    uint8_t P1[8]; for (int i = 0; i < 8; i++) P1[i] = 0;
+    param[1] = load64(P1);
+
+    param[2] = 0ULL;
+    param[3] = 0ULL;
+    param[4] = 0ULL;
+    param[5] = 0ULL;
+    param[6] = 0ULL;
+    param[7] = 0ULL;
+}
+
+// Device helper: blake2b_init.
+static inline void blake2b_init(uint64_t h[8], uint8_t outlen) {
+    uint64_t param[8];
+    blake2b_param_init(param, outlen);
+#pragma unroll
+    for (int i = 0; i < 8; i++) {
+        h[i] = blake2b_IV[i] ^ param[i];
+    }
+}
+
+// Device helper: Blake2b_256.
+static inline  void Blake2b_256(const thread uint8_t* data, size_t len, uint8_t out[32]) {
+    uint64_t h[8];
+    blake2b_init(h, 32);
+
+    const size_t block_size = 128;
+    REC_ALIGN(16) uint8_t buffer[128];
+    uint64_t t0 = 0ULL;
+    uint64_t t1 = 0ULL;
+
+    size_t offset = 0;
+    while (offset + block_size <= len) {
+
+        for (int i = 0; i < 128; ++i) buffer[i] = data[offset + i];
+
+        t0 += block_size;
+        if (t0 < block_size) {
+            t1++;
+        }
+        blake2b_compress(h, buffer, t0, t1, false);
+        offset += block_size;
+    }
+
+    size_t rem = len - offset;
+#pragma unroll
+    for (int i = 0; i < 128; i++) {
+        if ((size_t)i < rem) buffer[i] = data[offset + i];
+        else buffer[i] = 0;
+    }
+    t0 += rem;
+    if (t0 < rem) {
+        t1++;
+    }
+    blake2b_compress(h, buffer, t0, t1, true);
+
+
+#pragma unroll
+    for (int i = 0; i < 4; i++) {
+        uint64_t wi = h[i];
+        out[i * 8 + 0] = (uint8_t)(wi & 0xFF);
+        out[i * 8 + 1] = (uint8_t)((wi >> 8) & 0xFF);
+        out[i * 8 + 2] = (uint8_t)((wi >> 16) & 0xFF);
+        out[i * 8 + 3] = (uint8_t)((wi >> 24) & 0xFF);
+        out[i * 8 + 4] = (uint8_t)((wi >> 32) & 0xFF);
+        out[i * 8 + 5] = (uint8_t)((wi >> 40) & 0xFF);
+        out[i * 8 + 6] = (uint8_t)((wi >> 48) & 0xFF);
+        out[i * 8 + 7] = (uint8_t)((wi >> 56) & 0xFF);
+    }
+}
+
+// Device helper: Blake2b_224.
+static inline void Blake2b_224(const thread uint8_t* data, size_t len, uint8_t out[28]) {
+    uint64_t h[8];
+    blake2b_init(h, 28);
+
+    const size_t block_size = 128;
+    REC_ALIGN(16) uint8_t buffer[128];
+    uint64_t t0 = 0ULL, t1 = 0ULL;
+
+    size_t offset = 0;
+    while (offset + block_size <= len) {
+#pragma unroll
+        for (int i = 0; i < 128; ++i) buffer[i] = data[offset + i];
+        t0 += block_size; if (t0 < block_size) t1++;
+        blake2b_compress(h, buffer, t0, t1, false);
+        offset += block_size;
+    }
+
+    size_t rem = len - offset;
+#pragma unroll
+    for (int i = 0; i < 128; i++) buffer[i] = (i < (int)rem) ? data[offset + i] : 0;
+
+    t0 += rem; if (t0 < rem) t1++;
+    blake2b_compress(h, buffer, t0, t1, true);
+
+#pragma unroll
+    for (int i = 0; i < 3; i++) {
+        uint64_t wi = h[i];
+        out[i * 8 + 0] = (uint8_t)(wi & 0xFF);
+        out[i * 8 + 1] = (uint8_t)((wi >> 8) & 0xFF);
+        out[i * 8 + 2] = (uint8_t)((wi >> 16) & 0xFF);
+        out[i * 8 + 3] = (uint8_t)((wi >> 24) & 0xFF);
+        out[i * 8 + 4] = (uint8_t)((wi >> 32) & 0xFF);
+        out[i * 8 + 5] = (uint8_t)((wi >> 40) & 0xFF);
+        out[i * 8 + 6] = (uint8_t)((wi >> 48) & 0xFF);
+        out[i * 8 + 7] = (uint8_t)((wi >> 56) & 0xFF);
+    }
+    uint64_t w3 = h[3];
+    out[24] = (uint8_t)(w3 & 0xFF);
+    out[25] = (uint8_t)((w3 >> 8) & 0xFF);
+    out[26] = (uint8_t)((w3 >> 16) & 0xFF);
+    out[27] = (uint8_t)((w3 >> 24) & 0xFF);
+}
+
+// Byron Icarus address helper for Cardano xpub-derived addresses.
+#define CBOR_MT_UINT  0x00
+#define CBOR_MT_BYTES 0x40
+#define CBOR_MT_ARRAY 0x80
+#define CBOR_MT_MAP   0xA0
+#define CBOR_MT_TAG   0xC0
+#define CBOR_ARRAY(n) (uint8_t)(CBOR_MT_ARRAY | ((n) & 0x1F))
+#define CBOR_MAP(n)   (uint8_t)(CBOR_MT_MAP   | ((n) & 0x1F))
+
+static inline void cardano_cbor_w1(thread uint8_t* out, thread size_t* off, uint8_t b) { out[(*off)++] = b; }
+
+static inline void cardano_cbor_uint_small_gpuhash(thread uint8_t* out, thread size_t* off, uint32_t v) {
+    if (v <= 23) {
+        cardano_cbor_w1(out, off, (uint8_t)(CBOR_MT_UINT | (v & 0x1F)));
+    }
+    else if (v <= 0xFFu) {
+        cardano_cbor_w1(out, off, (uint8_t)(CBOR_MT_UINT | 24));
+        cardano_cbor_w1(out, off, (uint8_t)v);
+    }
+    else if (v <= 0xFFFFu) {
+        cardano_cbor_w1(out, off, (uint8_t)(CBOR_MT_UINT | 25));
+        cardano_cbor_w1(out, off, (uint8_t)(v >> 8));
+        cardano_cbor_w1(out, off, (uint8_t)(v));
+    }
+    else {
+        cardano_cbor_w1(out, off, (uint8_t)(CBOR_MT_UINT | 26));
+        cardano_cbor_w1(out, off, (uint8_t)(v >> 24));
+        cardano_cbor_w1(out, off, (uint8_t)(v >> 16));
+        cardano_cbor_w1(out, off, (uint8_t)(v >> 8));
+        cardano_cbor_w1(out, off, (uint8_t)(v));
+    }
+}
+
+static inline void cardano_cbor_bytes_gpuhash(thread uint8_t* out, thread size_t* off, const thread uint8_t* bytes, size_t len) {
+    if (len <= 23) {
+        cardano_cbor_w1(out, off, (uint8_t)(CBOR_MT_BYTES | (uint8_t)len));
+    }
+    else if (len <= 0xFF) {
+        cardano_cbor_w1(out, off, (uint8_t)(CBOR_MT_BYTES | 24));
+        cardano_cbor_w1(out, off, (uint8_t)len);
+    }
+    else {
+        cardano_cbor_w1(out, off, (uint8_t)(CBOR_MT_BYTES | 25));
+        cardano_cbor_w1(out, off, (uint8_t)(len >> 8));
+        cardano_cbor_w1(out, off, (uint8_t)(len));
+    }
+    for (size_t i = 0; i < len; ++i) out[(*off)++] = bytes[i];
+}
+
+static inline void cardano_cbor_tag_24_gpuhash(thread uint8_t* out, thread size_t* off) {
+    cardano_cbor_w1(out, off, (uint8_t)(CBOR_MT_TAG | 24));
+    cardano_cbor_w1(out, off, 24);
+}
+
+static inline size_t build_inner_for_root_from_xpub_mainnet(const uint8_t publ[32], const uint8_t cc[32], thread uint8_t* out_inner) {
+    size_t off = 0;
+    cardano_cbor_w1(out_inner, &off, CBOR_ARRAY(3));
+    cardano_cbor_uint_small_gpuhash(out_inner, &off, 0);
+    cardano_cbor_w1(out_inner, &off, CBOR_ARRAY(2));
+    cardano_cbor_uint_small_gpuhash(out_inner, &off, 0);
+    uint8_t xpub[64];
+    memcpy(xpub, publ, 32);
+    memcpy(xpub + 32, cc, 32);
+    cardano_cbor_bytes_gpuhash(out_inner, &off, xpub, 64);
+    cardano_cbor_w1(out_inner, &off, CBOR_MAP(0));
+    return off;
+}
+
+static inline void compute_address_root_from_xpub_mainnet(const uint8_t publ[32], const uint8_t cc[32], uint8_t out_root28[28]) {
+    uint8_t inner[96];
+    size_t inner_len = build_inner_for_root_from_xpub_mainnet(publ, cc, inner);
+    uint8_t h_sha3[32];
+    sha3_256((thread char*)inner, inner_len, h_sha3);
+    Blake2b_224(h_sha3, 32, out_root28);
+}
+
+static inline size_t build_payload_mainnet_gpuhash(const uint8_t addressRoot28[28], thread uint8_t* out_payload) {
+    size_t off = 0;
+    cardano_cbor_w1(out_payload, &off, CBOR_ARRAY(3));
+    cardano_cbor_bytes_gpuhash(out_payload, &off, addressRoot28, 28);
+    cardano_cbor_w1(out_payload, &off, CBOR_MAP(0));
+    cardano_cbor_uint_small_gpuhash(out_payload, &off, 0);
+    return off;
+}
+
+static inline size_t build_outer_with_crc_and_tag24_gpuhash(const thread uint8_t* payload, size_t payload_len, thread uint8_t* out_outer) {
+    size_t off = 0;
+    cardano_cbor_w1(out_outer, &off, CBOR_ARRAY(2));
+    cardano_cbor_tag_24_gpuhash(out_outer, &off);
+    cardano_cbor_bytes_gpuhash(out_outer, &off, payload, payload_len);
+    uint32_t crc = crc32_ieee(payload, payload_len);
+    cardano_cbor_uint_small_gpuhash(out_outer, &off, crc);
+    return off;
+}
+
+static inline void byron_icarus_from_xpub(const thread uint8_t* publ, const thread uint8_t* cc, thread uint8_t* out) {
+    uint8_t root28[28];
+    compute_address_root_from_xpub_mainnet(publ, cc, root28);
+    uint8_t payload[64];
+    size_t payload_len = build_payload_mainnet_gpuhash(root28, payload);
+    build_outer_with_crc_and_tag24_gpuhash(payload, payload_len, out);
+}
+
+// Device helper: Blake2b_160.
+static inline void Blake2b_160(const thread uint8_t* data, size_t len, uint8_t out[20]) {
+    uint64_t h[8];
+    blake2b_init(h, 20);
+
+    const size_t block_size = 128;
+    REC_ALIGN(16) uint8_t buffer[128];
+    uint64_t t0 = 0ULL, t1 = 0ULL;
+
+    size_t offset = 0;
+    while (offset + block_size <= len) {
+#pragma unroll
+        for (int i = 0; i < 128; ++i) buffer[i] = data[offset + i];
+        t0 += block_size; if (t0 < block_size) t1++;
+        blake2b_compress(h, buffer, t0, t1, false);
+        offset += block_size;
+    }
+
+    size_t rem = len - offset;
+#pragma unroll
+    for (int i = 0; i < 128; i++) buffer[i] = (i < (int)rem) ? data[offset + i] : 0;
+
+    t0 += rem; if (t0 < rem) t1++;
+    blake2b_compress(h, buffer, t0, t1, true);
+
+#pragma unroll
+    for (int i = 0; i < 2; i++) {
+        uint64_t wi = h[i];
+        out[i * 8 + 0] = (uint8_t)(wi & 0xFF);
+        out[i * 8 + 1] = (uint8_t)((wi >> 8) & 0xFF);
+        out[i * 8 + 2] = (uint8_t)((wi >> 16) & 0xFF);
+        out[i * 8 + 3] = (uint8_t)((wi >> 24) & 0xFF);
+        out[i * 8 + 4] = (uint8_t)((wi >> 32) & 0xFF);
+        out[i * 8 + 5] = (uint8_t)((wi >> 40) & 0xFF);
+        out[i * 8 + 6] = (uint8_t)((wi >> 48) & 0xFF);
+        out[i * 8 + 7] = (uint8_t)((wi >> 56) & 0xFF);
+    }
+    uint64_t w2 = h[2];
+    out[16] = (uint8_t)(w2 & 0xFF);
+    out[17] = (uint8_t)((w2 >> 8) & 0xFF);
+    out[18] = (uint8_t)((w2 >> 16) & 0xFF);
+    out[19] = (uint8_t)((w2 >> 24) & 0xFF);
+}
+
+
+
+// Device helper: _GetRMD160.
+static inline void _GetRMD160(const thread uint32_t* h, thread uint32_t* hash)
+{
+    REC_ALIGN(16) uint32_t s[16];
+    const thread uint8_t* hb = (const thread uint8_t*)h;
+#pragma unroll
+    for (int i = 0; i < 8; i++) {
+        const int off = i * 4;
+        s[i] = ((uint32_t)hb[off]) |
+            ((uint32_t)hb[off + 1] << 8) |
+            ((uint32_t)hb[off + 2] << 16) |
+            ((uint32_t)hb[off + 3] << 24);
+    }
+
+    ripemd160_prepare_block32(s);
+
+    RIPEMD160Initialize(hash);
+    RIPEMD160Transform(hash, s);
+
+}
+
+
+//MD5
+
+static inline uint32_t rotl32(uint32_t x, int n) {
+    return (x << n) | (x >> (32 - n));
+}
+
+constant uint32_t MD5_K[64] = {
+    0xd76aa478U,0xe8c7b756U,0x242070dbU,0xc1bdceeeU,0xf57c0fafU,0x4787c62aU,0xa8304613U,0xfd469501U,
+    0x698098d8U,0x8b44f7afU,0xffff5bb1U,0x895cd7beU,0x6b901122U,0xfd987193U,0xa679438eU,0x49b40821U,
+    0xf61e2562U,0xc040b340U,0x265e5a51U,0xe9b6c7aaU,0xd62f105dU,0x02441453U,0xd8a1e681U,0xe7d3fbc8U,
+    0x21e1cde6U,0xc33707d6U,0xf4d50d87U,0x455a14edU,0xa9e3e905U,0xfcefa3f8U,0x676f02d9U,0x8d2a4c8aU,
+    0xfffa3942U,0x8771f681U,0x6d9d6122U,0xfde5380cU,0xa4beea44U,0x4bdecfa9U,0xf6bb4b60U,0xbebfbc70U,
+    0x289b7ec6U,0xeaa127faU,0xd4ef3085U,0x04881d05U,0xd9d4d039U,0xe6db99e5U,0x1fa27cf8U,0xc4ac5665U,
+    0xf4292244U,0x432aff97U,0xab9423a7U,0xfc93a039U,0x655b59c3U,0x8f0ccc92U,0xffeff47dU,0x85845dd1U,
+    0x6fa87e4fU,0xfe2ce6e0U,0xa3014314U,0x4e0811a1U,0xf7537e82U,0xbd3af235U,0x2ad7d2bbU,0xeb86d391U
+};
+constant uint8_t MD5_S[64] = {
+    // Round 1
+    7,12,17,22, 7,12,17,22, 7,12,17,22, 7,12,17,22,
+    // Round 2
+    5, 9,14,20, 5, 9,14,20, 5, 9,14,20, 5, 9,14,20,
+    // Round 3
+    4,11,16,23, 4,11,16,23, 4,11,16,23, 4,11,16,23,
+    // Round 4
+    6,10,15,21, 6,10,15,21, 6,10,15,21, 6,10,15,21
+};
+
+#define FF(x,y,z) (((x) & (y)) | (~(x) & (z)))
+#define GG(x,y,z) (((x) & (z)) | ((y) & ~(z)))
+#define HH(x,y,z) ((x) ^ (y) ^ (z))
+#define II(x,y,z) ((y) ^ ((x) | ~(z)))
+
+
+// Device helper: ld_le32.
+static inline uint32_t ld_le32(const thread uint8_t* p) {
+    return (uint32_t)p[0] |
+        ((uint32_t)p[1] << 8) |
+        ((uint32_t)p[2] << 16) |
+        ((uint32_t)p[3] << 24);
+}
+
+// Device helper: st_le32.
+static inline void st_le32(thread uint8_t* p, uint32_t v) {
+    p[0] = (uint8_t)(v);
+    p[1] = (uint8_t)(v >> 8);
+    p[2] = (uint8_t)(v >> 16);
+    p[3] = (uint8_t)(v >> 24);
+}
+
+#define MD5_STEP(a, b, c, d, m, k, s, F) \
+    do { (a) = (b) + rotl32((a) + F((b),(c),(d)) + (m) + (k), (int)(s)); } while(0)
+
+// Device helper: md5_compress.
+static inline void md5_compress(const uint8_t block[64], thread uint32_t& a, thread uint32_t& b, thread uint32_t& c, thread uint32_t& d) {
+    uint32_t M0 = ld_le32(block + 0), M1 = ld_le32(block + 4), M2 = ld_le32(block + 8), M3 = ld_le32(block + 12);
+    uint32_t M4 = ld_le32(block + 16), M5 = ld_le32(block + 20), M6 = ld_le32(block + 24), M7 = ld_le32(block + 28);
+    uint32_t M8 = ld_le32(block + 32), M9 = ld_le32(block + 36), M10 = ld_le32(block + 40), M11 = ld_le32(block + 44);
+    uint32_t M12 = ld_le32(block + 48), M13 = ld_le32(block + 52), M14 = ld_le32(block + 56), M15 = ld_le32(block + 60);
+
+    uint32_t A = a, B = b, C = c, D = d;
+
+    MD5_STEP(A, B, C, D, M0, MD5_K[0], MD5_S[0], FF);
+    MD5_STEP(D, A, B, C, M1, MD5_K[1], MD5_S[1], FF);
+    MD5_STEP(C, D, A, B, M2, MD5_K[2], MD5_S[2], FF);
+    MD5_STEP(B, C, D, A, M3, MD5_K[3], MD5_S[3], FF);
+    MD5_STEP(A, B, C, D, M4, MD5_K[4], MD5_S[4], FF);
+    MD5_STEP(D, A, B, C, M5, MD5_K[5], MD5_S[5], FF);
+    MD5_STEP(C, D, A, B, M6, MD5_K[6], MD5_S[6], FF);
+    MD5_STEP(B, C, D, A, M7, MD5_K[7], MD5_S[7], FF);
+    MD5_STEP(A, B, C, D, M8, MD5_K[8], MD5_S[8], FF);
+    MD5_STEP(D, A, B, C, M9, MD5_K[9], MD5_S[9], FF);
+    MD5_STEP(C, D, A, B, M10, MD5_K[10], MD5_S[10], FF);
+    MD5_STEP(B, C, D, A, M11, MD5_K[11], MD5_S[11], FF);
+    MD5_STEP(A, B, C, D, M12, MD5_K[12], MD5_S[12], FF);
+    MD5_STEP(D, A, B, C, M13, MD5_K[13], MD5_S[13], FF);
+    MD5_STEP(C, D, A, B, M14, MD5_K[14], MD5_S[14], FF);
+    MD5_STEP(B, C, D, A, M15, MD5_K[15], MD5_S[15], FF);
+
+    MD5_STEP(A, B, C, D, M1, MD5_K[16], MD5_S[16], GG);
+    MD5_STEP(D, A, B, C, M6, MD5_K[17], MD5_S[17], GG);
+    MD5_STEP(C, D, A, B, M11, MD5_K[18], MD5_S[18], GG);
+    MD5_STEP(B, C, D, A, M0, MD5_K[19], MD5_S[19], GG);
+    MD5_STEP(A, B, C, D, M5, MD5_K[20], MD5_S[20], GG);
+    MD5_STEP(D, A, B, C, M10, MD5_K[21], MD5_S[21], GG);
+    MD5_STEP(C, D, A, B, M15, MD5_K[22], MD5_S[22], GG);
+    MD5_STEP(B, C, D, A, M4, MD5_K[23], MD5_S[23], GG);
+    MD5_STEP(A, B, C, D, M9, MD5_K[24], MD5_S[24], GG);
+    MD5_STEP(D, A, B, C, M14, MD5_K[25], MD5_S[25], GG);
+    MD5_STEP(C, D, A, B, M3, MD5_K[26], MD5_S[26], GG);
+    MD5_STEP(B, C, D, A, M8, MD5_K[27], MD5_S[27], GG);
+    MD5_STEP(A, B, C, D, M13, MD5_K[28], MD5_S[28], GG);
+    MD5_STEP(D, A, B, C, M2, MD5_K[29], MD5_S[29], GG);
+    MD5_STEP(C, D, A, B, M7, MD5_K[30], MD5_S[30], GG);
+    MD5_STEP(B, C, D, A, M12, MD5_K[31], MD5_S[31], GG);
+
+    MD5_STEP(A, B, C, D, M5, MD5_K[32], MD5_S[32], HH);
+    MD5_STEP(D, A, B, C, M8, MD5_K[33], MD5_S[33], HH);
+    MD5_STEP(C, D, A, B, M11, MD5_K[34], MD5_S[34], HH);
+    MD5_STEP(B, C, D, A, M14, MD5_K[35], MD5_S[35], HH);
+    MD5_STEP(A, B, C, D, M1, MD5_K[36], MD5_S[36], HH);
+    MD5_STEP(D, A, B, C, M4, MD5_K[37], MD5_S[37], HH);
+    MD5_STEP(C, D, A, B, M7, MD5_K[38], MD5_S[38], HH);
+    MD5_STEP(B, C, D, A, M10, MD5_K[39], MD5_S[39], HH);
+    MD5_STEP(A, B, C, D, M13, MD5_K[40], MD5_S[40], HH);
+    MD5_STEP(D, A, B, C, M0, MD5_K[41], MD5_S[41], HH);
+    MD5_STEP(C, D, A, B, M3, MD5_K[42], MD5_S[42], HH);
+    MD5_STEP(B, C, D, A, M6, MD5_K[43], MD5_S[43], HH);
+    MD5_STEP(A, B, C, D, M9, MD5_K[44], MD5_S[44], HH);
+    MD5_STEP(D, A, B, C, M12, MD5_K[45], MD5_S[45], HH);
+    MD5_STEP(C, D, A, B, M15, MD5_K[46], MD5_S[46], HH);
+    MD5_STEP(B, C, D, A, M2, MD5_K[47], MD5_S[47], HH);
+
+    MD5_STEP(A, B, C, D, M0, MD5_K[48], MD5_S[48], II);
+    MD5_STEP(D, A, B, C, M7, MD5_K[49], MD5_S[49], II);
+    MD5_STEP(C, D, A, B, M14, MD5_K[50], MD5_S[50], II);
+    MD5_STEP(B, C, D, A, M5, MD5_K[51], MD5_S[51], II);
+    MD5_STEP(A, B, C, D, M12, MD5_K[52], MD5_S[52], II);
+    MD5_STEP(D, A, B, C, M3, MD5_K[53], MD5_S[53], II);
+    MD5_STEP(C, D, A, B, M10, MD5_K[54], MD5_S[54], II);
+    MD5_STEP(B, C, D, A, M1, MD5_K[55], MD5_S[55], II);
+    MD5_STEP(A, B, C, D, M8, MD5_K[56], MD5_S[56], II);
+    MD5_STEP(D, A, B, C, M15, MD5_K[57], MD5_S[57], II);
+    MD5_STEP(C, D, A, B, M6, MD5_K[58], MD5_S[58], II);
+    MD5_STEP(B, C, D, A, M13, MD5_K[59], MD5_S[59], II);
+    MD5_STEP(A, B, C, D, M4, MD5_K[60], MD5_S[60], II);
+    MD5_STEP(D, A, B, C, M11, MD5_K[61], MD5_S[61], II);
+    MD5_STEP(C, D, A, B, M2, MD5_K[62], MD5_S[62], II);
+    MD5_STEP(B, C, D, A, M9, MD5_K[63], MD5_S[63], II);
+
+    a += A; b += B; c += C; d += D;
+}
+
+// Device helper: MD5.
+static inline void MD5(const thread uint8_t* data, size_t len, uint8_t out16[16]) {
+    uint32_t a = 0x67452301U;
+    uint32_t b = 0xefcdab89U;
+    uint32_t c = 0x98badcfeU;
+    uint32_t d = 0x10325476U;
+
+    size_t nblocks = len >> 6; // /64
+    for (size_t i = 0; i < nblocks; ++i) {
+        md5_compress(data + (i << 6), a, b, c, d);
+    }
+
+    uint8_t tail[128];
+    size_t rem = len & 63;
+
+    for (size_t i = 0; i < rem; ++i) tail[i] = data[(nblocks << 6) + i];
+
+    tail[rem] = 0x80;
+    for (size_t i = rem + 1; i < 64; ++i) tail[i] = 0;
+
+    uint64_t bitlen = (uint64_t)len * 8ULL;
+
+    if (rem >= 56) {
+        md5_compress(tail, a, b, c, d);
+        for (int i = 0; i < 56; ++i) tail[i] = 0;
+    }
+    for (int i = 0; i < 8; ++i) tail[56 + i] = (uint8_t)(bitlen >> (8 * i));
+
+    md5_compress(tail, a, b, c, d);
+
+    st_le32(out16 + 0, a);
+    st_le32(out16 + 4, b);
+    st_le32(out16 + 8, c);
+    st_le32(out16 + 12, d);
+}
+
+
+
+
+// Device helper: crc32_ieee.
+static inline uint32_t crc32_ieee(const thread uint8_t* p, size_t n) {
+    uint32_t c = 0xFFFFFFFFu;
+    for (size_t i = 0; i < n; ++i) {
+        c ^= p[i];
+        for (int k = 0; k < 8; ++k) {
+            uint32_t m = -(c & 1u);
+            c = (c >> 1) ^ (0xEDB88320u & m);
+        }
+    }
+    return c ^ 0xFFFFFFFFu;
+}
+
+
+
+//SHA224
+constant uint32_t I224[] = {
+  0xc1059ed8ul, 0x367cd507ul, 0x3070dd17ul, 0xf70e5939ul,
+  0xffc00b31ul, 0x68581511ul, 0x64f98fa7ul, 0xbefa4fa4ul
+};
+
+// Device helper: SHA224Initialize.
+static inline  void SHA224Initialize(uint32_t s[8]) {
+    s[0] = I224[0];
+    s[1] = I224[1];
+    s[2] = I224[2];
+    s[3] = I224[3];
+    s[4] = I224[4];
+    s[5] = I224[5];
+    s[6] = I224[6];
+    s[7] = I224[7];
+}
+
+static inline
+// SHA224: computes 224.
+void SHA224(const thread uint8_t*  msg, size_t len, uint8_t out[28]) {
+    uint32_t s[8];
+    SHA224Initialize(s);
+
+    REC_ALIGN(16) uint32_t w[16];
+
+    const thread uint8_t* p = msg;
+    size_t rem = len;
+    while (rem >= 64) {
+#pragma unroll
+        for (int i = 0; i < 16; ++i) {
+            const thread uint8_t* b = p + (i << 2);
+            w[i] = ((uint32_t)b[0] << 24) |
+                ((uint32_t)b[1] << 16) |
+                ((uint32_t)b[2] << 8) |
+                ((uint32_t)b[3]);
+        }
+        SHA256Transform(s, w);
+        p += 64;
+        rem -= 64;
+    }
+
+#pragma unroll
+    for (int i = 0; i < 16; ++i) w[i] = 0;
+
+    for (uint32_t i = 0; i < rem; ++i) {
+        uint32_t wi = i >> 2;
+        uint32_t sh = (3u - (i & 3u)) * 8u;
+        w[wi] |= ((uint32_t)p[i]) << sh;
+    }
+
+    // 0x80
+    {
+        uint32_t wi = rem >> 2;
+        uint32_t sh = (3u - (rem & 3u)) * 8u;
+        w[wi] |= (0x80u << sh);
+    }
+
+    uint64_t bitlen = (uint64_t)len * 8ull;
+
+    if (rem <= 55) {
+        w[14] = (uint32_t)(bitlen >> 32);
+        w[15] = (uint32_t)(bitlen & 0xffffffffu);
+        SHA256Transform(s, w);
+    }
+    else {
+        SHA256Transform(s, w);
+#pragma unroll
+        for (int i = 0; i < 16; ++i) w[i] = 0;
+        w[14] = (uint32_t)(bitlen >> 32);
+        w[15] = (uint32_t)(bitlen & 0xffffffffu);
+        SHA256Transform(s, w);
+    }
+
+#pragma unroll
+    for (int i = 0; i < 7; ++i) {
+        uint32_t v = s[i];
+        out[(i << 2) + 0] = (uint8_t)(v >> 24);
+        out[(i << 2) + 1] = (uint8_t)(v >> 16);
+        out[(i << 2) + 2] = (uint8_t)(v >> 8);
+        out[(i << 2) + 3] = (uint8_t)(v);
+    }
+}
+
+// ---------------------- ChaCha20 ----------------------
+
+#define QR(a,b,c,d)        \
+    a += b; d ^= a; d = rotl32(d,16); \
+    c += d; b ^= c; b = rotl32(b,12); \
+    a += b; d ^= a; d = rotl32(d, 8); \
+    c += d; b ^= c; b = rotl32(b, 7)
+
+static inline void chacha20_block(
+    const uint8_t key[32], const uint8_t nonce[12],
+    uint32_t counter, uint8_t out[64])
+{
+    // state
+    REC_ALIGN(16) uint32_t s[16];
+
+    // constants "expand 32-byte k"
+    s[0] = 0x61707865U; s[1] = 0x3320646eU; s[2] = 0x79622d32U; s[3] = 0x6b206574U;
+    // key
+    s[4] = ld_le32(key + 0);
+    s[5] = ld_le32(key + 4);
+    s[6] = ld_le32(key + 8);
+    s[7] = ld_le32(key + 12);
+    s[8] = ld_le32(key + 16);
+    s[9] = ld_le32(key + 20);
+    s[10] = ld_le32(key + 24);
+    s[11] = ld_le32(key + 28);
+    // counter + nonce
+    s[12] = counter;
+    s[13] = ld_le32(nonce + 0);
+    s[14] = ld_le32(nonce + 4);
+    s[15] = ld_le32(nonce + 8);
+
+    REC_ALIGN(16) uint32_t w[16];
+#pragma unroll
+    for (int i = 0; i < 16; i++) w[i] = s[i];
+
+    // 20 rounds (10 double rounds)
+#pragma unroll
+    for (int i = 0; i < 10; i++) {
+        // column rounds
+        QR(w[0], w[4], w[8], w[12]);
+        QR(w[1], w[5], w[9], w[13]);
+        QR(w[2], w[6], w[10], w[14]);
+        QR(w[3], w[7], w[11], w[15]);
+        // diagonal rounds
+        QR(w[0], w[5], w[10], w[15]);
+        QR(w[1], w[6], w[11], w[12]);
+        QR(w[2], w[7], w[8], w[13]);
+        QR(w[3], w[4], w[9], w[14]);
+    }
+
+    // add original state
+#pragma unroll
+    for (int i = 0; i < 16; i++) w[i] += s[i];
+
+    // serialize
+#pragma unroll
+    for (int i = 0; i < 16; i++) st_le32(out + 4 * i, w[i]);
+}
+
+static inline void chacha20_encrypt(
+    const uint8_t key[32], const uint8_t nonce[12],
+    uint32_t counter_start,
+    const thread uint8_t* in, thread uint8_t* out, size_t len)
+{
+    uint8_t block[64];
+    uint32_t ctr = counter_start;
+
+    while (len) {
+        chacha20_block(key, nonce, ctr, block);
+        size_t n = (len < 64) ? len : 64;
+
+#pragma unroll
+        for (size_t i = 0; i < n; i++) out[i] = in[i] ^ block[i];
+
+        out += n; in += n; len -= n; ctr++;
+    }
+}
+
+// ---------------------- Poly1305 (Donna-like, 26-bit limbs) ----------------------
+
+typedef struct {
+    uint32_t r[5];   // r0..r4 (26-bit each)
+    uint32_t s[4];   // s (pad) as 128-bit little endian in 32-bit chunks
+    uint32_t h[5];   // accumulator (26-bit limbs)
+} poly1305_ctx;
+
+// clamp r
+static inline void poly1305_key_setup(thread poly1305_ctx* ctx, const uint8_t r_s[32]) {
+    ctx->r[0] = (ld_le32(r_s + 0)) & 0x3ffffffu;
+    ctx->r[1] = (ld_le32(r_s + 3) >> 2) & 0x3ffff03u;
+    ctx->r[2] = (ld_le32(r_s + 6) >> 4) & 0x3ffc0ffu;
+    ctx->r[3] = (ld_le32(r_s + 9) >> 6) & 0x3f03fffu;
+    ctx->r[4] = (ld_le32(r_s + 12) >> 8) & 0x00fffffu;
+
+    // s (pad) = next 16 bytes
+    ctx->s[0] = ld_le32(r_s + 16);
+    ctx->s[1] = ld_le32(r_s + 20);
+    ctx->s[2] = ld_le32(r_s + 24);
+    ctx->s[3] = ld_le32(r_s + 28);
+
+    // zero accumulator
+    ctx->h[0] = ctx->h[1] = ctx->h[2] = ctx->h[3] = ctx->h[4] = 0;
+}
+
+
+static inline uint64_t rd_le_u128_26(
+    const uint8_t b[16], uint32_t out26[5])
+{
+    // parse 16-byte block as 130-bit little-endian integer with appended 1 (i.e., h += m || 1<<128)
+    uint32_t t0 = ld_le32(b + 0);
+    uint32_t t1 = ld_le32(b + 4);
+    uint32_t t2 = ld_le32(b + 8);
+    uint32_t t3 = ld_le32(b + 12);
+
+    uint64_t m0 = (uint64_t)((t0) & 0x3ffffff);
+    uint64_t m1 = (uint64_t)(((t0 >> 26) | (t1 << 6)) & 0x3ffffff);
+    uint64_t m2 = (uint64_t)(((t1 >> 20) | (t2 << 12)) & 0x3ffffff);
+    uint64_t m3 = (uint64_t)(((t2 >> 14) | (t3 << 18)) & 0x3ffffff);
+    uint64_t m4 = (uint64_t)((t3 >> 8)) & 0x3ffffff;
+
+    out26[0] = (uint32_t)m0;
+    out26[1] = (uint32_t)m1;
+    out26[2] = (uint32_t)m2;
+    out26[3] = (uint32_t)m3;
+    out26[4] = (uint32_t)m4;
+
+    // returns 1 (we will add the hibit)
+    return 1;
+}
+
+// Device helper: poly1305_blocks.
+static inline void poly1305_blocks(thread poly1305_ctx* ctx, const thread uint8_t* m, size_t bytes, uint32_t hibit) {
+    const uint64_t r0 = ctx->r[0], r1 = ctx->r[1], r2 = ctx->r[2], r3 = ctx->r[3], r4 = ctx->r[4];
+    const uint64_t r1_5 = r1 * 5, r2_5 = r2 * 5, r3_5 = r3 * 5, r4_5 = r4 * 5;
+
+    while (bytes >= 16) {
+        uint32_t t[5];
+        (void)rd_le_u128_26(m, t);
+
+        // h += m || 1<<128  → add t limbs; set hibit (1) in limb[4] top (i.e., add 1<<24 inside limb4)
+        uint64_t h0 = ctx->h[0] + t[0];
+        uint64_t h1 = ctx->h[1] + t[1];
+        uint64_t h2 = ctx->h[2] + t[2];
+        uint64_t h3 = ctx->h[3] + t[3];
+        uint64_t h4 = ctx->h[4] + t[4] + hibit;
+
+        // multiply (h * r) mod (2^130 - 5)
+        uint64_t d0 = h0 * r0 + h1 * r4_5 + h2 * r3_5 + h3 * r2_5 + h4 * r1_5;
+        uint64_t d1 = h0 * r1 + h1 * r0 + h2 * r4_5 + h3 * r3_5 + h4 * r2_5;
+        uint64_t d2 = h0 * r2 + h1 * r1 + h2 * r0 + h3 * r4_5 + h4 * r3_5;
+        uint64_t d3 = h0 * r3 + h1 * r2 + h2 * r1 + h3 * r0 + h4 * r4_5;
+        uint64_t d4 = h0 * r4 + h1 * r3 + h2 * r2 + h3 * r1 + h4 * r0;
+
+        // carry, base 2^26
+        uint64_t c;
+
+        c = (d0 >> 26); ctx->h[0] = (uint32_t)(d0 & 0x3ffffff);
+        d1 += c;
+        c = (d1 >> 26); ctx->h[1] = (uint32_t)(d1 & 0x3ffffff);
+        d2 += c;
+        c = (d2 >> 26); ctx->h[2] = (uint32_t)(d2 & 0x3ffffff);
+        d3 += c;
+        c = (d3 >> 26); ctx->h[3] = (uint32_t)(d3 & 0x3ffffff);
+        d4 += c;
+        c = (d4 >> 26); ctx->h[4] = (uint32_t)(d4 & 0x3ffffff);
+        ctx->h[0] += (uint32_t)(c * 5);
+        c = ctx->h[0] >> 26; ctx->h[0] &= 0x3ffffff;
+        ctx->h[1] += (uint32_t)c;
+
+        m += 16;
+        bytes -= 16;
+    }
+}
+
+// Device helper: poly1305_update.
+static inline void poly1305_update(thread poly1305_ctx* ctx, const thread uint8_t* m, size_t bytes) {
+    // process full 16B blocks
+    if (bytes >= 16) {
+        size_t nb = bytes & ~(size_t)15;
+        poly1305_blocks(ctx, m, nb, 1u << 24);
+        m += nb; bytes -= nb;
+    }
+    if (!bytes) return;
+
+    // last partial block: pad with 0s, add hibit
+    uint8_t last[16] = { 0 };
+    for (size_t i = 0; i < bytes; i++) last[i] = m[i];
+    last[bytes] = 1u;
+    poly1305_blocks(ctx, last, 16, 0u);
+}
+
+// Device helper: poly1305_finish.
+static inline void poly1305_finish(thread poly1305_ctx* ctx, uint8_t tag[16]) {
+    // fully carry h
+    uint64_t c;
+
+    c = ctx->h[1] >> 26; ctx->h[1] &= 0x3ffffff; ctx->h[2] += (uint32_t)c;
+    c = ctx->h[2] >> 26; ctx->h[2] &= 0x3ffffff; ctx->h[3] += (uint32_t)c;
+    c = ctx->h[3] >> 26; ctx->h[3] &= 0x3ffffff; ctx->h[4] += (uint32_t)c;
+    c = ctx->h[4] >> 26; ctx->h[4] &= 0x3ffffff; ctx->h[0] += (uint32_t)(c * 5);
+    c = ctx->h[0] >> 26; ctx->h[0] &= 0x3ffffff; ctx->h[1] += (uint32_t)c;
+
+    // compute h + -p (i.e., compare with p), do conditional subtract
+    uint32_t g0 = ctx->h[0] + 5u;
+    c = g0 >> 26; g0 &= 0x3ffffffu;
+    uint32_t g1 = ctx->h[1] + (uint32_t)c; c = g1 >> 26; g1 &= 0x3ffffffu;
+    uint32_t g2 = ctx->h[2] + (uint32_t)c; c = g2 >> 26; g2 &= 0x3ffffffu;
+    uint32_t g3 = ctx->h[3] + (uint32_t)c; c = g3 >> 26; g3 &= 0x3ffffffu;
+    uint32_t g4 = ctx->h[4] + (uint32_t)c - (1u << 26);
+
+    uint32_t mask = (g4 >> 31) - 1u;
+    g0 &= mask; g1 &= mask; g2 &= mask; g3 &= mask; g4 &= mask;
+    mask = ~mask;
+    ctx->h[0] = (ctx->h[0] & mask) | g0;
+    ctx->h[1] = (ctx->h[1] & mask) | g1;
+    ctx->h[2] = (ctx->h[2] & mask) | g2;
+    ctx->h[3] = (ctx->h[3] & mask) | g3;
+    ctx->h[4] = (ctx->h[4] & mask) | g4;
+
+    uint64_t f0 = (((uint64_t)ctx->h[0]) | ((uint64_t)ctx->h[1] << 26)) & 0xffffffffull;
+    uint64_t f1 = (((uint64_t)ctx->h[1] >> 6) | ((uint64_t)ctx->h[2] << 20)) & 0xffffffffull;
+    uint64_t f2 = (((uint64_t)ctx->h[2] >> 12) | ((uint64_t)ctx->h[3] << 14)) & 0xffffffffull;
+    uint64_t f3 = (((uint64_t)ctx->h[3] >> 18) | ((uint64_t)ctx->h[4] << 8)) & 0xffffffffull;
+
+    f0 += ctx->s[0];
+    f1 += ctx->s[1] + (f0 >> 32); f0 &= 0xffffffffull;
+    f2 += ctx->s[2] + (f1 >> 32); f1 &= 0xffffffffull;
+    f3 += ctx->s[3] + (f2 >> 32); f2 &= 0xffffffffull;
+
+    st_le32(tag + 0, (uint32_t)f0);
+    st_le32(tag + 4, (uint32_t)f1);
+    st_le32(tag + 8, (uint32_t)f2);
+    st_le32(tag + 12, (uint32_t)f3);
+}
+
+// Helper: feed length block (8-byte LE)
+static inline void store64_le(thread uint8_t* p, uint64_t v) {
+    p[0] = (uint8_t)v; p[1] = (uint8_t)(v >> 8); p[2] = (uint8_t)(v >> 16); p[3] = (uint8_t)(v >> 24);
+    p[4] = (uint8_t)(v >> 32); p[5] = (uint8_t)(v >> 40); p[6] = (uint8_t)(v >> 48); p[7] = (uint8_t)(v >> 56);
+}
+
+// AEAD with AAD = empty (RFC 7539 §2.8, §2.6)
+static inline void poly1305_aead_mac_empty_aad(
+    const uint8_t otk[32],          // one-time key r||s (from chacha20 block 0)
+    const thread uint8_t* cipher, size_t clen,
+    uint8_t tag[16])
+{
+    poly1305_ctx ctx;
+    poly1305_key_setup(&ctx, otk);
+
+    size_t full = clen & ~(size_t)15;
+    if (full) {
+        poly1305_blocks(&ctx, cipher, full, 1u << 24);
+    }
+
+    size_t rem = clen & 15;
+    if (rem) {
+        uint8_t block[16] = { 0 };
+        for (size_t i = 0; i < rem; ++i) block[i] = cipher[full + i];
+        poly1305_blocks(&ctx, block, 16, 1u << 24);
+    }
+
+    // AAD length (0) and ciphertext length (LE64)
+    uint8_t lenblk[16];
+    // 8 bytes AAD length = 0
+    memset(lenblk, 0, 16);
+    // 8 bytes ciphertext length
+    store64_le(lenblk + 8, (uint64_t)clen);
+    poly1305_blocks(&ctx, lenblk, 16, 1u << 24);
+
+    // finish
+    poly1305_finish(&ctx, tag);
+}
+
+// ---------------------- High-level AEAD Encrypt ----------------------
+
+static inline void chacha20poly1305_encrypt(
+    const uint8_t key[32],
+    const uint8_t nonce[12],
+    const thread uint8_t* plaintext, size_t pt_len,
+    thread uint8_t* ciphertext,
+    uint8_t tag[16])
+{
+    // 1) one-time Poly1305 key = ChaCha20 block with counter=0
+    uint8_t b0[64];
+    chacha20_block(key, nonce, 0, b0);
+    // otk = first 32 bytes (r||s)
+    // 2) encrypt with counter=1
+    chacha20_encrypt(key, nonce, 1, plaintext, ciphertext, pt_len);
+    // 3) tag over (AAD="", C, pad16, len_aad=0, len_c)
+    poly1305_aead_mac_empty_aad(b0, ciphertext, pt_len, tag);
+
+}
+
+#endif

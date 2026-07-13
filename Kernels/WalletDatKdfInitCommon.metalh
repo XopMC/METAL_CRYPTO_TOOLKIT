@@ -1,0 +1,172 @@
+#ifndef METAL_CRYPTO_WALLETDAT_KDF_INIT_COMMON_METALH
+#define METAL_CRYPTO_WALLETDAT_KDF_INIT_COMMON_METALH
+
+#include "HashFunc.metalh"
+#include "WalletModesCommon.metalh"
+
+static inline uchar walletdat_init_pass_salt_byte(const thread uchar* pass,
+                                                  uint pass_len,
+                                                  const device uchar* salt,
+                                                  uint idx) {
+    return idx < pass_len ? pass[idx] : salt[idx - pass_len];
+}
+
+static inline void walletdat_init_sha512_init_words(thread ulong h[8]) {
+    h[0] = 0x6a09e667f3bcc908ul;
+    h[1] = 0xbb67ae8584caa73bul;
+    h[2] = 0x3c6ef372fe94f82bul;
+    h[3] = 0xa54ff53a5f1d36f1ul;
+    h[4] = 0x510e527fade682d1ul;
+    h[5] = 0x9b05688c2b3e6c1ful;
+    h[6] = 0x1f83d9abfb41bd6bul;
+    h[7] = 0x5be0cd19137e2179ul;
+}
+
+static inline void walletdat_init_sha512_fill_pass_salt_block(thread ulong block[16],
+                                                              const thread uchar* pass,
+                                                              uint pass_len,
+                                                              const device uchar* salt,
+                                                              uint msg_len,
+                                                              uint offset,
+                                                              bool with_padding,
+                                                              bool with_length) {
+    for (int w = 0; w < 16; ++w) {
+        ulong v = 0ul;
+        for (int b = 0; b < 8; ++b) {
+            const uint pos = offset + uint(w) * 8u + uint(b);
+            uchar c = 0u;
+            if (pos < msg_len) {
+                c = walletdat_init_pass_salt_byte(pass, pass_len, salt, pos);
+            } else if (with_padding && pos == msg_len) {
+                c = 0x80u;
+            }
+            v = (v << 8u) | ulong(c);
+        }
+        block[w] = v;
+    }
+    if (with_length) {
+        const ulong bit_len = ulong(msg_len) * 8ul;
+        block[15] = (block[15] & 0xffffffff00000000ul) | (bit_len & 0xfffffffful);
+    }
+}
+
+static inline void walletdat_init_sha512_pass_salt_words(const thread uchar* pass,
+                                                         uint pass_len,
+                                                         const device uchar* salt,
+                                                         uint salt_len,
+                                                         thread ulong digest_words[8]) {
+    ulong h[8];
+    ulong block[16];
+    walletdat_init_sha512_init_words(h);
+
+    const uint msg_len = pass_len + salt_len;
+    uint offset = 0u;
+    while (msg_len - offset >= 128u) {
+        walletdat_init_sha512_fill_pass_salt_block(block, pass, pass_len, salt, msg_len, offset, false, false);
+        sha512_compress_words(h, block, h);
+        offset += 128u;
+    }
+
+    const uint rem = msg_len - offset;
+    const bool needs_extra_block = rem > 123u;
+    walletdat_init_sha512_fill_pass_salt_block(block, pass, pass_len, salt, msg_len, offset, true, !needs_extra_block);
+    sha512_compress_words(h, block, h);
+
+    if (needs_extra_block) {
+        for (int i = 0; i < 16; ++i) {
+            block[i] = 0ul;
+        }
+        block[15] = ulong(msg_len) * 8ul;
+        sha512_compress_words(h, block, h);
+    }
+
+    for (int i = 0; i < 8; ++i) {
+        digest_words[i] = h[i];
+    }
+}
+
+static inline void walletdat_init_sha512_pass_salt_words(const thread uchar* pass,
+                                                         uint pass_len,
+                                                         const device uchar* salt,
+                                                         uint salt_len,
+                                                         device ulong digest_words[8]) {
+    ulong local[8];
+    walletdat_init_sha512_pass_salt_words(pass, pass_len, salt, salt_len, local);
+    for (int i = 0; i < 8; ++i) {
+        digest_words[i] = local[i];
+    }
+}
+
+static inline bool walletdat_init_candidate_from_mask(const device WalletMaskSpec* spec,
+                                                      ulong ordinal,
+                                                      thread uchar out[WALLET_PASS_STRIDE],
+                                                      thread uint* out_len) {
+    if (spec == nullptr || spec->len == 0u || spec->len > WALLET_MAX_PASSWORD_LEN) {
+        return false;
+    }
+    for (int pos = int(spec->len) - 1; pos >= 0; --pos) {
+        const uint clen = spec->charset_len[pos];
+        if (clen == 0u) {
+            return false;
+        }
+        const uint digit = uint(ordinal % ulong(clen));
+        ordinal /= ulong(clen);
+        out[pos] = spec->chars[uint(spec->charset_offset[pos]) + digit];
+    }
+    *out_len = spec->len;
+    return true;
+}
+
+static inline bool walletdat_init_candidate_from_range(const device WalletRangeSpec* spec,
+                                                       ulong ordinal,
+                                                       thread uchar out[WALLET_PASS_STRIDE],
+                                                       thread uint* out_len) {
+    if (spec == nullptr || spec->len == 0u || spec->len > WALLET_MAX_PASSWORD_LEN) {
+        return false;
+    }
+    for (uint i = 0u; i < spec->len; ++i) {
+        out[i] = spec->start[i];
+    }
+    for (int pos = int(spec->len) - 1; pos >= 0 && ordinal != 0ul; --pos) {
+        const ulong acc = ulong(out[pos]) + (ordinal & 0xfful);
+        out[pos] = uchar(acc & 0xfful);
+        ordinal = (ordinal >> 8u) + (acc >> 8u);
+    }
+    *out_len = spec->len;
+    return true;
+}
+
+static inline bool walletdat_init_load_candidate_pass(uchar candidate_kind,
+                                                      const device char* pass_data,
+                                                      const device uchar* pass_lens,
+                                                      uint pass_count,
+                                                      const device WalletMaskSpec* mask_spec,
+                                                      const device WalletRangeSpec* range_spec,
+                                                      ulong candidate_index,
+                                                      thread uchar pass_local[WALLET_PASS_STRIDE],
+                                                      thread uint* pass_len) {
+    if (candidate_kind == WALLET_CANDIDATE_DICTIONARY) {
+        if (candidate_index >= ulong(pass_count)) {
+            return false;
+        }
+        uint n = pass_lens[candidate_index];
+        if (n > WALLET_MAX_PASSWORD_LEN) {
+            n = WALLET_MAX_PASSWORD_LEN;
+        }
+        const device char* src = pass_data + candidate_index * ulong(WALLET_PASS_STRIDE);
+        for (uint i = 0u; i < n; ++i) {
+            pass_local[i] = uchar(src[i]);
+        }
+        *pass_len = n;
+        return true;
+    }
+    if (candidate_kind == WALLET_CANDIDATE_MASK) {
+        return walletdat_init_candidate_from_mask(mask_spec, candidate_index, pass_local, pass_len);
+    }
+    if (candidate_kind == WALLET_CANDIDATE_RANGE) {
+        return walletdat_init_candidate_from_range(range_spec, candidate_index, pass_local, pass_len);
+    }
+    return false;
+}
+
+#endif

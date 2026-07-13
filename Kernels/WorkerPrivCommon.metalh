@@ -1,0 +1,1124 @@
+#ifndef METAL_CRYPTO_WORKER_PRIV_COMMON_METALH
+#define METAL_CRYPTO_WORKER_PRIV_COMMON_METALH
+
+#include <metal_stdlib>
+#include "../KernelState.metalh"
+#include "BigIntFunc.metalh"
+#include "FilterCommon.metalh"
+#include "FoundCommon.metalh"
+#include "GPUHash.metalh"
+#include "IcpFunc.metalh"
+#include "TonFunc.metalh"
+#include "../lib/secp256k1/secp256k1.metalh"
+#include "AdaDotFunc.metalh"
+#include "MnemonicFunc.metalh"
+
+using namespace metal;
+
+constant uint PRIV_THREAD_STEPS = 32u;
+constant uchar PRIV_SECP_G65[65] = {
+    0x04u,
+    0x79u,0xbeu,0x66u,0x7eu,0xf9u,0xdcu,0xbbu,0xacu,0x55u,0xa0u,0x62u,0x95u,0xceu,0x87u,0x0bu,0x07u,
+    0x02u,0x9bu,0xfcu,0xdbu,0x2du,0xceu,0x28u,0xd9u,0x59u,0xf2u,0x81u,0x5bu,0x16u,0xf8u,0x17u,0x98u,
+    0x48u,0x3au,0xdau,0x77u,0x26u,0xa3u,0xc4u,0x65u,0x5du,0xa4u,0xfbu,0xfcu,0x0eu,0x11u,0x08u,0xa8u,
+    0xfdu,0x17u,0xb4u,0x48u,0xa6u,0x85u,0x54u,0x19u,0x9cu,0x47u,0xd0u,0x8fu,0xfbu,0x10u,0xd4u,0xb8u
+};
+constant uchar PRIV_UNHEX_TAB[80] = {
+    0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0xaa, 0xbb, 0xcc, 0xdd, 0xee,
+    0xff, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
+};
+
+static inline void priv_copy_thread_uchar(thread uchar* dst, const thread uchar* src, uint len) {
+    for (uint i = 0u; i < len; ++i) {
+        dst[i] = src[i];
+    }
+}
+
+static inline void priv_copy_thread_char_from_uchar(thread char* dst, const thread uchar* src, uint len) {
+    for (uint i = 0u; i < len; ++i) {
+        dst[i] = char(src[i]);
+    }
+}
+
+static inline void priv_copy_device_uchar(thread uchar* dst, const device uchar* src, uint len) {
+    for (uint i = 0u; i < len; ++i) {
+        dst[i] = src[i];
+    }
+}
+
+static inline void priv_unhex(thread uchar* str, uint str_sz, thread uchar* unhexed, uint unhexed_sz) {
+    uint j = 0u;
+    const uint n = (str_sz < (unhexed_sz * 2u)) ? str_sz : (unhexed_sz * 2u);
+    for (uint i = 0u; (i + 1u) < n; i += 2u, ++j) {
+        unhexed[j] = (PRIV_UNHEX_TAB[str[i] & 0x4fu] & 0xf0u) |
+                     (PRIV_UNHEX_TAB[str[i + 1u] & 0x4fu] & 0x0fu);
+    }
+}
+
+static inline void priv_hash_words_from_bytes(const thread uchar* bytes, thread uint out_words[8], uint byte_len) {
+    for (uint i = 0u; i < 8u; ++i) {
+        const uint off = i * 4u;
+        if (off + 3u < byte_len) {
+            out_words[i] = uint(bytes[off]) |
+                           ((uint(bytes[off + 1u]) << 8u) & 0x0000ff00u) |
+                           ((uint(bytes[off + 2u]) << 16u) & 0x00ff0000u) |
+                           ((uint(bytes[off + 3u]) << 24u) & 0xff000000u);
+        } else {
+            uint w = 0u;
+            for (uint j = 0u; j < 4u && off + j < byte_len; ++j) {
+                w |= uint(bytes[off + j]) << (8u * j);
+            }
+            out_words[i] = w;
+        }
+    }
+}
+
+static inline void priv_store_result(device bool* isResult,
+                                     device bool* buffResult,
+                                     const thread uchar* private_key32,
+                                     const thread void* payload,
+                                     uint payload_len,
+                                     uchar type_value,
+                                     FoundBuffers found) {
+    if (buffResult != nullptr) {
+        buffResult[0] = true;
+    }
+    if (isResult != nullptr) {
+        isResult[0] = true;
+    }
+    if (found.resultsCount == nullptr) {
+        return;
+    }
+
+    const ulong idx64 = found_atomic_add_count(found.resultsCount, 1u);
+    if (idx64 >= ulong(found.maxFounds)) {
+        return;
+    }
+    const uint idx = uint(idx64);
+
+    if (found.foundPrvKeys != nullptr && private_key32 != nullptr) {
+        found_copy_thread_to_device_uchar(found.foundPrvKeys + ulong(idx) * kFoundPrivateKeyBytes, private_key32, 32u);
+    }
+    if (found.foundHash160 != nullptr && payload != nullptr && payload_len > 0u) {
+        const uint n = min(payload_len, kFoundHashWords * 4u);
+        device uchar* out = reinterpret_cast<device uchar*>(found.foundHash160 + ulong(idx) * kFoundHashWords);
+        found_copy_thread_to_device_bytes(out, payload, n);
+    }
+    if (found.type != nullptr) {
+        found.type[idx] = type_value;
+    }
+}
+
+static inline void priv_store_result_round(device bool* isResult,
+                                           device bool* buffResult,
+                                           const thread uchar* private_key32,
+                                           const thread void* payload,
+                                           uint payload_len,
+                                           uchar type_value,
+                                           long current_round,
+                                           FoundBuffers found) {
+    if (buffResult != nullptr) {
+        buffResult[0] = true;
+    }
+    if (isResult != nullptr) {
+        isResult[0] = true;
+    }
+    if (found.resultsCount == nullptr) {
+        return;
+    }
+
+    const ulong idx64 = found_atomic_add_count(found.resultsCount, 1u);
+    if (idx64 >= ulong(found.maxFounds)) {
+        return;
+    }
+    const uint idx = uint(idx64);
+
+    if (found.foundPrvKeys != nullptr && private_key32 != nullptr) {
+        found_copy_thread_to_device_uchar(found.foundPrvKeys + ulong(idx) * kFoundPrivateKeyBytes, private_key32, 32u);
+    }
+    if (found.foundHash160 != nullptr && payload != nullptr && payload_len > 0u) {
+        const uint n = min(payload_len, kFoundHashWords * 4u);
+        device uchar* out = reinterpret_cast<device uchar*>(found.foundHash160 + ulong(idx) * kFoundHashWords);
+        found_copy_thread_to_device_bytes(out, payload, n);
+    }
+    if (found.type != nullptr) {
+        found.type[idx] = type_value;
+    }
+    if (found.round != nullptr) {
+        found.round[idx] = current_round;
+    }
+}
+
+static inline bool priv_check_hash_words(device RuntimeConfig& config,
+                                         device XorFilterState& filters,
+                                         device FilterStorageState& storage,
+                                         const device uchar* bloom_storage,
+                                         const device uchar* xor_storage,
+                                         const device uchar* xor_un_storage,
+                                         const device uchar* xor_uc_storage,
+                                         const device uchar* xor_hc_storage,
+                                         const thread uint* hash_words) {
+    return filter_check_hash(config,
+                             filters,
+                             storage,
+                             bloom_storage,
+                             xor_storage,
+                             xor_un_storage,
+                             xor_uc_storage,
+                             xor_hc_storage,
+                             hash_words);
+}
+
+static inline bool priv_check_hash_bytes(device RuntimeConfig& config,
+                                         device XorFilterState& filters,
+                                         device FilterStorageState& storage,
+                                         const device uchar* bloom_storage,
+                                         const device uchar* xor_storage,
+                                         const device uchar* xor_un_storage,
+                                         const device uchar* xor_uc_storage,
+                                         const device uchar* xor_hc_storage,
+                                         const thread uchar* hash_bytes,
+                                         uint byte_len) {
+    uint hash_words[8];
+    priv_hash_words_from_bytes(hash_bytes, hash_words, byte_len);
+    return priv_check_hash_words(config,
+                                 filters,
+                                 storage,
+                                 bloom_storage,
+                                 xor_storage,
+                                 xor_un_storage,
+                                 xor_uc_storage,
+                                 xor_hc_storage,
+                                 hash_words);
+}
+
+static inline void priv_check_and_store_words(device bool* isResult,
+                                              device bool* buffResult,
+                                              const thread uchar* private_key32,
+                                              const thread void* payload,
+                                              uint payload_len,
+                                              const thread uint* hash_words,
+                                              uchar type_value,
+                                              device RuntimeConfig& config,
+                                              device XorFilterState& filters,
+                                              device FilterStorageState& storage,
+                                              const device uchar* bloom_storage,
+                                              const device uchar* xor_storage,
+                                              const device uchar* xor_un_storage,
+                                              const device uchar* xor_uc_storage,
+                                              const device uchar* xor_hc_storage,
+                                              FoundBuffers found) {
+    if (priv_check_hash_words(config, filters, storage, bloom_storage, xor_storage, xor_un_storage,
+                              xor_uc_storage, xor_hc_storage, hash_words)) {
+        priv_store_result(isResult, buffResult, private_key32, payload, payload_len, type_value, found);
+    }
+}
+
+static inline void priv_check_and_store_bytes(device bool* isResult,
+                                              device bool* buffResult,
+                                              const thread uchar* private_key32,
+                                              const thread uchar* payload,
+                                              uint payload_len,
+                                              const thread uchar* hash_bytes,
+                                              uint hash_len,
+                                              uchar type_value,
+                                              device RuntimeConfig& config,
+                                              device XorFilterState& filters,
+                                              device FilterStorageState& storage,
+                                              const device uchar* bloom_storage,
+                                              const device uchar* xor_storage,
+                                              const device uchar* xor_un_storage,
+                                              const device uchar* xor_uc_storage,
+                                              const device uchar* xor_hc_storage,
+                                              FoundBuffers found) {
+    uint hash_words[8];
+    priv_hash_words_from_bytes(hash_bytes, hash_words, hash_len);
+    priv_check_and_store_words(isResult,
+                               buffResult,
+                               private_key32,
+                               payload,
+                               payload_len,
+                               hash_words,
+                               type_value,
+                               config,
+                               filters,
+                               storage,
+                               bloom_storage,
+                               xor_storage,
+                               xor_un_storage,
+                               xor_uc_storage,
+                               xor_hc_storage,
+                               found);
+}
+
+static inline void priv_check_and_store_words_round(device bool* isResult,
+                                                    device bool* buffResult,
+                                                    const thread uchar* private_key32,
+                                                    const thread void* payload,
+                                                    uint payload_len,
+                                                    const thread uint* hash_words,
+                                                    uchar type_value,
+                                                    long current_round,
+                                                    device RuntimeConfig& config,
+                                                    device XorFilterState& filters,
+                                                    device FilterStorageState& storage,
+                                                    const device uchar* bloom_storage,
+                                                    const device uchar* xor_storage,
+                                                    const device uchar* xor_un_storage,
+                                                    const device uchar* xor_uc_storage,
+                                                    const device uchar* xor_hc_storage,
+                                                    FoundBuffers found) {
+    if (priv_check_hash_words(config, filters, storage, bloom_storage, xor_storage, xor_un_storage,
+                              xor_uc_storage, xor_hc_storage, hash_words)) {
+        priv_store_result_round(isResult, buffResult, private_key32, payload, payload_len, type_value,
+                                current_round, found);
+    }
+}
+
+static inline void priv_check_and_store_bytes_round(device bool* isResult,
+                                                    device bool* buffResult,
+                                                    const thread uchar* private_key32,
+                                                    const thread uchar* payload,
+                                                    uint payload_len,
+                                                    const thread uchar* hash_bytes,
+                                                    uint hash_len,
+                                                    uchar type_value,
+                                                    long current_round,
+                                                    device RuntimeConfig& config,
+                                                    device XorFilterState& filters,
+                                                    device FilterStorageState& storage,
+                                                    const device uchar* bloom_storage,
+                                                    const device uchar* xor_storage,
+                                                    const device uchar* xor_un_storage,
+                                                    const device uchar* xor_uc_storage,
+                                                    const device uchar* xor_hc_storage,
+                                                    FoundBuffers found) {
+    uint hash_words[8];
+    priv_hash_words_from_bytes(hash_bytes, hash_words, hash_len);
+    priv_check_and_store_words_round(isResult,
+                                     buffResult,
+                                     private_key32,
+                                     payload,
+                                     payload_len,
+                                     hash_words,
+                                     type_value,
+                                     current_round,
+                                     config,
+                                     filters,
+                                     storage,
+                                     bloom_storage,
+                                     xor_storage,
+                                     xor_un_storage,
+                                     xor_uc_storage,
+                                     xor_hc_storage,
+                                     found);
+}
+
+static inline void priv_emit_p2wsh_from_pubkey65(device bool* isResult,
+                                                 device bool* buffResult,
+                                                 const thread uchar* private_key32,
+                                                 const thread uchar* pubkey65,
+                                                 device RuntimeConfig& config,
+                                                 device XorFilterState& filters,
+                                                 device FilterStorageState& storage,
+                                                 const device uchar* bloom_storage,
+                                                 const device uchar* xor_storage,
+                                                 const device uchar* xor_un_storage,
+                                                 const device uchar* xor_uc_storage,
+                                                 const device uchar* xor_hc_storage,
+                                                 FoundBuffers found) {
+    uchar p2wsh_hash[32];
+    uint p2wsh_rmd[8] = { 0 };
+    _GetP2WSHComp(pubkey65, p2wsh_hash, p2wsh_rmd);
+    priv_check_and_store_words(isResult,
+                               buffResult,
+                               private_key32,
+                               p2wsh_hash,
+                               32u,
+                               p2wsh_rmd,
+                               0x07u,
+                               config,
+                               filters,
+                               storage,
+                               bloom_storage,
+                               xor_storage,
+                               xor_un_storage,
+                               xor_uc_storage,
+                               xor_hc_storage,
+                               found);
+}
+
+static inline void priv_emit_p2wsh_from_pubkey65_round(device bool* isResult,
+                                                       device bool* buffResult,
+                                                       const thread uchar* private_key32,
+                                                       const thread uchar* pubkey65,
+                                                       long current_round,
+                                                       device RuntimeConfig& config,
+                                                       device XorFilterState& filters,
+                                                       device FilterStorageState& storage,
+                                                       const device uchar* bloom_storage,
+                                                       const device uchar* xor_storage,
+                                                       const device uchar* xor_un_storage,
+                                                       const device uchar* xor_uc_storage,
+                                                       const device uchar* xor_hc_storage,
+                                                       FoundBuffers found) {
+    uchar p2wsh_hash[32];
+    uint p2wsh_rmd[8] = { 0 };
+    _GetP2WSHComp(pubkey65, p2wsh_hash, p2wsh_rmd);
+    priv_check_and_store_words_round(isResult,
+                                     buffResult,
+                                     private_key32,
+                                     p2wsh_hash,
+                                     32u,
+                                     p2wsh_rmd,
+                                     0x07u,
+                                     current_round,
+                                     config,
+                                     filters,
+                                     storage,
+                                     bloom_storage,
+                                     xor_storage,
+                                     xor_un_storage,
+                                     xor_uc_storage,
+                                     xor_hc_storage,
+                                     found);
+}
+
+static inline void priv_ed25519_key_to_pub_batch_config(const thread uchar* sk,
+                                                        thread uchar* pk,
+                                                        int n,
+                                                        device RuntimeConfig& config) {
+    if (adadot_ed_scalar_mode(config)) {
+        bignum256modm a;
+        ge25519 A;
+        for (int i = 0; i < n; ++i) {
+            const thread uchar* sk_i = sk + (i << 5);
+            thread uchar* pk_i = pk + (i << 5);
+            ed25519_secret_key extsk;
+            for (int j = 0; j < 32; ++j) {
+                extsk[j] = sk_i[j];
+            }
+            if (adadot_ed_little_endian_mode(config)) {
+                for (int l = 0, r = 31; l < r; ++l, --r) {
+                    uchar tmp = extsk[l];
+                    extsk[l] = extsk[r];
+                    extsk[r] = tmp;
+                }
+            }
+            expand256_modm(a, extsk, 32);
+            ge25519_scalarmult_base_niels(&A, ge25519_niels_base_multiples, a);
+            ge25519_pack(pk_i, &A);
+        }
+    } else if (adadot_ed_hash_mode(config)) {
+        bignum256modm a;
+        ge25519 A;
+        for (int i = 0; i < n; ++i) {
+            const thread uchar* sk_i = sk + (i << 5);
+            thread uchar* pk_i = pk + (i << 5);
+            ed25519_secret_key extsk;
+            for (int j = 0; j < 32; ++j) {
+                extsk[j] = sk_i[j];
+            }
+            extsk[0] &= 248u;
+            extsk[31] &= 127u;
+            extsk[31] |= 64u;
+            expand256_modm(a, extsk, 32);
+            ge25519_scalarmult_base_niels(&A, ge25519_niels_base_multiples, a);
+            ge25519_pack(pk_i, &A);
+        }
+    } else {
+        bignum256modm a;
+        ge25519 A;
+        hash_512bits extsk;
+        for (int i = 0; i < n; ++i) {
+            const thread uchar* sk_i = sk + (i << 5);
+            thread uchar* pk_i = pk + (i << 5);
+            ed25519_secret_key local_sk;
+            for (int j = 0; j < 32; ++j) {
+                local_sk[j] = sk_i[j];
+            }
+            ed25519_extsk(extsk, local_sk);
+            expand256_modm(a, extsk, 32);
+            ge25519_scalarmult_base_niels(&A, ge25519_niels_base_multiples, a);
+            ge25519_pack(pk_i, &A);
+        }
+    }
+}
+
+static inline void priv_ed25519_key_to_pub_one_config(const thread uchar* sk,
+                                                      thread uchar* pk,
+                                                      device RuntimeConfig& config) {
+    if (adadot_ed_scalar_mode(config)) {
+        bignum256modm a;
+        ge25519 A;
+        ed25519_secret_key extsk;
+        for (int j = 0; j < 32; ++j) {
+            extsk[j] = sk[j];
+        }
+        if (adadot_ed_little_endian_mode(config)) {
+            for (int l = 0, r = 31; l < r; ++l, --r) {
+                uchar tmp = extsk[l];
+                extsk[l] = extsk[r];
+                extsk[r] = tmp;
+            }
+        }
+        expand256_modm(a, extsk, 32);
+        ge25519_scalarmult_base_niels(&A, ge25519_niels_base_multiples, a);
+        ge25519_pack(pk, &A);
+    } else if (adadot_ed_hash_mode(config)) {
+        bignum256modm a;
+        ge25519 A;
+        ed25519_secret_key extsk;
+        for (int j = 0; j < 32; ++j) {
+            extsk[j] = sk[j];
+        }
+        extsk[0] &= 248u;
+        extsk[31] &= 127u;
+        extsk[31] |= 64u;
+        expand256_modm(a, extsk, 32);
+        ge25519_scalarmult_base_niels(&A, ge25519_niels_base_multiples, a);
+        ge25519_pack(pk, &A);
+    } else {
+        bignum256modm a;
+        ge25519 A;
+        hash_512bits extsk;
+        ed25519_secret_key local_sk;
+        for (int j = 0; j < 32; ++j) {
+            local_sk[j] = sk[j];
+        }
+        ed25519_extsk(extsk, local_sk);
+        expand256_modm(a, extsk, 32);
+        ge25519_scalarmult_base_niels(&A, ge25519_niels_base_multiples, a);
+        ge25519_pack(pk, &A);
+    }
+}
+
+static inline bool priv_ed_common_pub_needed(bool solana,
+                                             bool dot,
+                                             bool ton,
+                                             bool ton_all,
+                                             bool xrp,
+                                             bool aptos,
+                                             bool sui,
+                                             bool iota,
+                                             bool icp,
+                                             bool xtz,
+                                             device RuntimeConfig& config) {
+    const bool dot_ed = dot && dot_type_enabled(config, 0x30u);
+    const bool xrp_ed = xrp && xrp_type_enabled(config, 0x91u);
+    const bool aptos_ed = aptos && (aptos_type_enabled(config, 0x20u) ||
+                                    aptos_type_enabled(config, 0x21u));
+    const bool sui_ed = sui && sui_type_enabled(config, 0x71u);
+    const bool iota_ed = iota && iota_type_enabled(config, 0x51u);
+    const bool icp_ed = icp && icp_type_enabled(config, 0x52u);
+    const bool xtz_ed = xtz && xtz_type_enabled(config, 0x93u);
+    return solana || dot_ed || ton || ton_all || xrp_ed || aptos_ed ||
+           sui_ed || iota_ed || icp_ed || xtz_ed;
+}
+
+static inline void priv_build_seq_keys(thread uchar prvKeys[PRIV_THREAD_STEPS * 32u],
+                                       const device uchar* start_point,
+                                       int mode,
+                                       ulong seq_step,
+                                       ulong tIx) {
+    const ulong starter = ulong(PRIV_THREAD_STEPS) * tIx * seq_step;
+    for (uint i = 0u; i < PRIV_THREAD_STEPS; ++i) {
+        const ulong idx = starter + ulong(i) * seq_step;
+        uint c[8];
+        uint r[8];
+        loadBE256toWords(start_point, c);
+        if (mode == 1) {
+            add64to256_device(c, idx, r);
+        } else {
+            sub64from256_device(c, idx, r);
+        }
+        storeWordsToBE256(r, prvKeys + i * 32u);
+    }
+}
+
+static inline void priv_build_seq128_key(thread uchar out_key[32],
+                                         const device uchar* start_point,
+                                         int mode,
+                                         ulong idx,
+                                         ulong step) {
+    uint c[8];
+    uint r[8];
+    ulong off_lo;
+    ulong off_hi;
+    loadBE256toWords(start_point, c);
+    mul_u64_u64_to_u128(idx, step, off_lo, off_hi);
+    if (mode == 1) {
+        add128to256_device(c, off_lo, off_hi, r);
+    } else {
+        sub128from256_device(c, off_lo, off_hi, r);
+    }
+    storeWordsToBE256(r, out_key);
+}
+
+static inline void priv_emit_ton_type(device bool* isResult,
+                                      device bool* buffResult,
+                                      const thread uchar* private_key32,
+                                      const thread uchar* publ,
+                                      const constant char* ton_kind,
+                                      uchar type_value,
+                                      device RuntimeConfig& config,
+                                      device XorFilterState& filters,
+                                      device FilterStorageState& storage,
+                                      const device uchar* bloom_storage,
+                                      const device uchar* xor_storage,
+                                      const device uchar* xor_un_storage,
+                                      const device uchar* xor_uc_storage,
+                                      const device uchar* xor_hc_storage,
+                                      FoundBuffers found) {
+    uchar hash_addr[32];
+    if (ton_type_enabled_config(config, type_value) &&
+        pubkey_to_hash_ton(publ, ton_kind, hash_addr, config.tonTypeMask) &&
+        priv_check_hash_bytes(config, filters, storage, bloom_storage, xor_storage, xor_un_storage,
+                              xor_uc_storage, xor_hc_storage, hash_addr, 32u)) {
+        priv_store_result(isResult, buffResult, private_key32, hash_addr, 32u, type_value, found);
+    }
+}
+
+static inline void priv_emit_ton_type_round(device bool* isResult,
+                                            device bool* buffResult,
+                                            const thread uchar* private_key32,
+                                            const thread uchar* publ,
+                                            const constant char* ton_kind,
+                                            uchar type_value,
+                                            long current_round,
+                                            device RuntimeConfig& config,
+                                            device XorFilterState& filters,
+                                            device FilterStorageState& storage,
+                                            const device uchar* bloom_storage,
+                                            const device uchar* xor_storage,
+                                            const device uchar* xor_un_storage,
+                                            const device uchar* xor_uc_storage,
+                                            const device uchar* xor_hc_storage,
+                                            FoundBuffers found) {
+    uchar hash_addr[32];
+    if (ton_type_enabled_config(config, type_value) &&
+        pubkey_to_hash_ton(publ, ton_kind, hash_addr, config.tonTypeMask) &&
+        priv_check_hash_bytes(config, filters, storage, bloom_storage, xor_storage, xor_un_storage,
+                              xor_uc_storage, xor_hc_storage, hash_addr, 32u)) {
+        priv_store_result_round(isResult, buffResult, private_key32, hash_addr, 32u,
+                                type_value, current_round, found);
+    }
+}
+
+static inline void found_store_result_compat_len(device bool* isResult,
+                                                 device bool* buffResult,
+                                                 const thread char* phrase,
+                                                 ulong phrase_len,
+                                                 const thread uchar* private_key32,
+                                                 const thread void* match_data,
+                                                 uint match_data_len,
+                                                 uchar type_value,
+                                                 uint c_path,
+                                                 uint c_path2,
+                                                 long current_round,
+                                                 ushort starter_pass,
+                                                 const device char* passStart,
+                                                 uint passSize,
+                                                 ulong buff_index,
+                                                 bool store_seed,
+                                                 ulong seed_value,
+                                                 uint iter_value,
+                                                 bool store_iter,
+                                                 device RuntimeConfig& config,
+                                                 FoundBuffers found) {
+    adadot_store_result(isResult,
+                        buffResult,
+                        phrase,
+                        phrase_len,
+                        private_key32,
+                        nullptr,
+                        reinterpret_cast<const thread uchar*>(match_data),
+                        match_data_len,
+                        type_value,
+                        c_path,
+                        c_path2,
+                        current_round,
+                        starter_pass,
+                        passStart,
+                        passSize,
+                        buff_index,
+                        store_seed,
+                        seed_value,
+                        iter_value,
+                        store_iter,
+                        config,
+                        found);
+}
+
+static inline void priv_pub_add_basepoint_inplace(thread uchar* pub65,
+                                                  int sign,
+                                                  constant secp256k1_ge_storage* precPtr) {
+    secp256k1_ge B;
+    secp256k1_ge_from_storage(&B, &precPtr[0]);
+    if (sign < 0) {
+        secp256k1_ge_neg(&B, &B);
+    }
+
+    secp256k1_ge A;
+    if (pub65[0] == 0x04u) {
+        secp256k1_fe x;
+        secp256k1_fe y;
+        secp256k1_fe_set_b32(&x, pub65 + 1);
+        secp256k1_fe_set_b32(&y, pub65 + 33);
+        A.x = x;
+        A.y = y;
+        A.infinity = 0;
+    } else {
+        A.infinity = 1;
+    }
+
+    secp256k1_gej J;
+    if (A.infinity != 0) {
+        secp256k1_gej_set_ge(&J, &B);
+    } else {
+        secp256k1_gej_set_ge(&J, &A);
+        secp256k1_gej_add_ge_var(&J, &J, &B, nullptr);
+    }
+
+    secp256k1_ge R;
+    secp256k1_ge_set_gej(&R, &J);
+    pub65[0] = 0x04u;
+    secp256k1_fe tx = R.x;
+    secp256k1_fe ty = R.y;
+    secp256k1_fe_normalize_var(&tx);
+    secp256k1_fe_normalize_var(&ty);
+    secp256k1_fe_get_b32(pub65 + 1, &tx);
+    secp256k1_fe_get_b32(pub65 + 33, &ty);
+}
+
+static inline void priv_pub_add_basepoint_batch(thread uchar* pubKeys,
+                                                int count,
+                                                int sign,
+                                                constant secp256k1_ge_storage* precPtr) {
+    for (int i = 0; i < count; ++i) {
+        priv_pub_add_basepoint_inplace(pubKeys + uint(i) * 65u, sign, precPtr);
+    }
+}
+
+static inline void priv_emit_secp_targets_round(device bool* isResult,
+                                                device bool* buffResult,
+                                                const thread char* phrase,
+                                                ulong phrase_len,
+                                                thread uchar* prvKeys,
+                                                thread uchar* pubKeys,
+                                                thread uchar* tap_hash,
+                                                uint pkField,
+                                                uint c_path,
+                                                long current_round,
+                                                uint iter_value,
+                                                bool store_iter,
+                                                bool compressed,
+                                                bool uncompressed,
+                                                bool segwit,
+                                                bool p2wsh,
+                                                bool taproot,
+                                                bool ethereum,
+                                                bool xpoint,
+                                                bool xrp,
+                                                bool sui,
+                                                bool aptos,
+                                                bool iota,
+                                                bool icp,
+                                                bool fil,
+                                                bool xtz,
+                                                device RuntimeConfig& config,
+                                                device XorFilterState& filters,
+                                                device FilterStorageState& filter_storage,
+                                                const device uchar* bloom_storage,
+                                                const device uchar* xor_storage,
+                                                const device uchar* xor_un_storage,
+                                                const device uchar* xor_uc_storage,
+                                                const device uchar* xor_hc_storage,
+                                                FoundBuffers found,
+                                                bool store_seed = false,
+                                                ulong seed_value = 0ul) {
+    uint hash160[8];
+    thread uchar* private_key = prvKeys + pkField * 32u;
+    thread uchar* pubkey = pubKeys + pkField * 65u;
+    int keyLenSkip = int(65u * pkField);
+
+    if (uncompressed) {
+        _GetHash160(pubKeys, keyLenSkip, reinterpret_cast<thread uchar*>(hash160));
+        if (priv_check_hash_words(config, filters, filter_storage, bloom_storage, xor_storage,
+                                  xor_un_storage, xor_uc_storage, xor_hc_storage, hash160)) {
+            found_store_result_compat_len(isResult, buffResult, phrase, phrase_len, private_key, hash160, 32u,
+                               0x01u, c_path, c_path, current_round, 0u, nullptr, 0u, 0ul,
+                               store_seed, seed_value, iter_value, store_iter, config, found);
+        }
+    }
+    if (compressed) {
+        keyLenSkip = int(65u * pkField);
+        _GetHash160Comp(pubKeys, keyLenSkip, reinterpret_cast<thread uchar*>(hash160));
+        if (priv_check_hash_words(config, filters, filter_storage, bloom_storage, xor_storage,
+                                  xor_un_storage, xor_uc_storage, xor_hc_storage, hash160)) {
+            found_store_result_compat_len(isResult, buffResult, phrase, phrase_len, private_key, hash160, 32u,
+                               0x02u, c_path, c_path, current_round, 0u, nullptr, 0u, 0ul,
+                               store_seed, seed_value, iter_value, store_iter, config, found);
+        }
+    }
+    if (segwit) {
+        keyLenSkip = int(65u * pkField);
+        if (!compressed) {
+            _GetHash160Comp(pubKeys, keyLenSkip, reinterpret_cast<thread uchar*>(hash160));
+        }
+        _GetHash160P2SHCompFromHash(hash160, hash160);
+        if (priv_check_hash_words(config, filters, filter_storage, bloom_storage, xor_storage,
+                                  xor_un_storage, xor_uc_storage, xor_hc_storage, hash160)) {
+            found_store_result_compat_len(isResult, buffResult, phrase, phrase_len, private_key, hash160, 32u,
+                               0x03u, c_path, c_path, current_round, 0u, nullptr, 0u, 0ul,
+                               store_seed, seed_value, iter_value, store_iter, config, found);
+        }
+    }
+    if (p2wsh) {
+        uchar p2wsh_hash[32];
+        uint p2wsh_rmd[8] = { 0 };
+        _GetP2WSHComp(pubkey, p2wsh_hash, p2wsh_rmd);
+        if (priv_check_hash_words(config, filters, filter_storage, bloom_storage, xor_storage,
+                                  xor_un_storage, xor_uc_storage, xor_hc_storage, p2wsh_rmd)) {
+            found_store_result_compat_len(isResult, buffResult, phrase, phrase_len, private_key, p2wsh_hash, 32u,
+                               0x07u, c_path, c_path, current_round, 0u, nullptr, 0u, 0ul,
+                               store_seed, seed_value, iter_value, store_iter, config, found);
+        }
+    }
+    if (taproot) {
+        thread uchar* taproot_hash = tap_hash + pkField * 32u;
+        _GetRMD160(reinterpret_cast<thread uint*>(taproot_hash), hash160);
+        if (priv_check_hash_words(config, filters, filter_storage, bloom_storage, xor_storage,
+                                  xor_un_storage, xor_uc_storage, xor_hc_storage, hash160)) {
+            found_store_result_compat_len(isResult, buffResult, phrase, phrase_len, private_key, taproot_hash, 32u,
+                               0x04u, c_path, c_path, current_round, 0u, nullptr, 0u, 0ul,
+                               store_seed, seed_value, iter_value, store_iter, config, found);
+        }
+    }
+    if (ethereum) {
+        uchar keccak_hash[32];
+        keccak(reinterpret_cast<thread char*>(pubkey + 1), 64, keccak_hash, 32);
+        for (uint h = 12u, i = 0u; i < 5u; ++i) {
+            hash160[i] = uint(keccak_hash[h]) |
+                          ((uint(keccak_hash[h + 1u]) << 8u) & 0x0000ff00u) |
+                          ((uint(keccak_hash[h + 2u]) << 16u) & 0x00ff0000u) |
+                          ((uint(keccak_hash[h + 3u]) << 24u) & 0xff000000u);
+            h += 4u;
+        }
+        if (priv_check_hash_words(config, filters, filter_storage, bloom_storage, xor_storage,
+                                  xor_un_storage, xor_uc_storage, xor_hc_storage, hash160)) {
+            found_store_result_compat_len(isResult, buffResult, phrase, phrase_len, private_key, hash160, 32u,
+                               0x06u, c_path, c_path, current_round, 0u, nullptr, 0u, 0ul,
+                               store_seed, seed_value, iter_value, store_iter, config, found);
+        }
+    }
+    if (xpoint) {
+        uint xpoint_hash[8] = { 0 };
+        thread uchar* xbytes = reinterpret_cast<thread uchar*>(xpoint_hash);
+        priv_copy_thread_uchar(xbytes, pubkey + 1, 32u);
+        if (priv_check_hash_words(config, filters, filter_storage, bloom_storage, xor_storage,
+                                  xor_un_storage, xor_uc_storage, xor_hc_storage, xpoint_hash)) {
+            found_store_result_compat_len(isResult, buffResult, phrase, phrase_len, private_key, xpoint_hash, 32u,
+                               0x05u, c_path, c_path, current_round, 0u, nullptr, 0u, 0ul,
+                               store_seed, seed_value, iter_value, store_iter, config, found);
+        }
+    }
+    if (xrp && xrp_type_enabled(config, 0x90u)) {
+        keyLenSkip = int(65u * pkField);
+        _GetHash160Comp(pubKeys, keyLenSkip, reinterpret_cast<thread uchar*>(hash160));
+        if (priv_check_hash_words(config, filters, filter_storage, bloom_storage, xor_storage,
+                                  xor_un_storage, xor_uc_storage, xor_hc_storage, hash160)) {
+            found_store_result_compat_len(isResult, buffResult, phrase, phrase_len, private_key, hash160, 32u,
+                               0x90u, c_path, c_path, current_round, 0u, nullptr, 0u, 0ul,
+                               store_seed, seed_value, iter_value, store_iter, config, found);
+        }
+    }
+    if (sui && sui_type_enabled(config, 0x70u)) {
+        uchar buff[34];
+        buff[0] = 0x01u;
+        buff[1] = 0x02u + (pubkey[64] & 1u);
+        priv_copy_thread_uchar(buff + 2, pubkey + 1, 32u);
+        uchar hash_addr[32];
+        Blake2b_256(buff, 34u, hash_addr);
+        if (priv_check_hash_bytes(config, filters, filter_storage, bloom_storage, xor_storage,
+                                  xor_un_storage, xor_uc_storage, xor_hc_storage, hash_addr, 32u)) {
+            found_store_result_compat_len(isResult, buffResult, phrase, phrase_len, private_key, hash_addr, 32u,
+                               0x70u, c_path, c_path, current_round, 0u, nullptr, 0u, 0ul,
+                               store_seed, seed_value, iter_value, store_iter, config, found);
+        }
+    }
+    if (aptos && aptos_type_enabled(config, 0x22u)) {
+        uchar buff[35] = { 0 };
+        buff[0] = 0x01u;
+        buff[1] = 0x02u + (pubkey[64] & 1u);
+        priv_copy_thread_uchar(buff + 2, pubkey + 1, 32u);
+        buff[34] = 0x02u;
+        uchar hash_addr[32];
+        sha3_256(reinterpret_cast<thread char*>(buff), 35, hash_addr);
+        if (priv_check_hash_bytes(config, filters, filter_storage, bloom_storage, xor_storage,
+                                  xor_un_storage, xor_uc_storage, xor_hc_storage, hash_addr, 32u)) {
+            found_store_result_compat_len(isResult, buffResult, phrase, phrase_len, private_key, hash_addr, 32u,
+                               0x22u, c_path, c_path, current_round, 0u, nullptr, 0u, 0ul,
+                               store_seed, seed_value, iter_value, store_iter, config, found);
+        }
+    }
+    if (iota && iota_type_enabled(config, 0x50u)) {
+        uchar buff[34];
+        buff[0] = 0x01u;
+        buff[1] = 0x02u + (pubkey[64] & 1u);
+        priv_copy_thread_uchar(buff + 2, pubkey + 1, 32u);
+        uchar hash_addr[32];
+        Blake2b_256(buff, 34u, hash_addr);
+        if (priv_check_hash_bytes(config, filters, filter_storage, bloom_storage, xor_storage,
+                                  xor_un_storage, xor_uc_storage, xor_hc_storage, hash_addr, 32u)) {
+            found_store_result_compat_len(isResult, buffResult, phrase, phrase_len, private_key, hash_addr, 32u,
+                               0x50u, c_path, c_path, current_round, 0u, nullptr, 0u, 0ul,
+                               store_seed, seed_value, iter_value, store_iter, config, found);
+        }
+    }
+    if (icp && icp_type_enabled(config, 0x53u)) {
+        uchar principal[29] = { 0 };
+        icp_principal_from_secp256k1(pubkey, principal);
+        uchar hash_addr[32];
+        icp_account_identifier(principal, nullptr, hash_addr);
+        if (priv_check_hash_bytes(config, filters, filter_storage, bloom_storage, xor_storage,
+                                  xor_un_storage, xor_uc_storage, xor_hc_storage, hash_addr, 32u)) {
+            found_store_result_compat_len(isResult, buffResult, phrase, phrase_len, private_key, hash_addr, 32u,
+                               0x53u, c_path, c_path, current_round, 0u, nullptr, 0u, 0ul,
+                               store_seed, seed_value, iter_value, store_iter, config, found);
+        }
+    }
+    if (fil) {
+        if (fil_type_enabled(config, 0x41u)) {
+            uchar hash_addr[20];
+            Blake2b_160(pubkey, 65u, hash_addr);
+            if (priv_check_hash_bytes(config, filters, filter_storage, bloom_storage, xor_storage,
+                                      xor_un_storage, xor_uc_storage, xor_hc_storage, hash_addr, 20u)) {
+                found_store_result_compat_len(isResult, buffResult, phrase, phrase_len, private_key, hash_addr, 20u,
+                                   0x41u, c_path, c_path, current_round, 0u, nullptr, 0u, 0ul,
+                                   store_seed, seed_value, iter_value, store_iter, config, found);
+            }
+        }
+        if (fil_type_enabled(config, 0x42u)) {
+            uchar keccak_hash[32];
+            keccak(reinterpret_cast<thread char*>(pubkey + 1), 64, keccak_hash, 32);
+            for (uint h = 12u, i = 0u; i < 5u; ++i) {
+                hash160[i] = uint(keccak_hash[h]) |
+                              ((uint(keccak_hash[h + 1u]) << 8u) & 0x0000ff00u) |
+                              ((uint(keccak_hash[h + 2u]) << 16u) & 0x00ff0000u) |
+                              ((uint(keccak_hash[h + 3u]) << 24u) & 0xff000000u);
+                h += 4u;
+            }
+            if (priv_check_hash_words(config, filters, filter_storage, bloom_storage, xor_storage,
+                                      xor_un_storage, xor_uc_storage, xor_hc_storage, hash160)) {
+                found_store_result_compat_len(isResult, buffResult, phrase, phrase_len, private_key, hash160, 20u,
+                                   0x42u, c_path, c_path, current_round, 0u, nullptr, 0u, 0ul,
+                                   store_seed, seed_value, iter_value, store_iter, config, found);
+            }
+        }
+    }
+    if (xtz && xtz_type_enabled(config, 0x92u)) {
+        uchar buff[33] = { 0 };
+        priv_copy_thread_uchar(buff + 1, pubkey + 1, 32u);
+        buff[0] = 0x02u + (pubKeys[64] & 1u);
+        uchar hash_addr[20];
+        Blake2b_160(buff, 33u, hash_addr);
+        if (priv_check_hash_bytes(config, filters, filter_storage, bloom_storage, xor_storage,
+                                  xor_un_storage, xor_uc_storage, xor_hc_storage, hash_addr, 20u)) {
+            found_store_result_compat_len(isResult, buffResult, phrase, phrase_len, private_key, hash_addr, 20u,
+                               0x92u, c_path, c_path, current_round, 0u, nullptr, 0u, 0ul,
+                               store_seed, seed_value, iter_value, store_iter, config, found);
+        }
+    }
+}
+
+static inline void priv_emit_ed_targets_round(device bool* isResult,
+                                              device bool* buffResult,
+                                              const thread char* phrase,
+                                              ulong phrase_len,
+                                              const thread uchar* pkey,
+                                              const thread uchar* next_key,
+                                              const thread uchar* publ,
+                                              uint c_path,
+                                              long current_round,
+                                              uint iter_value,
+                                              bool store_iter,
+                                              bool solana,
+                                              bool dot,
+                                              bool ton,
+                                              bool ton_all,
+                                              bool xrp,
+                                              bool aptos,
+                                              bool sui,
+                                              bool iota,
+                                              bool ada,
+                                              bool icp,
+                                              bool xtz,
+                                              const device SubstratePathDevice* substratePaths,
+                                              device RuntimeConfig& config,
+                                              device XorFilterState& filters,
+                                              device FilterStorageState& filter_storage,
+                                              const device uchar* bloom_storage,
+                                              const device uchar* xor_storage,
+                                              const device uchar* xor_un_storage,
+                                              const device uchar* xor_uc_storage,
+                                              const device uchar* xor_hc_storage,
+                                              FoundBuffers found,
+                                              bool store_seed = false,
+                                              ulong seed_value = 0ul) {
+    uint hash160[8];
+
+    if (solana) {
+        if (priv_check_hash_bytes(config, filters, filter_storage, bloom_storage, xor_storage,
+                                  xor_un_storage, xor_uc_storage, xor_hc_storage, publ, 32u)) {
+            found_store_result_compat_len(isResult, buffResult, phrase, phrase_len, pkey, publ, 32u,
+                               0x60u, c_path, c_path, current_round, 0u, nullptr, 0u, 0ul,
+                               store_seed, seed_value, iter_value, store_iter, config, found);
+        }
+    }
+    if (dot) {
+        if (dot_type_enabled(config, 0x30u)) {
+            adadot_emit_dot_ed25519_public(isResult, buffResult, phrase, phrase_len, pkey, publ,
+                                           c_path, current_round, 0u, nullptr, 0u, 0ul, store_seed,
+                                           seed_value, iter_value, store_iter, config, filters, filter_storage,
+                                           bloom_storage, xor_storage, xor_un_storage, xor_uc_storage,
+                                           xor_hc_storage, found);
+        }
+        if (dot_type_enabled(config, 0x31u)) {
+            adadot_emit_dot_sr25519_seed(isResult, buffResult, phrase, phrase_len, pkey,
+                                         c_path, current_round, 0u, nullptr, 0u, 0ul, store_seed,
+                                         seed_value, iter_value, store_iter, config, filters, filter_storage,
+                                         bloom_storage, xor_storage, xor_un_storage, xor_uc_storage,
+                                         xor_hc_storage, found);
+        }
+        if (substratePaths != nullptr &&
+            config.substratePathCount > 0u &&
+            (dot_type_enabled(config, 0x30u) || dot_type_enabled(config, 0x31u))) {
+            adadot_emit_dot_substrate_from_seed(isResult, buffResult, phrase, phrase_len, pkey,
+                                                current_round, 0u, nullptr, 0u, 0ul, store_seed, seed_value,
+                                                iter_value, store_iter, config, substratePaths, filters,
+                                                filter_storage, bloom_storage, xor_storage,
+                                                xor_un_storage, xor_uc_storage, xor_hc_storage, found);
+        }
+    }
+    if (ton) {
+        priv_emit_ton_type_round(isResult, buffResult, pkey, publ, "v3r1", 0x85u, current_round, config, filters, filter_storage, bloom_storage, xor_storage, xor_un_storage, xor_uc_storage, xor_hc_storage, found);
+        priv_emit_ton_type_round(isResult, buffResult, pkey, publ, "v3r2", 0x86u, current_round, config, filters, filter_storage, bloom_storage, xor_storage, xor_un_storage, xor_uc_storage, xor_hc_storage, found);
+        priv_emit_ton_type_round(isResult, buffResult, pkey, publ, "v4r2", 0x88u, current_round, config, filters, filter_storage, bloom_storage, xor_storage, xor_un_storage, xor_uc_storage, xor_hc_storage, found);
+        priv_emit_ton_type_round(isResult, buffResult, pkey, publ, "v5r1", 0x89u, current_round, config, filters, filter_storage, bloom_storage, xor_storage, xor_un_storage, xor_uc_storage, xor_hc_storage, found);
+        priv_emit_ton_type_round(isResult, buffResult, pkey, publ, "hv3", 0x8cu, current_round, config, filters, filter_storage, bloom_storage, xor_storage, xor_un_storage, xor_uc_storage, xor_hc_storage, found);
+    }
+    if (ton_all) {
+        priv_emit_ton_type_round(isResult, buffResult, pkey, publ, "v1r1", 0x80u, current_round, config, filters, filter_storage, bloom_storage, xor_storage, xor_un_storage, xor_uc_storage, xor_hc_storage, found);
+        priv_emit_ton_type_round(isResult, buffResult, pkey, publ, "v1r2", 0x81u, current_round, config, filters, filter_storage, bloom_storage, xor_storage, xor_un_storage, xor_uc_storage, xor_hc_storage, found);
+        priv_emit_ton_type_round(isResult, buffResult, pkey, publ, "v1r3", 0x82u, current_round, config, filters, filter_storage, bloom_storage, xor_storage, xor_un_storage, xor_uc_storage, xor_hc_storage, found);
+        priv_emit_ton_type_round(isResult, buffResult, pkey, publ, "v2r1", 0x83u, current_round, config, filters, filter_storage, bloom_storage, xor_storage, xor_un_storage, xor_uc_storage, xor_hc_storage, found);
+        priv_emit_ton_type_round(isResult, buffResult, pkey, publ, "v2r2", 0x84u, current_round, config, filters, filter_storage, bloom_storage, xor_storage, xor_un_storage, xor_uc_storage, xor_hc_storage, found);
+        priv_emit_ton_type_round(isResult, buffResult, pkey, publ, "v3r1", 0x85u, current_round, config, filters, filter_storage, bloom_storage, xor_storage, xor_un_storage, xor_uc_storage, xor_hc_storage, found);
+        priv_emit_ton_type_round(isResult, buffResult, pkey, publ, "v3r2", 0x86u, current_round, config, filters, filter_storage, bloom_storage, xor_storage, xor_un_storage, xor_uc_storage, xor_hc_storage, found);
+        priv_emit_ton_type_round(isResult, buffResult, pkey, publ, "v4r1", 0x87u, current_round, config, filters, filter_storage, bloom_storage, xor_storage, xor_un_storage, xor_uc_storage, xor_hc_storage, found);
+        priv_emit_ton_type_round(isResult, buffResult, pkey, publ, "v4r2", 0x88u, current_round, config, filters, filter_storage, bloom_storage, xor_storage, xor_un_storage, xor_uc_storage, xor_hc_storage, found);
+        priv_emit_ton_type_round(isResult, buffResult, pkey, publ, "v5r1", 0x89u, current_round, config, filters, filter_storage, bloom_storage, xor_storage, xor_un_storage, xor_uc_storage, xor_hc_storage, found);
+        priv_emit_ton_type_round(isResult, buffResult, pkey, publ, "hv1", 0x8au, current_round, config, filters, filter_storage, bloom_storage, xor_storage, xor_un_storage, xor_uc_storage, xor_hc_storage, found);
+        priv_emit_ton_type_round(isResult, buffResult, pkey, publ, "hv2", 0x8bu, current_round, config, filters, filter_storage, bloom_storage, xor_storage, xor_un_storage, xor_uc_storage, xor_hc_storage, found);
+        priv_emit_ton_type_round(isResult, buffResult, pkey, publ, "hv3", 0x8cu, current_round, config, filters, filter_storage, bloom_storage, xor_storage, xor_un_storage, xor_uc_storage, xor_hc_storage, found);
+    }
+    if (xrp && xrp_type_enabled(config, 0x91u)) {
+        int keyLenSkip = 0;
+        uchar publ_mut[32];
+        priv_copy_thread_uchar(publ_mut, publ, 32u);
+        _GetHash160ED(publ_mut, keyLenSkip, reinterpret_cast<thread uchar*>(hash160));
+        if (priv_check_hash_words(config, filters, filter_storage, bloom_storage, xor_storage,
+                                  xor_un_storage, xor_uc_storage, xor_hc_storage, hash160)) {
+            found_store_result_compat_len(isResult, buffResult, phrase, phrase_len, pkey, hash160, 32u,
+                               0x91u, c_path, c_path, current_round, 0u, nullptr, 0u, 0ul,
+                               store_seed, seed_value, iter_value, store_iter, config, found);
+        }
+    }
+    if (aptos) {
+        if (aptos_type_enabled(config, 0x20u)) {
+            uchar buff[33] = { 0 };
+            priv_copy_thread_uchar(buff, publ, 32u);
+            uchar hash_addr[32];
+            sha3_256(reinterpret_cast<thread char*>(buff), 33, hash_addr);
+            if (priv_check_hash_bytes(config, filters, filter_storage, bloom_storage, xor_storage,
+                                      xor_un_storage, xor_uc_storage, xor_hc_storage, hash_addr, 32u)) {
+                found_store_result_compat_len(isResult, buffResult, phrase, phrase_len, pkey, hash_addr, 32u,
+                                   0x20u, c_path, c_path, current_round, 0u, nullptr, 0u, 0ul,
+                                   store_seed, seed_value, iter_value, store_iter, config, found);
+            }
+        }
+        if (aptos_type_enabled(config, 0x21u)) {
+            uchar buff2[34] = { 0 };
+            priv_copy_thread_uchar(buff2 + 1, publ, 32u);
+            buff2[33] = 0x02u;
+            uchar hash_addr2[32];
+            sha3_256(reinterpret_cast<thread char*>(buff2), 34, hash_addr2);
+            if (priv_check_hash_bytes(config, filters, filter_storage, bloom_storage, xor_storage,
+                                      xor_un_storage, xor_uc_storage, xor_hc_storage, hash_addr2, 32u)) {
+                found_store_result_compat_len(isResult, buffResult, phrase, phrase_len, pkey, hash_addr2, 32u,
+                                   0x21u, c_path, c_path, current_round, 0u, nullptr, 0u, 0ul,
+                                   store_seed, seed_value, iter_value, store_iter, config, found);
+            }
+        }
+    }
+    if (sui && sui_type_enabled(config, 0x71u)) {
+        uchar buff[33] = { 0 };
+        priv_copy_thread_uchar(buff + 1, publ, 32u);
+        uchar hash_addr[32];
+        Blake2b_256(buff, 33u, hash_addr);
+        if (priv_check_hash_bytes(config, filters, filter_storage, bloom_storage, xor_storage,
+                                  xor_un_storage, xor_uc_storage, xor_hc_storage, hash_addr, 32u)) {
+            found_store_result_compat_len(isResult, buffResult, phrase, phrase_len, pkey, hash_addr, 32u,
+                               0x71u, c_path, c_path, current_round, 0u, nullptr, 0u, 0ul,
+                               store_seed, seed_value, iter_value, store_iter, config, found);
+        }
+    }
+    if (iota && iota_type_enabled(config, 0x51u)) {
+        uchar hash_addr[32];
+        Blake2b_256(publ, 32u, hash_addr);
+        if (priv_check_hash_bytes(config, filters, filter_storage, bloom_storage, xor_storage,
+                                  xor_un_storage, xor_uc_storage, xor_hc_storage, hash_addr, 32u)) {
+            found_store_result_compat_len(isResult, buffResult, phrase, phrase_len, pkey, hash_addr, 32u,
+                               0x51u, c_path, c_path, current_round, 0u, nullptr, 0u, 0ul,
+                               store_seed, seed_value, iter_value, store_iter, config, found);
+        }
+    }
+    if (ada) {
+        adadot_emit_ada_direct_keyset(isResult, buffResult, phrase, phrase_len, pkey, next_key,
+                                      c_path, current_round, 0u, nullptr, 0u, 0ul, store_seed, seed_value,
+                                      iter_value, store_iter, false, config, filters, filter_storage,
+                                      bloom_storage, xor_storage, xor_un_storage, xor_uc_storage,
+                                      xor_hc_storage, found);
+    }
+    if (icp && icp_type_enabled(config, 0x52u)) {
+        uchar principal[29] = { 0 };
+        icp_principal_from_ed25519(publ, principal);
+        uchar hash_addr[32];
+        icp_account_identifier(principal, nullptr, hash_addr);
+        if (priv_check_hash_bytes(config, filters, filter_storage, bloom_storage, xor_storage,
+                                  xor_un_storage, xor_uc_storage, xor_hc_storage, hash_addr, 32u)) {
+            found_store_result_compat_len(isResult, buffResult, phrase, phrase_len, pkey, hash_addr, 32u,
+                               0x52u, c_path, c_path, current_round, 0u, nullptr, 0u, 0ul,
+                               store_seed, seed_value, iter_value, store_iter, config, found);
+        }
+    }
+    if (xtz && xtz_type_enabled(config, 0x93u)) {
+        uchar hash_addr[20];
+        Blake2b_160(publ, 32u, hash_addr);
+        if (priv_check_hash_bytes(config, filters, filter_storage, bloom_storage, xor_storage,
+                                  xor_un_storage, xor_uc_storage, xor_hc_storage, hash_addr, 20u)) {
+            found_store_result_compat_len(isResult, buffResult, phrase, phrase_len, pkey, hash_addr, 20u,
+                               0x93u, c_path, c_path, current_round, 0u, nullptr, 0u, 0ul,
+                               store_seed, seed_value, iter_value, store_iter, config, found);
+        }
+    }
+}
+
+#endif

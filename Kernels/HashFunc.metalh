@@ -1,0 +1,1107 @@
+#ifndef METAL_CRYPTO_HASH_FUNC_METALH
+#define METAL_CRYPTO_HASH_FUNC_METALH
+
+#include "DerivationTypes.metalh"
+
+#define HASH_THREAD_PTR(T) thread T*
+#define HASH_THREAD_CONST_PTR(T) thread const T*
+
+
+/* Two of six logical functions used in SHA-1, SHA-256, SHA-384, and SHA-512: */
+#define SHAF1(x,y,z)	((z) ^ ((x) & ((y) ^ (z))))
+#define SHAF0(x,y,z)	(((x) & (y)) | ((z) & ((x) ^ (y))))
+
+
+
+#define mod(x,y) ((x)-((x)/(y)*(y)))
+#define shr32(x,n) ((x) >> (n))
+#define rotl32(n,d) (((n) << (d)) | ((n) >> (32 - (d))))
+#define rotl64(n,d) (((n) << (d)) | ((n) >> (64 - (d))))
+#define rotr64(n,d) (((n) >> (d)) | ((n) << (64 - (d))))
+#define SS0(x) (rotl32 ((x), 25u) ^ rotl32 ((x), 14u) ^ shr32 ((x),  3u))
+#define SS1(x) (rotl32 ((x), 15u) ^ rotl32 ((x), 13u) ^ shr32 ((x), 10u))
+#define S2(x) (rotl32 ((x), 30u) ^ rotl32 ((x), 19u) ^ rotl32 ((x), 10u))
+#define S3(x) (rotl32 ((x), 26u) ^ rotl32 ((x), 21u) ^ rotl32 ((x),  7u))
+
+
+ /* Shift-right (used in SHA-256, SHA-384, and SHA-512): */
+#define SHR(b,x) 		((x) >> (b))
+/* 32-bit Rotate-right (used in SHA-256): */
+#define ROTR32(b,x)	(((x) >> (b)) | ((x) << (32 - (b))))
+ /* 64-bit Rotate-right (used in SHA-384 and SHA-512): */
+#define ROTR64(b,x)	(((x) >> (b)) | ((x) << (64 - (b))))
+ /* Four of six logical functions used in SHA-384 and SHA-512: */
+#define REVERSE32(w,x)	{ \
+	uint32_t tmp = (w); \
+	tmp = (tmp >> 16) | (tmp << 16); \
+	(x) = ((tmp & 0xff00ff00UL) >> 8) | ((tmp & 0x00ff00ffUL) << 8); \
+}
+#define REVERSE64(w,x)	{ \
+	uint64_t tmp = (w); \
+	tmp = (tmp >> 32) | (tmp << 32); \
+	tmp = ((tmp & 0xff00ff00ff00ff00UL) >> 8) | \
+	      ((tmp & 0x00ff00ff00ff00ffUL) << 8); \
+	(x) = ((tmp & 0xffff0000ffff0000UL) >> 16) | \
+	      ((tmp & 0x0000ffff0000ffffUL) << 16); \
+}
+/* Four of six logical functions used in SHA-384 and SHA-512: */
+#define SHA512_S0(x)	(ROTR64(28, (x)) ^ ROTR64(34, (x)) ^ ROTR64(39, (x)))
+#define SHA512_S1(x)	(ROTR64(14, (x)) ^ ROTR64(18, (x)) ^ ROTR64(41, (x)))
+#define little_s0(x)	(ROTR64( 1, (x)) ^ ROTR64( 8, (x)) ^ SHR( 7,   (x)))
+#define little_s1(x)	(ROTR64(19, (x)) ^ ROTR64(61, (x)) ^ SHR( 6,   (x)))
+
+
+#define highBit(i) (0x0000000000000001ULL << (8*(i) + 7))
+#define fBytes(i)  (0xFFFFFFFFFFFFFFFFULL >> (8 * (8-(i))))
+#define SHA256C00 0x428a2f98u
+#define SHA256C01 0x71374491u
+#define SHA256C02 0xb5c0fbcfu
+#define SHA256C03 0xe9b5dba5u
+#define SHA256C04 0x3956c25bu
+#define SHA256C05 0x59f111f1u
+#define SHA256C06 0x923f82a4u
+#define SHA256C07 0xab1c5ed5u
+#define SHA256C08 0xd807aa98u
+#define SHA256C09 0x12835b01u
+#define SHA256C0a 0x243185beu
+#define SHA256C0b 0x550c7dc3u
+#define SHA256C0c 0x72be5d74u
+#define SHA256C0d 0x80deb1feu
+#define SHA256C0e 0x9bdc06a7u
+#define SHA256C0f 0xc19bf174u
+#define SHA256C10 0xe49b69c1u
+#define SHA256C11 0xefbe4786u
+#define SHA256C12 0x0fc19dc6u
+#define SHA256C13 0x240ca1ccu
+#define SHA256C14 0x2de92c6fu
+#define SHA256C15 0x4a7484aau
+#define SHA256C16 0x5cb0a9dcu
+#define SHA256C17 0x76f988dau
+#define SHA256C18 0x983e5152u
+#define SHA256C19 0xa831c66du
+#define SHA256C1a 0xb00327c8u
+#define SHA256C1b 0xbf597fc7u
+#define SHA256C1c 0xc6e00bf3u
+#define SHA256C1d 0xd5a79147u
+#define SHA256C1e 0x06ca6351u
+#define SHA256C1f 0x14292967u
+#define SHA256C20 0x27b70a85u
+#define SHA256C21 0x2e1b2138u
+#define SHA256C22 0x4d2c6dfcu
+#define SHA256C23 0x53380d13u
+#define SHA256C24 0x650a7354u
+#define SHA256C25 0x766a0abbu
+#define SHA256C26 0x81c2c92eu
+#define SHA256C27 0x92722c85u
+#define SHA256C28 0xa2bfe8a1u
+#define SHA256C29 0xa81a664bu
+#define SHA256C2a 0xc24b8b70u
+#define SHA256C2b 0xc76c51a3u
+#define SHA256C2c 0xd192e819u
+#define SHA256C2d 0xd6990624u
+#define SHA256C2e 0xf40e3585u
+#define SHA256C2f 0x106aa070u
+#define SHA256C30 0x19a4c116u
+#define SHA256C31 0x1e376c08u
+#define SHA256C32 0x2748774cu
+#define SHA256C33 0x34b0bcb5u
+#define SHA256C34 0x391c0cb3u
+#define SHA256C35 0x4ed8aa4au
+#define SHA256C36 0x5b9cca4fu
+#define SHA256C37 0x682e6ff3u
+#define SHA256C38 0x748f82eeu
+#define SHA256C39 0x78a5636fu
+#define SHA256C3a 0x84c87814u
+#define SHA256C3b 0x8cc70208u
+#define SHA256C3c 0x90befffau
+#define SHA256C3d 0xa4506cebu
+#define SHA256C3e 0xbef9a3f7u
+#define SHA256C3f 0xc67178f2u
+
+// 512 bytes
+REC_CONSTANT uint64_t padLong[8] = { highBit(0), highBit(1), highBit(2), highBit(3), highBit(4), highBit(5), highBit(6), highBit(7) };
+
+// 512 bytes
+REC_CONSTANT uint64_t maskLong[8] = { 0, fBytes(1), fBytes(2), fBytes(3), fBytes(4), fBytes(5), fBytes(6), fBytes(7) };
+
+// 256 bytes
+REC_CONSTANT REC_ALIGN(4) uint32_t k_sha256[64] =
+{
+  SHA256C00, SHA256C01, SHA256C02, SHA256C03,
+  SHA256C04, SHA256C05, SHA256C06, SHA256C07,
+  SHA256C08, SHA256C09, SHA256C0a, SHA256C0b,
+  SHA256C0c, SHA256C0d, SHA256C0e, SHA256C0f,
+  SHA256C10, SHA256C11, SHA256C12, SHA256C13,
+  SHA256C14, SHA256C15, SHA256C16, SHA256C17,
+  SHA256C18, SHA256C19, SHA256C1a, SHA256C1b,
+  SHA256C1c, SHA256C1d, SHA256C1e, SHA256C1f,
+  SHA256C20, SHA256C21, SHA256C22, SHA256C23,
+  SHA256C24, SHA256C25, SHA256C26, SHA256C27,
+  SHA256C28, SHA256C29, SHA256C2a, SHA256C2b,
+  SHA256C2c, SHA256C2d, SHA256C2e, SHA256C2f,
+  SHA256C30, SHA256C31, SHA256C32, SHA256C33,
+  SHA256C34, SHA256C35, SHA256C36, SHA256C37,
+  SHA256C38, SHA256C39, SHA256C3a, SHA256C3b,
+  SHA256C3c, SHA256C3d, SHA256C3e, SHA256C3f,
+};
+
+// 5kB
+REC_CONSTANT REC_ALIGN(4) uint64_t k_sha512[80] =
+{
+	0x428a2f98d728ae22UL, 0x7137449123ef65cdUL, 0xb5c0fbcfec4d3b2fUL, 0xe9b5dba58189dbbcUL, 0x3956c25bf348b538UL,
+	0x59f111f1b605d019UL, 0x923f82a4af194f9bUL, 0xab1c5ed5da6d8118UL, 0xd807aa98a3030242UL, 0x12835b0145706fbeUL,
+	0x243185be4ee4b28cUL, 0x550c7dc3d5ffb4e2UL, 0x72be5d74f27b896fUL, 0x80deb1fe3b1696b1UL, 0x9bdc06a725c71235UL,
+	0xc19bf174cf692694UL, 0xe49b69c19ef14ad2UL, 0xefbe4786384f25e3UL, 0x0fc19dc68b8cd5b5UL, 0x240ca1cc77ac9c65UL,
+	0x2de92c6f592b0275UL, 0x4a7484aa6ea6e483UL, 0x5cb0a9dcbd41fbd4UL, 0x76f988da831153b5UL, 0x983e5152ee66dfabUL,
+	0xa831c66d2db43210UL, 0xb00327c898fb213fUL, 0xbf597fc7beef0ee4UL, 0xc6e00bf33da88fc2UL, 0xd5a79147930aa725UL,
+	0x06ca6351e003826fUL, 0x142929670a0e6e70UL, 0x27b70a8546d22ffcUL, 0x2e1b21385c26c926UL, 0x4d2c6dfc5ac42aedUL,
+	0x53380d139d95b3dfUL, 0x650a73548baf63deUL, 0x766a0abb3c77b2a8UL, 0x81c2c92e47edaee6UL, 0x92722c851482353bUL,
+	0xa2bfe8a14cf10364UL, 0xa81a664bbc423001UL, 0xc24b8b70d0f89791UL, 0xc76c51a30654be30UL, 0xd192e819d6ef5218UL,
+	0xd69906245565a910UL, 0xf40e35855771202aUL, 0x106aa07032bbd1b8UL, 0x19a4c116b8d2d0c8UL, 0x1e376c085141ab53UL,
+	0x2748774cdf8eeb99UL, 0x34b0bcb5e19b48a8UL, 0x391c0cb3c5c95a63UL, 0x4ed8aa4ae3418acbUL, 0x5b9cca4f7763e373UL,
+	0x682e6ff3d6b2b8a3UL, 0x748f82ee5defb2fcUL, 0x78a5636f43172f60UL, 0x84c87814a1f0ab72UL, 0x8cc702081a6439ecUL,
+	0x90befffa23631e28UL, 0xa4506cebde82bde9UL, 0xbef9a3f7b2c67915UL, 0xc67178f2e372532bUL, 0xca273eceea26619cUL,
+	0xd186b8c721c0c207UL, 0xeada7dd6cde0eb1eUL, 0xf57d4f7fee6ed178UL, 0x06f067aa72176fbaUL, 0x0a637dc5a2c898a6UL,
+	0x113f9804bef90daeUL, 0x1b710b35131c471bUL, 0x28db77f523047d84UL, 0x32caab7b40c72493UL, 0x3c9ebe0a15c9bebcUL,
+	0x431d67c49c100d4cUL, 0x4cc5d4becb3e42b6UL, 0x597f299cfc657e2aUL, 0x5fcb6fab3ad6faecUL, 0x6c44198c4a475817UL
+};
+
+#define SHA256_STEP(F0a,F1a,a,b,c,d,e,f,g,h,x,K) { h += K; h += x; h += S3 (e); h += F1a (e,f,g); d += h; h += S2 (a); h += F0a (a,b,c); }
+#define SHA512_STEP(a,b,c,d,e,f,g,h,x,K) { h += K + SHA512_S1(e) + SHAF1(e, f, g) + x; d += h; h += SHA512_S0(a) + SHAF0(a, b, c);}
+#define ROUND_STEP_SHA512(i) { SHA512_STEP(a, b, c, d, e, f, g, h, W[i + 0], k_sha512[i +  0]); SHA512_STEP(h, a, b, c, d, e, f, g, W[i + 1], k_sha512[i +  1]); SHA512_STEP(g, h, a, b, c, d, e, f, W[i + 2], k_sha512[i +  2]); SHA512_STEP(f, g, h, a, b, c, d, e, W[i + 3], k_sha512[i +  3]); SHA512_STEP(e, f, g, h, a, b, c, d, W[i + 4], k_sha512[i +  4]); SHA512_STEP(d, e, f, g, h, a, b, c, W[i + 5], k_sha512[i +  5]); SHA512_STEP(c, d, e, f, g, h, a, b, W[i + 6], k_sha512[i +  6]); SHA512_STEP(b, c, d, e, f, g, h, a, W[i + 7], k_sha512[i +  7]); SHA512_STEP(a, b, c, d, e, f, g, h, W[i + 8], k_sha512[i +  8]); SHA512_STEP(h, a, b, c, d, e, f, g, W[i + 9], k_sha512[i +  9]); SHA512_STEP(g, h, a, b, c, d, e, f, W[i + 10], k_sha512[i + 10]); SHA512_STEP(f, g, h, a, b, c, d, e, W[i + 11], k_sha512[i + 11]); SHA512_STEP(e, f, g, h, a, b, c, d, W[i + 12], k_sha512[i + 12]); SHA512_STEP(d, e, f, g, h, a, b, c, W[i + 13], k_sha512[i + 13]); SHA512_STEP(c, d, e, f, g, h, a, b, W[i + 14], k_sha512[i + 14]); SHA512_STEP(b, c, d, e, f, g, h, a, W[i + 15], k_sha512[i + 15]); }
+#define SHA256_EXPAND(x,y,z,w) (SS1 (x) + y + SS0 (z) + w)
+#define ROUND_STEP_SHA512_SHARED(i) { \
+SHA512_STEP(a, b, c, d, e, f, g, h, W_data[i + 0], k_sha512[i +  0]); \
+SHA512_STEP(h, a, b, c, d, e, f, g, W_data[i + 1], k_sha512[i +  1]); \
+SHA512_STEP(g, h, a, b, c, d, e, f, W_data[i + 2], k_sha512[i +  2]); \
+SHA512_STEP(f, g, h, a, b, c, d, e, W_data[i + 3], k_sha512[i +  3]); \
+SHA512_STEP(e, f, g, h, a, b, c, d, W_data[i + 4], k_sha512[i +  4]); \
+SHA512_STEP(d, e, f, g, h, a, b, c, W_data[i + 5], k_sha512[i +  5]); \
+SHA512_STEP(c, d, e, f, g, h, a, b, W_data[i + 6], k_sha512[i +  6]); \
+SHA512_STEP(b, c, d, e, f, g, h, a, W_data[i + 7], k_sha512[i +  7]); \
+SHA512_STEP(a, b, c, d, e, f, g, h, W_data[i + 8], k_sha512[i +  8]); \
+SHA512_STEP(h, a, b, c, d, e, f, g, W_data[i + 9], k_sha512[i +  9]); \
+SHA512_STEP(g, h, a, b, c, d, e, f, W_data[i + 10], k_sha512[i + 10]); \
+SHA512_STEP(f, g, h, a, b, c, d, e, W_data[i + 11], k_sha512[i + 11]); \
+SHA512_STEP(e, f, g, h, a, b, c, d, W_data[i + 12], k_sha512[i + 12]); \
+SHA512_STEP(d, e, f, g, h, a, b, c, W_data[i + 13], k_sha512[i + 13]); \
+SHA512_STEP(c, d, e, f, g, h, a, b, W_data[i + 14], k_sha512[i + 14]); \
+SHA512_STEP(b, c, d, e, f, g, h, a, W_data[i + 15], k_sha512[i + 15]);}
+
+
+
+// Device helper: SWAP256.
+REC_DEVICE uint32_t SWAP256(uint32_t val) {
+	return (rotl32(((val) & (uint32_t)0x00FF00FF), (uint32_t)24U) | rotl32(((val) & (uint32_t)0xFF00FF00), (uint32_t)8U));
+}
+
+
+
+// Device helper: SWAP512.
+REC_DEVICE uint64_t SWAP512(uint64_t val) {
+	uint64_t tmp;
+	uint64_t ret;
+	tmp = (rotr64((uint64_t)((val) & (uint64_t)0x0000FFFF0000FFFFUL), 16) | rotl64((uint64_t)((val) & (uint64_t)0xFFFF0000FFFF0000UL), 16));
+	ret = (rotr64((uint64_t)((tmp) & (uint64_t)0xFF00FF00FF00FF00UL), 8) | rotl64((uint64_t)((tmp) & (uint64_t)0x00FF00FF00FF00FFUL), 8));
+	return ret;
+}
+
+
+// 1, 383 0's, 128 bit length BE
+// uint64_t is 64 bits => 8 bytes so msg[0] is bytes 1->8  msg[1] is bytes 9->16
+// msg[24] is bytes 193->200 but our message is only 192 bytes
+REC_DEVICE void md_pad_128(HASH_THREAD_PTR(uint64_t) msg, const long msgLen_bytes) {
+	uint32_t padLongIndex, overhang;
+	padLongIndex = ((uint32_t)msgLen_bytes) / 8; // 24
+	overhang = (((uint32_t)msgLen_bytes) - padLongIndex * 8); // 0
+	msg[padLongIndex] &= maskLong[overhang]; // msg[24] = msg[24] & 0 -> 0's out this byte
+	msg[padLongIndex] |= padLong[overhang]; // msg[24] = msg[24] | 0x1UL << 7 -> sets it to 0x1UL << 7
+	msg[padLongIndex + 1] = 0; // msg[25] = 0
+	msg[padLongIndex + 2] = 0; // msg[26] = 0
+	uint32_t i = 0;
+
+	// 27, 28, 29, 30, 31 = 0
+	for (i = padLongIndex + 3; i < 32; i++) {
+		msg[i] = 0;
+	}
+	// i = 32
+	// int nBlocks = i / 16; // nBlocks = 2
+	msg[i - 2] = 0; // msg[30] = 0; already did this in loop..
+	msg[i - 1] = SWAP512(msgLen_bytes * 8); // msg[31] = SWAP512(1536)
+};
+
+// Device helper: sha256_process2.
+REC_DEVICE void sha256_process2(HASH_THREAD_CONST_PTR(uint32_t) W, HASH_THREAD_PTR(uint32_t) digest) {
+	uint32_t a = digest[0];
+	uint32_t b = digest[1];
+	uint32_t c = digest[2];
+	uint32_t d = digest[3];
+	uint32_t e = digest[4];
+	uint32_t f = digest[5];
+	uint32_t g = digest[6];
+	uint32_t h = digest[7];
+
+	uint32_t w0_t = W[0];
+	uint32_t w1_t = W[1];
+	uint32_t w2_t = W[2];
+	uint32_t w3_t = W[3];
+	uint32_t w4_t = W[4];
+	uint32_t w5_t = W[5];
+	uint32_t w6_t = W[6];
+	uint32_t w7_t = W[7];
+	uint32_t w8_t = W[8];
+	uint32_t w9_t = W[9];
+	uint32_t wa_t = W[10];
+	uint32_t wb_t = W[11];
+	uint32_t wc_t = W[12];
+	uint32_t wd_t = W[13];
+	uint32_t we_t = W[14];
+	uint32_t wf_t = W[15];
+
+#define ROUND_EXPAND() { w0_t = SHA256_EXPAND (we_t, w9_t, w1_t, w0_t); w1_t = SHA256_EXPAND (wf_t, wa_t, w2_t, w1_t); w2_t = SHA256_EXPAND (w0_t, wb_t, w3_t, w2_t); w3_t = SHA256_EXPAND (w1_t, wc_t, w4_t, w3_t); w4_t = SHA256_EXPAND (w2_t, wd_t, w5_t, w4_t); w5_t = SHA256_EXPAND (w3_t, we_t, w6_t, w5_t); w6_t = SHA256_EXPAND (w4_t, wf_t, w7_t, w6_t); w7_t = SHA256_EXPAND (w5_t, w0_t, w8_t, w7_t); w8_t = SHA256_EXPAND (w6_t, w1_t, w9_t, w8_t); w9_t = SHA256_EXPAND (w7_t, w2_t, wa_t, w9_t); wa_t = SHA256_EXPAND (w8_t, w3_t, wb_t, wa_t); wb_t = SHA256_EXPAND (w9_t, w4_t, wc_t, wb_t); wc_t = SHA256_EXPAND (wa_t, w5_t, wd_t, wc_t); wd_t = SHA256_EXPAND (wb_t, w6_t, we_t, wd_t); we_t = SHA256_EXPAND (wc_t, w7_t, wf_t, we_t); wf_t = SHA256_EXPAND (wd_t, w8_t, w0_t, wf_t); }
+#define ROUND_STEP(i) { SHA256_STEP (SHAF0, SHAF1, a, b, c, d, e, f, g, h, w0_t, k_sha256[i +  0]); SHA256_STEP (SHAF0, SHAF1, h, a, b, c, d, e, f, g, w1_t, k_sha256[i +  1]); SHA256_STEP (SHAF0, SHAF1, g, h, a, b, c, d, e, f, w2_t, k_sha256[i +  2]); SHA256_STEP (SHAF0, SHAF1, f, g, h, a, b, c, d, e, w3_t, k_sha256[i +  3]); SHA256_STEP (SHAF0, SHAF1, e, f, g, h, a, b, c, d, w4_t, k_sha256[i +  4]); SHA256_STEP (SHAF0, SHAF1, d, e, f, g, h, a, b, c, w5_t, k_sha256[i +  5]); SHA256_STEP (SHAF0, SHAF1, c, d, e, f, g, h, a, b, w6_t, k_sha256[i +  6]); SHA256_STEP (SHAF0, SHAF1, b, c, d, e, f, g, h, a, w7_t, k_sha256[i +  7]); SHA256_STEP (SHAF0, SHAF1, a, b, c, d, e, f, g, h, w8_t, k_sha256[i +  8]); SHA256_STEP (SHAF0, SHAF1, h, a, b, c, d, e, f, g, w9_t, k_sha256[i +  9]); SHA256_STEP (SHAF0, SHAF1, g, h, a, b, c, d, e, f, wa_t, k_sha256[i + 10]); SHA256_STEP (SHAF0, SHAF1, f, g, h, a, b, c, d, e, wb_t, k_sha256[i + 11]); SHA256_STEP (SHAF0, SHAF1, e, f, g, h, a, b, c, d, wc_t, k_sha256[i + 12]); SHA256_STEP (SHAF0, SHAF1, d, e, f, g, h, a, b, c, wd_t, k_sha256[i + 13]); SHA256_STEP (SHAF0, SHAF1, c, d, e, f, g, h, a, b, we_t, k_sha256[i + 14]); SHA256_STEP (SHAF0, SHAF1, b, c, d, e, f, g, h, a, wf_t, k_sha256[i + 15]); }
+
+	ROUND_STEP(0);
+	ROUND_EXPAND();
+	ROUND_STEP(16);
+	ROUND_EXPAND();
+	ROUND_STEP(32);
+	ROUND_EXPAND();
+	ROUND_STEP(48);
+
+	digest[0] += a;
+	digest[1] += b;
+	digest[2] += c;
+	digest[3] += d;
+	digest[4] += e;
+	digest[5] += f;
+	digest[6] += g;
+	digest[7] += h;
+}
+
+// Device helper: sha512_d.
+REC_DEVICE void sha512_d(HASH_THREAD_PTR(uint64_t) input, const uint32_t length, HASH_THREAD_PTR(uint64_t) hash) {
+	md_pad_128(input, (uint64_t)length);
+	uint64_t W[16];
+	uint64_t State[8];
+	State[0] = 0x6a09e667f3bcc908UL;
+	State[1] = 0xbb67ae8584caa73bUL;
+	State[2] = 0x3c6ef372fe94f82bUL;
+	State[3] = 0xa54ff53a5f1d36f1UL;
+	State[4] = 0x510e527fade682d1UL;
+	State[5] = 0x9b05688c2b3e6c1fUL;
+	State[6] = 0x1f83d9abfb41bd6bUL;
+	State[7] = 0x5be0cd19137e2179UL;
+	uint64_t a, b, c, d, e, f, g, h;
+	for (int block_i = 0; block_i < 2; block_i++) {
+
+		W[0] = SWAP512(input[0]);
+		W[1] = SWAP512(input[1]);
+		W[2] = SWAP512(input[2]);
+		W[3] = SWAP512(input[3]);
+		W[4] = SWAP512(input[4]);
+		W[5] = SWAP512(input[5]);
+		W[6] = SWAP512(input[6]);
+		W[7] = SWAP512(input[7]);
+		W[8] = SWAP512(input[8]);
+		W[9] = SWAP512(input[9]);
+		W[10] = SWAP512(input[10]);
+		W[11] = SWAP512(input[11]);
+		W[12] = SWAP512(input[12]);
+		W[13] = SWAP512(input[13]);
+		W[14] = SWAP512(input[14]);
+		W[15] = SWAP512(input[15]);
+
+		a = State[0];
+		b = State[1];
+		c = State[2];
+		d = State[3];
+		e = State[4];
+		f = State[5];
+		g = State[6];
+		h = State[7];
+
+#define SHA512D_R(a,b,c,d,e,f,g,h,wi,K) \
+		{ h += K + SHA512_S1(e) + SHAF1(e,f,g) + (wi); d += h; h += SHA512_S0(a) + SHAF0(a,b,c); }
+#define SHA512D_Wn(i) (W[(i)&15] = little_s1(W[((i)-2)&15]) + W[((i)-7)&15] + little_s0(W[((i)-15)&15]) + W[((i)-16)&15])
+
+		SHA512D_R(a,b,c,d,e,f,g,h, W[0],  0x428a2f98d728ae22UL);
+		SHA512D_R(h,a,b,c,d,e,f,g, W[1],  0x7137449123ef65cdUL);
+		SHA512D_R(g,h,a,b,c,d,e,f, W[2],  0xb5c0fbcfec4d3b2fUL);
+		SHA512D_R(f,g,h,a,b,c,d,e, W[3],  0xe9b5dba58189dbbcUL);
+		SHA512D_R(e,f,g,h,a,b,c,d, W[4],  0x3956c25bf348b538UL);
+		SHA512D_R(d,e,f,g,h,a,b,c, W[5],  0x59f111f1b605d019UL);
+		SHA512D_R(c,d,e,f,g,h,a,b, W[6],  0x923f82a4af194f9bUL);
+		SHA512D_R(b,c,d,e,f,g,h,a, W[7],  0xab1c5ed5da6d8118UL);
+		SHA512D_R(a,b,c,d,e,f,g,h, W[8],  0xd807aa98a3030242UL);
+		SHA512D_R(h,a,b,c,d,e,f,g, W[9],  0x12835b0145706fbeUL);
+		SHA512D_R(g,h,a,b,c,d,e,f, W[10], 0x243185be4ee4b28cUL);
+		SHA512D_R(f,g,h,a,b,c,d,e, W[11], 0x550c7dc3d5ffb4e2UL);
+		SHA512D_R(e,f,g,h,a,b,c,d, W[12], 0x72be5d74f27b896fUL);
+		SHA512D_R(d,e,f,g,h,a,b,c, W[13], 0x80deb1fe3b1696b1UL);
+		SHA512D_R(c,d,e,f,g,h,a,b, W[14], 0x9bdc06a725c71235UL);
+		SHA512D_R(b,c,d,e,f,g,h,a, W[15], 0xc19bf174cf692694UL);
+
+		SHA512D_R(a,b,c,d,e,f,g,h, SHA512D_Wn(16), 0xe49b69c19ef14ad2UL);
+		SHA512D_R(h,a,b,c,d,e,f,g, SHA512D_Wn(17), 0xefbe4786384f25e3UL);
+		SHA512D_R(g,h,a,b,c,d,e,f, SHA512D_Wn(18), 0x0fc19dc68b8cd5b5UL);
+		SHA512D_R(f,g,h,a,b,c,d,e, SHA512D_Wn(19), 0x240ca1cc77ac9c65UL);
+		SHA512D_R(e,f,g,h,a,b,c,d, SHA512D_Wn(20), 0x2de92c6f592b0275UL);
+		SHA512D_R(d,e,f,g,h,a,b,c, SHA512D_Wn(21), 0x4a7484aa6ea6e483UL);
+		SHA512D_R(c,d,e,f,g,h,a,b, SHA512D_Wn(22), 0x5cb0a9dcbd41fbd4UL);
+		SHA512D_R(b,c,d,e,f,g,h,a, SHA512D_Wn(23), 0x76f988da831153b5UL);
+		SHA512D_R(a,b,c,d,e,f,g,h, SHA512D_Wn(24), 0x983e5152ee66dfabUL);
+		SHA512D_R(h,a,b,c,d,e,f,g, SHA512D_Wn(25), 0xa831c66d2db43210UL);
+		SHA512D_R(g,h,a,b,c,d,e,f, SHA512D_Wn(26), 0xb00327c898fb213fUL);
+		SHA512D_R(f,g,h,a,b,c,d,e, SHA512D_Wn(27), 0xbf597fc7beef0ee4UL);
+		SHA512D_R(e,f,g,h,a,b,c,d, SHA512D_Wn(28), 0xc6e00bf33da88fc2UL);
+		SHA512D_R(d,e,f,g,h,a,b,c, SHA512D_Wn(29), 0xd5a79147930aa725UL);
+		SHA512D_R(c,d,e,f,g,h,a,b, SHA512D_Wn(30), 0x06ca6351e003826fUL);
+		SHA512D_R(b,c,d,e,f,g,h,a, SHA512D_Wn(31), 0x142929670a0e6e70UL);
+		SHA512D_R(a,b,c,d,e,f,g,h, SHA512D_Wn(32), 0x27b70a8546d22ffcUL);
+		SHA512D_R(h,a,b,c,d,e,f,g, SHA512D_Wn(33), 0x2e1b21385c26c926UL);
+		SHA512D_R(g,h,a,b,c,d,e,f, SHA512D_Wn(34), 0x4d2c6dfc5ac42aedUL);
+		SHA512D_R(f,g,h,a,b,c,d,e, SHA512D_Wn(35), 0x53380d139d95b3dfUL);
+		SHA512D_R(e,f,g,h,a,b,c,d, SHA512D_Wn(36), 0x650a73548baf63deUL);
+		SHA512D_R(d,e,f,g,h,a,b,c, SHA512D_Wn(37), 0x766a0abb3c77b2a8UL);
+		SHA512D_R(c,d,e,f,g,h,a,b, SHA512D_Wn(38), 0x81c2c92e47edaee6UL);
+		SHA512D_R(b,c,d,e,f,g,h,a, SHA512D_Wn(39), 0x92722c851482353bUL);
+		SHA512D_R(a,b,c,d,e,f,g,h, SHA512D_Wn(40), 0xa2bfe8a14cf10364UL);
+		SHA512D_R(h,a,b,c,d,e,f,g, SHA512D_Wn(41), 0xa81a664bbc423001UL);
+		SHA512D_R(g,h,a,b,c,d,e,f, SHA512D_Wn(42), 0xc24b8b70d0f89791UL);
+		SHA512D_R(f,g,h,a,b,c,d,e, SHA512D_Wn(43), 0xc76c51a30654be30UL);
+		SHA512D_R(e,f,g,h,a,b,c,d, SHA512D_Wn(44), 0xd192e819d6ef5218UL);
+		SHA512D_R(d,e,f,g,h,a,b,c, SHA512D_Wn(45), 0xd69906245565a910UL);
+		SHA512D_R(c,d,e,f,g,h,a,b, SHA512D_Wn(46), 0xf40e35855771202aUL);
+		SHA512D_R(b,c,d,e,f,g,h,a, SHA512D_Wn(47), 0x106aa07032bbd1b8UL);
+		SHA512D_R(a,b,c,d,e,f,g,h, SHA512D_Wn(48), 0x19a4c116b8d2d0c8UL);
+		SHA512D_R(h,a,b,c,d,e,f,g, SHA512D_Wn(49), 0x1e376c085141ab53UL);
+		SHA512D_R(g,h,a,b,c,d,e,f, SHA512D_Wn(50), 0x2748774cdf8eeb99UL);
+		SHA512D_R(f,g,h,a,b,c,d,e, SHA512D_Wn(51), 0x34b0bcb5e19b48a8UL);
+		SHA512D_R(e,f,g,h,a,b,c,d, SHA512D_Wn(52), 0x391c0cb3c5c95a63UL);
+		SHA512D_R(d,e,f,g,h,a,b,c, SHA512D_Wn(53), 0x4ed8aa4ae3418acbUL);
+		SHA512D_R(c,d,e,f,g,h,a,b, SHA512D_Wn(54), 0x5b9cca4f7763e373UL);
+		SHA512D_R(b,c,d,e,f,g,h,a, SHA512D_Wn(55), 0x682e6ff3d6b2b8a3UL);
+		SHA512D_R(a,b,c,d,e,f,g,h, SHA512D_Wn(56), 0x748f82ee5defb2fcUL);
+		SHA512D_R(h,a,b,c,d,e,f,g, SHA512D_Wn(57), 0x78a5636f43172f60UL);
+		SHA512D_R(g,h,a,b,c,d,e,f, SHA512D_Wn(58), 0x84c87814a1f0ab72UL);
+		SHA512D_R(f,g,h,a,b,c,d,e, SHA512D_Wn(59), 0x8cc702081a6439ecUL);
+		SHA512D_R(e,f,g,h,a,b,c,d, SHA512D_Wn(60), 0x90befffa23631e28UL);
+		SHA512D_R(d,e,f,g,h,a,b,c, SHA512D_Wn(61), 0xa4506cebde82bde9UL);
+		SHA512D_R(c,d,e,f,g,h,a,b, SHA512D_Wn(62), 0xbef9a3f7b2c67915UL);
+		SHA512D_R(b,c,d,e,f,g,h,a, SHA512D_Wn(63), 0xc67178f2e372532bUL);
+		SHA512D_R(a,b,c,d,e,f,g,h, SHA512D_Wn(64), 0xca273eceea26619cUL);
+		SHA512D_R(h,a,b,c,d,e,f,g, SHA512D_Wn(65), 0xd186b8c721c0c207UL);
+		SHA512D_R(g,h,a,b,c,d,e,f, SHA512D_Wn(66), 0xeada7dd6cde0eb1eUL);
+		SHA512D_R(f,g,h,a,b,c,d,e, SHA512D_Wn(67), 0xf57d4f7fee6ed178UL);
+		SHA512D_R(e,f,g,h,a,b,c,d, SHA512D_Wn(68), 0x06f067aa72176fbaUL);
+		SHA512D_R(d,e,f,g,h,a,b,c, SHA512D_Wn(69), 0x0a637dc5a2c898a6UL);
+		SHA512D_R(c,d,e,f,g,h,a,b, SHA512D_Wn(70), 0x113f9804bef90daeUL);
+		SHA512D_R(b,c,d,e,f,g,h,a, SHA512D_Wn(71), 0x1b710b35131c471bUL);
+		SHA512D_R(a,b,c,d,e,f,g,h, SHA512D_Wn(72), 0x28db77f523047d84UL);
+		SHA512D_R(h,a,b,c,d,e,f,g, SHA512D_Wn(73), 0x32caab7b40c72493UL);
+		SHA512D_R(g,h,a,b,c,d,e,f, SHA512D_Wn(74), 0x3c9ebe0a15c9bebcUL);
+		SHA512D_R(f,g,h,a,b,c,d,e, SHA512D_Wn(75), 0x431d67c49c100d4cUL);
+		SHA512D_R(e,f,g,h,a,b,c,d, SHA512D_Wn(76), 0x4cc5d4becb3e42b6UL);
+		SHA512D_R(d,e,f,g,h,a,b,c, SHA512D_Wn(77), 0x597f299cfc657e2aUL);
+		SHA512D_R(c,d,e,f,g,h,a,b, SHA512D_Wn(78), 0x5fcb6fab3ad6faecUL);
+		SHA512D_R(b,c,d,e,f,g,h,a, SHA512D_Wn(79), 0x6c44198c4a475817UL);
+
+#undef SHA512D_R
+#undef SHA512D_Wn
+
+		State[0] += a;
+		State[1] += b;
+		State[2] += c;
+		State[3] += d;
+		State[4] += e;
+		State[5] += f;
+		State[6] += g;
+		State[7] += h;
+		input += 16;
+	}
+	hash[0] = SWAP512(State[0]);
+	hash[1] = SWAP512(State[1]);
+	hash[2] = SWAP512(State[2]);
+	hash[3] = SWAP512(State[3]);
+	hash[4] = SWAP512(State[4]);
+	hash[5] = SWAP512(State[5]);
+	hash[6] = SWAP512(State[6]);
+	hash[7] = SWAP512(State[7]);
+	return;
+}
+
+// Device helper: md_pad_128_swap.
+REC_DEVICE void md_pad_128_swap(HASH_THREAD_PTR(uint64_t) msg, const long msgLen_bytes) {
+	uint32_t padLongIndex, overhang;
+	padLongIndex = ((uint32_t)msgLen_bytes) / 8; // 24
+	overhang = (((uint32_t)msgLen_bytes) - padLongIndex * 8); // 0
+	msg[padLongIndex] &= SWAP512(maskLong[overhang]); // msg[24] = msg[24] & 0 -> 0's out this byte
+	msg[padLongIndex] |= SWAP512(padLong[overhang]); // msg[24] = msg[24] | 0x1UL << 7 -> sets it to 0x1UL << 7
+	msg[padLongIndex + 1] = 0; // msg[25] = 0
+	msg[padLongIndex + 2] = 0; // msg[26] = 0
+	uint32_t i = 0;
+
+	// 27, 28, 29, 30, 31 = 0
+	for (i = padLongIndex + 3; i < 32; i++) {
+		msg[i] = 0;
+	}
+	// i = 32
+	// int nBlocks = i / 16; // nBlocks = 2
+	msg[i - 2] = 0; // msg[30] = 0; already did this in loop..
+	msg[i - 1] = msgLen_bytes * 8; // msg[31] = SWAP512(1536)
+};
+
+// Device helper: sha512_swap.
+REC_DEVICE void sha512_swap(HASH_THREAD_PTR(uint64_t) input, const uint32_t length, HASH_THREAD_PTR(uint64_t) hash) {
+	md_pad_128_swap(input, (uint64_t)length);
+	uint64_t W[16];
+	uint64_t State[8];
+	State[0] = 0x6a09e667f3bcc908UL;
+	State[1] = 0xbb67ae8584caa73bUL;
+	State[2] = 0x3c6ef372fe94f82bUL;
+	State[3] = 0xa54ff53a5f1d36f1UL;
+	State[4] = 0x510e527fade682d1UL;
+	State[5] = 0x9b05688c2b3e6c1fUL;
+	State[6] = 0x1f83d9abfb41bd6bUL;
+	State[7] = 0x5be0cd19137e2179UL;
+	uint64_t a, b, c, d, e, f, g, h;
+	for (int block_i = 0; block_i < 2; block_i++) {
+
+		W[0] = input[0];
+		W[1] = input[1];
+		W[2] = input[2];
+		W[3] = input[3];
+		W[4] = input[4];
+		W[5] = input[5];
+		W[6] = input[6];
+		W[7] = input[7];
+		W[8] = input[8];
+		W[9] = input[9];
+		W[10] = input[10];
+		W[11] = input[11];
+		W[12] = input[12];
+		W[13] = input[13];
+		W[14] = input[14];
+		W[15] = input[15];
+
+		a = State[0];
+		b = State[1];
+		c = State[2];
+		d = State[3];
+		e = State[4];
+		f = State[5];
+		g = State[6];
+		h = State[7];
+
+#define SHA512S_R(a,b,c,d,e,f,g,h,wi,K) \
+		{ h += K + SHA512_S1(e) + SHAF1(e,f,g) + (wi); d += h; h += SHA512_S0(a) + SHAF0(a,b,c); }
+#define SHA512S_Wn(i) (W[(i)&15] = little_s1(W[((i)-2)&15]) + W[((i)-7)&15] + little_s0(W[((i)-15)&15]) + W[((i)-16)&15])
+
+		SHA512S_R(a,b,c,d,e,f,g,h, W[0],  0x428a2f98d728ae22UL);
+		SHA512S_R(h,a,b,c,d,e,f,g, W[1],  0x7137449123ef65cdUL);
+		SHA512S_R(g,h,a,b,c,d,e,f, W[2],  0xb5c0fbcfec4d3b2fUL);
+		SHA512S_R(f,g,h,a,b,c,d,e, W[3],  0xe9b5dba58189dbbcUL);
+		SHA512S_R(e,f,g,h,a,b,c,d, W[4],  0x3956c25bf348b538UL);
+		SHA512S_R(d,e,f,g,h,a,b,c, W[5],  0x59f111f1b605d019UL);
+		SHA512S_R(c,d,e,f,g,h,a,b, W[6],  0x923f82a4af194f9bUL);
+		SHA512S_R(b,c,d,e,f,g,h,a, W[7],  0xab1c5ed5da6d8118UL);
+		SHA512S_R(a,b,c,d,e,f,g,h, W[8],  0xd807aa98a3030242UL);
+		SHA512S_R(h,a,b,c,d,e,f,g, W[9],  0x12835b0145706fbeUL);
+		SHA512S_R(g,h,a,b,c,d,e,f, W[10], 0x243185be4ee4b28cUL);
+		SHA512S_R(f,g,h,a,b,c,d,e, W[11], 0x550c7dc3d5ffb4e2UL);
+		SHA512S_R(e,f,g,h,a,b,c,d, W[12], 0x72be5d74f27b896fUL);
+		SHA512S_R(d,e,f,g,h,a,b,c, W[13], 0x80deb1fe3b1696b1UL);
+		SHA512S_R(c,d,e,f,g,h,a,b, W[14], 0x9bdc06a725c71235UL);
+		SHA512S_R(b,c,d,e,f,g,h,a, W[15], 0xc19bf174cf692694UL);
+
+		SHA512S_R(a,b,c,d,e,f,g,h, SHA512S_Wn(16), 0xe49b69c19ef14ad2UL);
+		SHA512S_R(h,a,b,c,d,e,f,g, SHA512S_Wn(17), 0xefbe4786384f25e3UL);
+		SHA512S_R(g,h,a,b,c,d,e,f, SHA512S_Wn(18), 0x0fc19dc68b8cd5b5UL);
+		SHA512S_R(f,g,h,a,b,c,d,e, SHA512S_Wn(19), 0x240ca1cc77ac9c65UL);
+		SHA512S_R(e,f,g,h,a,b,c,d, SHA512S_Wn(20), 0x2de92c6f592b0275UL);
+		SHA512S_R(d,e,f,g,h,a,b,c, SHA512S_Wn(21), 0x4a7484aa6ea6e483UL);
+		SHA512S_R(c,d,e,f,g,h,a,b, SHA512S_Wn(22), 0x5cb0a9dcbd41fbd4UL);
+		SHA512S_R(b,c,d,e,f,g,h,a, SHA512S_Wn(23), 0x76f988da831153b5UL);
+		SHA512S_R(a,b,c,d,e,f,g,h, SHA512S_Wn(24), 0x983e5152ee66dfabUL);
+		SHA512S_R(h,a,b,c,d,e,f,g, SHA512S_Wn(25), 0xa831c66d2db43210UL);
+		SHA512S_R(g,h,a,b,c,d,e,f, SHA512S_Wn(26), 0xb00327c898fb213fUL);
+		SHA512S_R(f,g,h,a,b,c,d,e, SHA512S_Wn(27), 0xbf597fc7beef0ee4UL);
+		SHA512S_R(e,f,g,h,a,b,c,d, SHA512S_Wn(28), 0xc6e00bf33da88fc2UL);
+		SHA512S_R(d,e,f,g,h,a,b,c, SHA512S_Wn(29), 0xd5a79147930aa725UL);
+		SHA512S_R(c,d,e,f,g,h,a,b, SHA512S_Wn(30), 0x06ca6351e003826fUL);
+		SHA512S_R(b,c,d,e,f,g,h,a, SHA512S_Wn(31), 0x142929670a0e6e70UL);
+		SHA512S_R(a,b,c,d,e,f,g,h, SHA512S_Wn(32), 0x27b70a8546d22ffcUL);
+		SHA512S_R(h,a,b,c,d,e,f,g, SHA512S_Wn(33), 0x2e1b21385c26c926UL);
+		SHA512S_R(g,h,a,b,c,d,e,f, SHA512S_Wn(34), 0x4d2c6dfc5ac42aedUL);
+		SHA512S_R(f,g,h,a,b,c,d,e, SHA512S_Wn(35), 0x53380d139d95b3dfUL);
+		SHA512S_R(e,f,g,h,a,b,c,d, SHA512S_Wn(36), 0x650a73548baf63deUL);
+		SHA512S_R(d,e,f,g,h,a,b,c, SHA512S_Wn(37), 0x766a0abb3c77b2a8UL);
+		SHA512S_R(c,d,e,f,g,h,a,b, SHA512S_Wn(38), 0x81c2c92e47edaee6UL);
+		SHA512S_R(b,c,d,e,f,g,h,a, SHA512S_Wn(39), 0x92722c851482353bUL);
+		SHA512S_R(a,b,c,d,e,f,g,h, SHA512S_Wn(40), 0xa2bfe8a14cf10364UL);
+		SHA512S_R(h,a,b,c,d,e,f,g, SHA512S_Wn(41), 0xa81a664bbc423001UL);
+		SHA512S_R(g,h,a,b,c,d,e,f, SHA512S_Wn(42), 0xc24b8b70d0f89791UL);
+		SHA512S_R(f,g,h,a,b,c,d,e, SHA512S_Wn(43), 0xc76c51a30654be30UL);
+		SHA512S_R(e,f,g,h,a,b,c,d, SHA512S_Wn(44), 0xd192e819d6ef5218UL);
+		SHA512S_R(d,e,f,g,h,a,b,c, SHA512S_Wn(45), 0xd69906245565a910UL);
+		SHA512S_R(c,d,e,f,g,h,a,b, SHA512S_Wn(46), 0xf40e35855771202aUL);
+		SHA512S_R(b,c,d,e,f,g,h,a, SHA512S_Wn(47), 0x106aa07032bbd1b8UL);
+		SHA512S_R(a,b,c,d,e,f,g,h, SHA512S_Wn(48), 0x19a4c116b8d2d0c8UL);
+		SHA512S_R(h,a,b,c,d,e,f,g, SHA512S_Wn(49), 0x1e376c085141ab53UL);
+		SHA512S_R(g,h,a,b,c,d,e,f, SHA512S_Wn(50), 0x2748774cdf8eeb99UL);
+		SHA512S_R(f,g,h,a,b,c,d,e, SHA512S_Wn(51), 0x34b0bcb5e19b48a8UL);
+		SHA512S_R(e,f,g,h,a,b,c,d, SHA512S_Wn(52), 0x391c0cb3c5c95a63UL);
+		SHA512S_R(d,e,f,g,h,a,b,c, SHA512S_Wn(53), 0x4ed8aa4ae3418acbUL);
+		SHA512S_R(c,d,e,f,g,h,a,b, SHA512S_Wn(54), 0x5b9cca4f7763e373UL);
+		SHA512S_R(b,c,d,e,f,g,h,a, SHA512S_Wn(55), 0x682e6ff3d6b2b8a3UL);
+		SHA512S_R(a,b,c,d,e,f,g,h, SHA512S_Wn(56), 0x748f82ee5defb2fcUL);
+		SHA512S_R(h,a,b,c,d,e,f,g, SHA512S_Wn(57), 0x78a5636f43172f60UL);
+		SHA512S_R(g,h,a,b,c,d,e,f, SHA512S_Wn(58), 0x84c87814a1f0ab72UL);
+		SHA512S_R(f,g,h,a,b,c,d,e, SHA512S_Wn(59), 0x8cc702081a6439ecUL);
+		SHA512S_R(e,f,g,h,a,b,c,d, SHA512S_Wn(60), 0x90befffa23631e28UL);
+		SHA512S_R(d,e,f,g,h,a,b,c, SHA512S_Wn(61), 0xa4506cebde82bde9UL);
+		SHA512S_R(c,d,e,f,g,h,a,b, SHA512S_Wn(62), 0xbef9a3f7b2c67915UL);
+		SHA512S_R(b,c,d,e,f,g,h,a, SHA512S_Wn(63), 0xc67178f2e372532bUL);
+		SHA512S_R(a,b,c,d,e,f,g,h, SHA512S_Wn(64), 0xca273eceea26619cUL);
+		SHA512S_R(h,a,b,c,d,e,f,g, SHA512S_Wn(65), 0xd186b8c721c0c207UL);
+		SHA512S_R(g,h,a,b,c,d,e,f, SHA512S_Wn(66), 0xeada7dd6cde0eb1eUL);
+		SHA512S_R(f,g,h,a,b,c,d,e, SHA512S_Wn(67), 0xf57d4f7fee6ed178UL);
+		SHA512S_R(e,f,g,h,a,b,c,d, SHA512S_Wn(68), 0x06f067aa72176fbaUL);
+		SHA512S_R(d,e,f,g,h,a,b,c, SHA512S_Wn(69), 0x0a637dc5a2c898a6UL);
+		SHA512S_R(c,d,e,f,g,h,a,b, SHA512S_Wn(70), 0x113f9804bef90daeUL);
+		SHA512S_R(b,c,d,e,f,g,h,a, SHA512S_Wn(71), 0x1b710b35131c471bUL);
+		SHA512S_R(a,b,c,d,e,f,g,h, SHA512S_Wn(72), 0x28db77f523047d84UL);
+		SHA512S_R(h,a,b,c,d,e,f,g, SHA512S_Wn(73), 0x32caab7b40c72493UL);
+		SHA512S_R(g,h,a,b,c,d,e,f, SHA512S_Wn(74), 0x3c9ebe0a15c9bebcUL);
+		SHA512S_R(f,g,h,a,b,c,d,e, SHA512S_Wn(75), 0x431d67c49c100d4cUL);
+		SHA512S_R(e,f,g,h,a,b,c,d, SHA512S_Wn(76), 0x4cc5d4becb3e42b6UL);
+		SHA512S_R(d,e,f,g,h,a,b,c, SHA512S_Wn(77), 0x597f299cfc657e2aUL);
+		SHA512S_R(c,d,e,f,g,h,a,b, SHA512S_Wn(78), 0x5fcb6fab3ad6faecUL);
+		SHA512S_R(b,c,d,e,f,g,h,a, SHA512S_Wn(79), 0x6c44198c4a475817UL);
+
+#undef SHA512S_R
+#undef SHA512S_Wn
+
+		State[0] += a;
+		State[1] += b;
+		State[2] += c;
+		State[3] += d;
+		State[4] += e;
+		State[5] += f;
+		State[6] += g;
+		State[7] += h;
+		input += 16;
+	}
+	hash[0] = State[0];
+	hash[1] = State[1];
+	hash[2] = State[2];
+	hash[3] = State[3];
+	hash[4] = State[4];
+	hash[5] = State[5];
+	hash[6] = State[6];
+	hash[7] = State[7];
+	return;
+}
+
+
+
+// Device helper: hmac_read64_be.
+REC_DEVICE REC_FORCEINLINE uint64_t hmac_read64_be(HASH_THREAD_CONST_PTR(uint8_t) p) {
+	return ((uint64_t)p[0] << 56) |
+		((uint64_t)p[1] << 48) |
+		((uint64_t)p[2] << 40) |
+		((uint64_t)p[3] << 32) |
+		((uint64_t)p[4] << 24) |
+		((uint64_t)p[5] << 16) |
+		((uint64_t)p[6] << 8) |
+		(uint64_t)p[7];
+}
+
+// Device helper: sha512_compress_words.
+REC_DEVICE REC_FORCEINLINE void sha512_compress_words(HASH_THREAD_CONST_PTR(uint64_t) state_in, HASH_THREAD_CONST_PTR(uint64_t) W_in, HASH_THREAD_PTR(uint64_t) state_out) {
+	uint64_t W[16];
+#pragma unroll
+	for (int i = 0; i < 16; ++i) {
+		W[i] = W_in[i];
+	}
+
+	uint64_t a = state_in[0], b = state_in[1], c = state_in[2], d = state_in[3];
+	uint64_t e = state_in[4], f = state_in[5], g = state_in[6], h = state_in[7];
+
+#define SHA512T_R(a_, b_, c_, d_, e_, f_, g_, h_, wi_, k_) { (h_) += (k_) + SHA512_S1(e_) + SHAF1(e_, f_, g_) + (wi_); (d_) += (h_); (h_) += SHA512_S0(a_) + SHAF0(a_, b_, c_); }
+#define SHA512T_Wn(i_) (W[(i_) & 15] = little_s1(W[((i_) - 2) & 15]) + W[((i_) - 7) & 15] + little_s0(W[((i_) - 15) & 15]) + W[((i_) - 16) & 15])
+
+	SHA512T_R(a, b, c, d, e, f, g, h, W[0], k_sha512[0]);
+	SHA512T_R(h, a, b, c, d, e, f, g, W[1], k_sha512[1]);
+	SHA512T_R(g, h, a, b, c, d, e, f, W[2], k_sha512[2]);
+	SHA512T_R(f, g, h, a, b, c, d, e, W[3], k_sha512[3]);
+	SHA512T_R(e, f, g, h, a, b, c, d, W[4], k_sha512[4]);
+	SHA512T_R(d, e, f, g, h, a, b, c, W[5], k_sha512[5]);
+	SHA512T_R(c, d, e, f, g, h, a, b, W[6], k_sha512[6]);
+	SHA512T_R(b, c, d, e, f, g, h, a, W[7], k_sha512[7]);
+	SHA512T_R(a, b, c, d, e, f, g, h, W[8], k_sha512[8]);
+	SHA512T_R(h, a, b, c, d, e, f, g, W[9], k_sha512[9]);
+	SHA512T_R(g, h, a, b, c, d, e, f, W[10], k_sha512[10]);
+	SHA512T_R(f, g, h, a, b, c, d, e, W[11], k_sha512[11]);
+	SHA512T_R(e, f, g, h, a, b, c, d, W[12], k_sha512[12]);
+	SHA512T_R(d, e, f, g, h, a, b, c, W[13], k_sha512[13]);
+	SHA512T_R(c, d, e, f, g, h, a, b, W[14], k_sha512[14]);
+	SHA512T_R(b, c, d, e, f, g, h, a, W[15], k_sha512[15]);
+
+#pragma unroll
+	for (int i = 16; i < 80; ++i) {
+		const uint64_t wi = SHA512T_Wn(i);
+		switch (i & 7) {
+		case 0: SHA512T_R(a, b, c, d, e, f, g, h, wi, k_sha512[i]); break;
+		case 1: SHA512T_R(h, a, b, c, d, e, f, g, wi, k_sha512[i]); break;
+		case 2: SHA512T_R(g, h, a, b, c, d, e, f, wi, k_sha512[i]); break;
+		case 3: SHA512T_R(f, g, h, a, b, c, d, e, wi, k_sha512[i]); break;
+		case 4: SHA512T_R(e, f, g, h, a, b, c, d, wi, k_sha512[i]); break;
+		case 5: SHA512T_R(d, e, f, g, h, a, b, c, wi, k_sha512[i]); break;
+		case 6: SHA512T_R(c, d, e, f, g, h, a, b, wi, k_sha512[i]); break;
+		default: SHA512T_R(b, c, d, e, f, g, h, a, wi, k_sha512[i]); break;
+		}
+	}
+
+#undef SHA512T_R
+#undef SHA512T_Wn
+
+	state_out[0] = state_in[0] + a;
+	state_out[1] = state_in[1] + b;
+	state_out[2] = state_in[2] + c;
+	state_out[3] = state_in[3] + d;
+	state_out[4] = state_in[4] + e;
+	state_out[5] = state_in[5] + f;
+	state_out[6] = state_in[6] + g;
+	state_out[7] = state_in[7] + h;
+}
+
+// Device helper: sha512_compress_digest64_words.
+REC_DEVICE REC_FORCEINLINE void sha512_compress_digest64_words(HASH_THREAD_CONST_PTR(uint64_t) state_in, HASH_THREAD_CONST_PTR(uint64_t) digest_words, HASH_THREAD_PTR(uint64_t) state_out) {
+	uint64_t W[16];
+#pragma unroll
+	for (int i = 0; i < 8; ++i) {
+		W[i] = digest_words[i];
+	}
+	W[8] = 0x8000000000000000ull;
+	W[9] = 0ull;
+	W[10] = 0ull;
+	W[11] = 0ull;
+	W[12] = 0ull;
+	W[13] = 0ull;
+	W[14] = 0ull;
+	W[15] = 0x0000000000000600ull;
+
+	uint64_t a = state_in[0], b = state_in[1], c = state_in[2], d = state_in[3];
+	uint64_t e = state_in[4], f = state_in[5], g = state_in[6], h = state_in[7];
+
+#define SHA512T_R(a_, b_, c_, d_, e_, f_, g_, h_, wi_, k_) { (h_) += (k_) + SHA512_S1(e_) + SHAF1(e_, f_, g_) + (wi_); (d_) += (h_); (h_) += SHA512_S0(a_) + SHAF0(a_, b_, c_); }
+#define SHA512T_Wn(i_) (W[(i_) & 15] = little_s1(W[((i_) - 2) & 15]) + W[((i_) - 7) & 15] + little_s0(W[((i_) - 15) & 15]) + W[((i_) - 16) & 15])
+
+	SHA512T_R(a, b, c, d, e, f, g, h, W[0], k_sha512[0]);
+	SHA512T_R(h, a, b, c, d, e, f, g, W[1], k_sha512[1]);
+	SHA512T_R(g, h, a, b, c, d, e, f, W[2], k_sha512[2]);
+	SHA512T_R(f, g, h, a, b, c, d, e, W[3], k_sha512[3]);
+	SHA512T_R(e, f, g, h, a, b, c, d, W[4], k_sha512[4]);
+	SHA512T_R(d, e, f, g, h, a, b, c, W[5], k_sha512[5]);
+	SHA512T_R(c, d, e, f, g, h, a, b, W[6], k_sha512[6]);
+	SHA512T_R(b, c, d, e, f, g, h, a, W[7], k_sha512[7]);
+	SHA512T_R(a, b, c, d, e, f, g, h, W[8], k_sha512[8]);
+	SHA512T_R(h, a, b, c, d, e, f, g, W[9], k_sha512[9]);
+	SHA512T_R(g, h, a, b, c, d, e, f, W[10], k_sha512[10]);
+	SHA512T_R(f, g, h, a, b, c, d, e, W[11], k_sha512[11]);
+	SHA512T_R(e, f, g, h, a, b, c, d, W[12], k_sha512[12]);
+	SHA512T_R(d, e, f, g, h, a, b, c, W[13], k_sha512[13]);
+	SHA512T_R(c, d, e, f, g, h, a, b, W[14], k_sha512[14]);
+	SHA512T_R(b, c, d, e, f, g, h, a, W[15], k_sha512[15]);
+
+#pragma unroll
+	for (int i = 16; i < 80; ++i) {
+		const uint64_t wi = SHA512T_Wn(i);
+		switch (i & 7) {
+		case 0: SHA512T_R(a, b, c, d, e, f, g, h, wi, k_sha512[i]); break;
+		case 1: SHA512T_R(h, a, b, c, d, e, f, g, wi, k_sha512[i]); break;
+		case 2: SHA512T_R(g, h, a, b, c, d, e, f, wi, k_sha512[i]); break;
+		case 3: SHA512T_R(f, g, h, a, b, c, d, e, wi, k_sha512[i]); break;
+		case 4: SHA512T_R(e, f, g, h, a, b, c, d, wi, k_sha512[i]); break;
+		case 5: SHA512T_R(d, e, f, g, h, a, b, c, wi, k_sha512[i]); break;
+		case 6: SHA512T_R(c, d, e, f, g, h, a, b, wi, k_sha512[i]); break;
+		default: SHA512T_R(b, c, d, e, f, g, h, a, wi, k_sha512[i]); break;
+		}
+	}
+
+#undef SHA512T_R
+#undef SHA512T_Wn
+
+	state_out[0] = state_in[0] + a;
+	state_out[1] = state_in[1] + b;
+	state_out[2] = state_in[2] + c;
+	state_out[3] = state_in[3] + d;
+	state_out[4] = state_in[4] + e;
+	state_out[5] = state_in[5] + f;
+	state_out[6] = state_in[6] + g;
+	state_out[7] = state_in[7] + h;
+}
+
+// SHA512 of an exact 64-byte message from the standard IV. Unlike the HMAC
+// digest64 helper above, this block's encoded message length is 0x200 bits.
+REC_DEVICE REC_FORCEINLINE void sha512_compress_plain_digest64_words(HASH_THREAD_CONST_PTR(uint64_t) digest_words, HASH_THREAD_PTR(uint64_t) state_out) {
+	uint64_t W[16];
+#pragma unroll
+	for (int i = 0; i < 8; ++i) {
+		W[i] = digest_words[i];
+	}
+	W[8] = 0x8000000000000000ull;
+	W[9] = 0ull;
+	W[10] = 0ull;
+	W[11] = 0ull;
+	W[12] = 0ull;
+	W[13] = 0ull;
+	W[14] = 0ull;
+	W[15] = 0x0000000000000200ull;
+
+	uint64_t a = 0x6a09e667f3bcc908ull;
+	uint64_t b = 0xbb67ae8584caa73bull;
+	uint64_t c = 0x3c6ef372fe94f82bull;
+	uint64_t d = 0xa54ff53a5f1d36f1ull;
+	uint64_t e = 0x510e527fade682d1ull;
+	uint64_t f = 0x9b05688c2b3e6c1full;
+	uint64_t g = 0x1f83d9abfb41bd6bull;
+	uint64_t h = 0x5be0cd19137e2179ull;
+
+#define SHA512P_R(a_, b_, c_, d_, e_, f_, g_, h_, wi_, k_) { (h_) += (k_) + SHA512_S1(e_) + SHAF1(e_, f_, g_) + (wi_); (d_) += (h_); (h_) += SHA512_S0(a_) + SHAF0(a_, b_, c_); }
+#define SHA512P_Wn(i_) (W[(i_) & 15] = little_s1(W[((i_) - 2) & 15]) + W[((i_) - 7) & 15] + little_s0(W[((i_) - 15) & 15]) + W[((i_) - 16) & 15])
+
+	SHA512P_R(a, b, c, d, e, f, g, h, W[0], k_sha512[0]);
+	SHA512P_R(h, a, b, c, d, e, f, g, W[1], k_sha512[1]);
+	SHA512P_R(g, h, a, b, c, d, e, f, W[2], k_sha512[2]);
+	SHA512P_R(f, g, h, a, b, c, d, e, W[3], k_sha512[3]);
+	SHA512P_R(e, f, g, h, a, b, c, d, W[4], k_sha512[4]);
+	SHA512P_R(d, e, f, g, h, a, b, c, W[5], k_sha512[5]);
+	SHA512P_R(c, d, e, f, g, h, a, b, W[6], k_sha512[6]);
+	SHA512P_R(b, c, d, e, f, g, h, a, W[7], k_sha512[7]);
+	SHA512P_R(a, b, c, d, e, f, g, h, W[8], k_sha512[8]);
+	SHA512P_R(h, a, b, c, d, e, f, g, W[9], k_sha512[9]);
+	SHA512P_R(g, h, a, b, c, d, e, f, W[10], k_sha512[10]);
+	SHA512P_R(f, g, h, a, b, c, d, e, W[11], k_sha512[11]);
+	SHA512P_R(e, f, g, h, a, b, c, d, W[12], k_sha512[12]);
+	SHA512P_R(d, e, f, g, h, a, b, c, W[13], k_sha512[13]);
+	SHA512P_R(c, d, e, f, g, h, a, b, W[14], k_sha512[14]);
+	SHA512P_R(b, c, d, e, f, g, h, a, W[15], k_sha512[15]);
+
+#pragma unroll
+	for (int i = 16; i < 80; ++i) {
+		const uint64_t wi = SHA512P_Wn(i);
+		switch (i & 7) {
+		case 0: SHA512P_R(a, b, c, d, e, f, g, h, wi, k_sha512[i]); break;
+		case 1: SHA512P_R(h, a, b, c, d, e, f, g, wi, k_sha512[i]); break;
+		case 2: SHA512P_R(g, h, a, b, c, d, e, f, wi, k_sha512[i]); break;
+		case 3: SHA512P_R(f, g, h, a, b, c, d, e, wi, k_sha512[i]); break;
+		case 4: SHA512P_R(e, f, g, h, a, b, c, d, wi, k_sha512[i]); break;
+		case 5: SHA512P_R(d, e, f, g, h, a, b, c, wi, k_sha512[i]); break;
+		case 6: SHA512P_R(c, d, e, f, g, h, a, b, wi, k_sha512[i]); break;
+		default: SHA512P_R(b, c, d, e, f, g, h, a, wi, k_sha512[i]); break;
+		}
+	}
+
+#undef SHA512P_R
+#undef SHA512P_Wn
+
+	state_out[0] = 0x6a09e667f3bcc908ull + a;
+	state_out[1] = 0xbb67ae8584caa73bull + b;
+	state_out[2] = 0x3c6ef372fe94f82bull + c;
+	state_out[3] = 0xa54ff53a5f1d36f1ull + d;
+	state_out[4] = 0x510e527fade682d1ull + e;
+	state_out[5] = 0x9b05688c2b3e6c1full + f;
+	state_out[6] = 0x1f83d9abfb41bd6bull + g;
+	state_out[7] = 0x5be0cd19137e2179ull + h;
+}
+
+// Device helper: sha512_compress_block.
+REC_DEVICE REC_FORCEINLINE void sha512_compress_block(HASH_THREAD_CONST_PTR(uint64_t) state_in, HASH_THREAD_CONST_PTR(uint8_t) block, HASH_THREAD_PTR(uint64_t) state_out) {
+	uint64_t W[16];
+#pragma unroll
+	for (int i = 0; i < 16; ++i) {
+		W[i] = hmac_read64_be(block + (i * 8));
+	}
+	sha512_compress_words(state_in, W, state_out);
+}
+
+// Device helper: hmac_sha512_const_precompute.
+REC_DEVICE void hmac_sha512_const_precompute(HASH_THREAD_CONST_PTR(uint32_t) key, HASH_THREAD_PTR(hmac_sha512_precomp_t) ctx) {
+	const uint64_t iv[8] = {
+		0x6a09e667f3bcc908ull, 0xbb67ae8584caa73bull,
+		0x3c6ef372fe94f82bull, 0xa54ff53a5f1d36f1ull,
+		0x510e527fade682d1ull, 0x9b05688c2b3e6c1full,
+		0x1f83d9abfb41bd6bull, 0x5be0cd19137e2179ull
+	};
+
+	HASH_THREAD_CONST_PTR(uint8_t) key_bytes = reinterpret_cast<HASH_THREAD_CONST_PTR(uint8_t)>(key);
+	const uint64_t k0 = hmac_read64_be(key_bytes + 0);
+	const uint64_t k1 = hmac_read64_be(key_bytes + 8);
+	const uint64_t k2 = hmac_read64_be(key_bytes + 16);
+	const uint64_t k3 = hmac_read64_be(key_bytes + 24);
+
+	const uint64_t pad36 = 0x3636363636363636ull;
+	const uint64_t pad5c = 0x5c5c5c5c5c5c5c5cull;
+
+	uint64_t block_words[16];
+	block_words[0] = k0 ^ pad36;
+	block_words[1] = k1 ^ pad36;
+	block_words[2] = k2 ^ pad36;
+	block_words[3] = k3 ^ pad36;
+#pragma unroll
+	for (int i = 4; i < 16; ++i) {
+		block_words[i] = pad36;
+	}
+	sha512_compress_words(iv, block_words, ctx->inner_H);
+
+	block_words[0] = k0 ^ pad5c;
+	block_words[1] = k1 ^ pad5c;
+	block_words[2] = k2 ^ pad5c;
+	block_words[3] = k3 ^ pad5c;
+#pragma unroll
+	for (int i = 4; i < 16; ++i) {
+		block_words[i] = pad5c;
+	}
+	sha512_compress_words(iv, block_words, ctx->outer_H);
+}
+
+// Device helper: hmac_sha512_const_precomp.
+REC_DEVICE void hmac_sha512_const_precomp(HASH_THREAD_CONST_PTR(hmac_sha512_precomp_t) ctx, HASH_THREAD_CONST_PTR(uint32_t) message, HASH_THREAD_PTR(uint32_t) output) {
+	HASH_THREAD_CONST_PTR(uint8_t) msg = reinterpret_cast<HASH_THREAD_CONST_PTR(uint8_t)>(message);
+	uint64_t inner_block_words[16];
+	uint64_t outer_block_words[16];
+	uint64_t inner_state[8];
+	uint64_t outer_state[8];
+
+	inner_block_words[0] = hmac_read64_be(msg + 0);
+	inner_block_words[1] = hmac_read64_be(msg + 8);
+	inner_block_words[2] = hmac_read64_be(msg + 16);
+	inner_block_words[3] = hmac_read64_be(msg + 24);
+	inner_block_words[4] =
+		((uint64_t)msg[32] << 56) |
+		((uint64_t)msg[33] << 48) |
+		((uint64_t)msg[34] << 40) |
+		((uint64_t)msg[35] << 32) |
+		((uint64_t)msg[36] << 24) |
+		0x0000000000800000ull;
+#pragma unroll
+	for (int i = 5; i < 15; ++i) {
+		inner_block_words[i] = 0;
+	}
+	inner_block_words[15] = 0x0000000000000528ull;
+	sha512_compress_words(ctx->inner_H, inner_block_words, inner_state);
+
+#pragma unroll
+	for (int i = 0; i < 8; ++i) {
+		outer_block_words[i] = inner_state[i];
+	}
+	outer_block_words[8] = 0x8000000000000000ull;
+#pragma unroll
+	for (int i = 9; i < 15; ++i) {
+		outer_block_words[i] = 0;
+	}
+	outer_block_words[15] = 0x0000000000000600ull;
+	sha512_compress_words(ctx->outer_H, outer_block_words, outer_state);
+
+	HASH_THREAD_PTR(uint64_t) out64 = reinterpret_cast<HASH_THREAD_PTR(uint64_t)>(output);
+#pragma unroll
+	for (int i = 0; i < 8; ++i) {
+		out64[i] = SWAP512(outer_state[i]);
+	}
+}
+
+// Device helper: hmac_sha512_const.
+REC_DEVICE void hmac_sha512_const(HASH_THREAD_CONST_PTR(uint32_t) key, HASH_THREAD_CONST_PTR(uint32_t) message, HASH_THREAD_PTR(uint32_t) output) {
+	hmac_sha512_precomp_t ctx;
+	hmac_sha512_const_precompute(key, &ctx);
+	hmac_sha512_const_precomp(&ctx, message, output);
+}
+
+// Device helper: sha256_d.
+REC_DEVICE void sha256_d(HASH_THREAD_CONST_PTR(uint32_t) pass, int pass_len, HASH_THREAD_PTR(uint32_t) hash) {
+	int plen = pass_len / 4;
+	if (mod(pass_len, 4)) plen++;
+	HASH_THREAD_PTR(uint32_t) p = hash;
+	uint32_t W[0x10];
+	int loops = plen;
+	int curloop = 0;
+	uint32_t State[8];
+	State[0] = 0x6a09e667;
+	State[1] = 0xbb67ae85;
+	State[2] = 0x3c6ef372;
+	State[3] = 0xa54ff53a;
+	State[4] = 0x510e527f;
+	State[5] = 0x9b05688c;
+	State[6] = 0x1f83d9ab;
+	State[7] = 0x5be0cd19;
+	while (loops > 0) {
+		W[0x0] = 0x0;
+		W[0x1] = 0x0;
+		W[0x2] = 0x0;
+		W[0x3] = 0x0;
+		W[0x4] = 0x0;
+		W[0x5] = 0x0;
+		W[0x6] = 0x0;
+		W[0x7] = 0x0;
+		W[0x8] = 0x0;
+		W[0x9] = 0x0;
+		W[0xA] = 0x0;
+		W[0xB] = 0x0;
+		W[0xC] = 0x0;
+		W[0xD] = 0x0;
+		W[0xE] = 0x0;
+		W[0xF] = 0x0;
+		for (int m = 0; loops != 0 && m < 16; m++) {
+			W[m] ^= SWAP256(pass[m + (curloop * 16)]);
+			loops--;
+		}
+		if (loops == 0 && mod(pass_len, 64) != 0) {
+			uint32_t padding = 0x80 << (((pass_len + 4) - ((pass_len + 4) / 4 * 4)) * 8);
+			int v = mod(pass_len, 64);
+			W[v / 4] |= SWAP256(padding);
+			if ((pass_len & 0x3B) != 0x3B) {
+				W[0x0F] = pass_len * 8;
+			}
+		}
+		sha256_process2(W, State);
+		curloop++;
+	}
+	if (mod(plen, 16) == 0) {
+		W[0x0] = 0x0;
+		W[0x1] = 0x0;
+		W[0x2] = 0x0;
+		W[0x3] = 0x0;
+		W[0x4] = 0x0;
+		W[0x5] = 0x0;
+		W[0x6] = 0x0;
+		W[0x7] = 0x0;
+		W[0x8] = 0x0;
+		W[0x9] = 0x0;
+		W[0xA] = 0x0;
+		W[0xB] = 0x0;
+		W[0xC] = 0x0;
+		W[0xD] = 0x0;
+		W[0xE] = 0x0;
+		W[0xF] = 0x0;
+		if ((pass_len & 0x3B) != 0x3B) {
+			uint32_t padding = 0x80 << (((pass_len + 4) - ((pass_len + 4) / 4 * 4)) * 8);
+			W[0] |= SWAP256(padding);
+		}
+		W[0x0F] = pass_len * 8;
+		sha256_process2(W, State);
+	}
+	p[0] = SWAP256(State[0]);
+	p[1] = SWAP256(State[1]);
+	p[2] = SWAP256(State[2]);
+	p[3] = SWAP256(State[3]);
+	p[4] = SWAP256(State[4]);
+	p[5] = SWAP256(State[5]);
+	p[6] = SWAP256(State[6]);
+	p[7] = SWAP256(State[7]);
+	return;
+}
+
+
+// Device helper: sha256_swap_64.
+REC_DEVICE void sha256_swap_64(HASH_THREAD_CONST_PTR(uint32_t) pass, HASH_THREAD_PTR(uint32_t) hash) {
+	int plen = 64 / 4;
+	if (mod(64, 4)) plen++;
+	HASH_THREAD_PTR(uint32_t) p = hash;
+	uint32_t W[16];
+	int loops = plen;
+	int curloop = 0;
+	uint32_t State[8];
+	State[0] = 0x6a09e667;
+	State[1] = 0xbb67ae85;
+	State[2] = 0x3c6ef372;
+	State[3] = 0xa54ff53a;
+	State[4] = 0x510e527f;
+	State[5] = 0x9b05688c;
+	State[6] = 0x1f83d9ab;
+	State[7] = 0x5be0cd19;
+	while (loops > 0) {
+		W[0x0] = 0x0;
+		W[0x1] = 0x0;
+		W[0x2] = 0x0;
+		W[0x3] = 0x0;
+		W[0x4] = 0x0;
+		W[0x5] = 0x0;
+		W[0x6] = 0x0;
+		W[0x7] = 0x0;
+		W[0x8] = 0x0;
+		W[0x9] = 0x0;
+		W[0xA] = 0x0;
+		W[0xB] = 0x0;
+		W[0xC] = 0x0;
+		W[0xD] = 0x0;
+		W[0xE] = 0x0;
+		W[0xF] = 0x0;
+		for (int m = 0; loops != 0 && m < 16; m++) {
+			W[m] = pass[m + (curloop * 16)];
+			loops--;
+		}
+		if (loops == 0 && mod(64, 64) != 0) {
+			uint32_t padding = 0x80 << (((64 + 4) - ((64 + 4) / 4 * 4)) * 8);
+			int v = mod(64, 64);
+			W[v / 4] |= SWAP256(padding);
+			if ((64 & 0x3B) != 0x3B) {
+				W[0x0F] = 64 * 8;
+			}
+		}
+		sha256_process2(W, State);
+		curloop++;
+	}
+	if (mod(plen, 16) == 0) {
+		W[0x0] = 0x0;
+		W[0x1] = 0x0;
+		W[0x2] = 0x0;
+		W[0x3] = 0x0;
+		W[0x4] = 0x0;
+		W[0x5] = 0x0;
+		W[0x6] = 0x0;
+		W[0x7] = 0x0;
+		W[0x8] = 0x0;
+		W[0x9] = 0x0;
+		W[0xA] = 0x0;
+		W[0xB] = 0x0;
+		W[0xC] = 0x0;
+		W[0xD] = 0x0;
+		W[0xE] = 0x0;
+		W[0xF] = 0x0;
+		if ((64 & 0x3B) != 0x3B) {
+			uint32_t padding = 0x80 << (((64 + 4) - ((64 + 4) / 4 * 4)) * 8);
+			W[0] = SWAP256(padding);
+		}
+		W[0x0F] = 64 * 8;
+		sha256_process2(W, State);
+	}
+	p[0] = State[0];
+	p[1] = State[1];
+	p[2] = State[2];
+	p[3] = State[3];
+	p[4] = State[4];
+	p[5] = State[5];
+	p[6] = State[6];
+	p[7] = State[7];
+	return;
+}
+
+
+
+#undef F0
+#undef F1
+#undef SS0
+#undef SS1
+#undef S2
+#undef S3
+
+#undef mod
+#undef shr32
+#undef rotl32
+#undef HASH_THREAD_PTR
+#undef HASH_THREAD_CONST_PTR
+
+#endif

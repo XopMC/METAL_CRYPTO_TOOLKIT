@@ -1,0 +1,971 @@
+#ifndef METAL_CRYPTO_WORKER_RECOVERY_PIPELINE_COMMON_METALH
+#define METAL_CRYPTO_WORKER_RECOVERY_PIPELINE_COMMON_METALH
+
+#include <metal_stdlib>
+#include "WorkerRecoveryCommon.metalh"
+#include "WorkerRecoverySeedCommon.metalh"
+#include "BigIntFunc.metalh"
+#include "DerivationTypes.metalh"
+#include "FilterCommon.metalh"
+#include "FoundCommon.metalh"
+#include "TonFunc.metalh"
+#include "../lib/secp256k1/secp256k1.metalh"
+#include "../sr25519-donna-32bit/ed25519-donna/ed25519.metalh"
+#include "../sr25519-donna-32bit/sr25519.metalh"
+
+#ifdef memcpy
+#undef memcpy
+#endif
+#ifdef memset
+#undef memset
+#endif
+
+using namespace metal;
+
+struct RecoveryRuntimeBuffers {
+    device RuntimeConfig* config [[id(0)]];
+    device XorFilterState* filters [[id(1)]];
+    device FilterStorageState* filterStorage [[id(2)]];
+    const device uchar* bloomStorage [[id(3)]];
+    const device uchar* xorStorage [[id(4)]];
+    const device uchar* xorUnStorage [[id(5)]];
+    const device uchar* xorUcStorage [[id(6)]];
+    const device uchar* xorHcStorage [[id(7)]];
+    device char* foundStrings [[id(8)]];
+    device uchar* foundPrvKeys [[id(9)]];
+    device uint* foundHash160 [[id(10)]];
+    device uint* foundLen [[id(11)]];
+    device uint* foundIter [[id(12)]];
+    device uchar* foundType [[id(13)]];
+    device uint* foundDerivations [[id(14)]];
+    device uint* foundDerivations2 [[id(15)]];
+    device char* foundPass [[id(16)]];
+    device ushort* foundPassSize [[id(17)]];
+    device long* foundRound [[id(18)]];
+    device ulong* foundSeed [[id(19)]];
+    device atomic_uint* resultsCount [[id(20)]];
+    const device char* customDict [[id(21)]];
+};
+
+constant uchar RECOVERY_TAG_TAPTWEAK_METAL[32] = {
+    0xe8u,0x0fu,0xe1u,0x63u,0x9cu,0x9cu,0xa0u,0x50u,0xe3u,0xafu,0x1bu,0x39u,0xc1u,0x43u,0xc6u,0x3eu,
+    0x42u,0x9cu,0xbcu,0xebu,0x15u,0xd9u,0x40u,0xfbu,0xb5u,0xc5u,0xa1u,0xf4u,0xafu,0x57u,0xc5u,0xe9u
+};
+
+static inline void recovery_copy_thread_bytes_local(thread uchar* dst,
+                                                    const thread uchar* src,
+                                                    uint len) {
+    for (uint i = 0u; i < len; ++i) {
+        dst[i] = src[i];
+    }
+}
+
+static inline uint recovery_be32_tap_thread(const thread uchar* p) {
+    return (uint(p[0]) << 24u) | (uint(p[1]) << 16u) | (uint(p[2]) << 8u) | uint(p[3]);
+}
+
+static inline uint recovery_be32_tap_constant(const constant uchar* p) {
+    return (uint(p[0]) << 24u) | (uint(p[1]) << 16u) | (uint(p[2]) << 8u) | uint(p[3]);
+}
+
+static inline void recovery_sha256_taptweak_px_metal(const thread uchar px32[32],
+                                                     thread uchar out32[32]) {
+    thread uint h[8];
+    SHA256Initialize(h);
+
+    thread uint w0[16];
+    for (int i = 0; i < 8; ++i) {
+        w0[i] = recovery_be32_tap_constant(RECOVERY_TAG_TAPTWEAK_METAL + i * 4);
+        w0[i + 8] = w0[i];
+    }
+    SHA256Transform(h, w0);
+
+    thread uint w1[16];
+    for (int i = 0; i < 8; ++i) {
+        w1[i] = recovery_be32_tap_thread(px32 + i * 4);
+    }
+    w1[8] = 0x80000000u;
+    for (int i = 9; i < 15; ++i) {
+        w1[i] = 0u;
+    }
+    w1[15] = 0x00000300u;
+    SHA256Transform(h, w1);
+
+    for (int i = 0; i < 8; ++i) {
+        out32[i * 4 + 0] = uchar(h[i] >> 24u);
+        out32[i * 4 + 1] = uchar(h[i] >> 16u);
+        out32[i * 4 + 2] = uchar(h[i] >> 8u);
+        out32[i * 4 + 3] = uchar(h[i]);
+    }
+}
+
+static inline void recovery_tweak_taproot_metal(thread uchar* out32,
+                                                const thread uchar* pub_uncomp,
+                                                const constant secp256k1_ge_storage* precPtr,
+                                                size_t precPitch) {
+    const thread uchar* p = pub_uncomp;
+    if (p[0] != 0x04u) {
+        for (int k = 0; k < 32; ++k) {
+            out32[k] = 0u;
+        }
+        return;
+    }
+
+    secp256k1_fe x;
+    secp256k1_fe y;
+    secp256k1_fe_set_b32(&x, p + 1);
+    secp256k1_fe_set_b32(&y, p + 33);
+
+    secp256k1_ge point;
+    secp256k1_ge_set_xy(&point, &x, &y);
+    secp256k1_fe_normalize_var(&point.y);
+    if (secp256k1_fe_is_odd(&point.y)) {
+        secp256k1_ge neg = point;
+        secp256k1_fe_negate(&neg.y, &neg.y, 1);
+        point = neg;
+    }
+
+    thread uchar px32[32];
+    thread uchar tweak32[32];
+    secp256k1_fe_normalize_var(&point.x);
+    secp256k1_fe_get_b32(px32, &point.x);
+    recovery_sha256_taptweak_px_metal(px32, tweak32);
+
+    secp256k1_scalar tweak_scalar;
+    secp256k1_scalar_set_b32(&tweak_scalar, tweak32, nullptr);
+
+    secp256k1_gej tweak_j;
+    secp256k1_ecmult_big(&tweak_j, &tweak_scalar, precPtr, precPitch);
+    secp256k1_gej out_j;
+    secp256k1_gej_add_ge_var(&out_j, &tweak_j, &point, nullptr);
+    if (out_j.infinity != 0) {
+        for (int k = 0; k < 32; ++k) {
+            out32[k] = 0u;
+        }
+        return;
+    }
+
+    secp256k1_fe z_inv;
+    secp256k1_fe_inv_all_var(1, &z_inv, &out_j.z);
+    secp256k1_ge out_ge;
+    secp256k1_ge_set_gej_zinv(&out_ge, &out_j, &z_inv);
+    secp256k1_fe_normalize_var(&out_ge.y);
+    if (secp256k1_fe_is_odd(&out_ge.y)) {
+        secp256k1_ge_neg(&out_ge, &out_ge);
+    }
+    secp256k1_fe_normalize_var(&out_ge.x);
+    secp256k1_fe_get_b32(out32, &out_ge.x);
+}
+
+static inline void recovery_hardened_private_child_from_private_metal(const thread extended_private_key_t* parent,
+                                                                      thread extended_private_key_t* child,
+                                                                      uint hardened_child_number) {
+    thread uint hmacsha512_result[16];
+    thread uchar hmac_input[40];
+    hmac_input[0] = 0u;
+    recovery_copy_thread_bytes_local(hmac_input + 1, parent->key, 32u);
+    hmac_input[33] = uchar((hardened_child_number >> 24u) & 0xffu);
+    hmac_input[34] = uchar((hardened_child_number >> 16u) & 0xffu);
+    hmac_input[35] = uchar((hardened_child_number >> 8u) & 0xffu);
+    hmac_input[36] = uchar(hardened_child_number & 0xffu);
+    hmac_sha512_const(reinterpret_cast<const thread uint*>(parent->chain_code),
+                      reinterpret_cast<const thread uint*>(hmac_input),
+                      hmacsha512_result);
+    secp256k1_ec_seckey_tweak_add(reinterpret_cast<thread uchar*>(hmacsha512_result), parent->key);
+    recovery_copy_thread_bytes_local(child->key, reinterpret_cast<thread uchar*>(hmacsha512_result), 32u);
+    recovery_copy_thread_bytes_local(child->chain_code, reinterpret_cast<thread uchar*>(hmacsha512_result) + 32, 32u);
+}
+
+static inline void recovery_normal_private_child_from_private_metal(const constant secp256k1_ge_storage* precPtr,
+                                                                    size_t precPitch,
+                                                                    const thread extended_private_key_t* parent,
+                                                                    thread extended_private_key_t* child,
+                                                                    uint normal_child_number) {
+    thread uint hmacsha512_result[16];
+    extended_public_key_t pub;
+    secp256k1_ec_pubkey_create(reinterpret_cast<thread secp256k1_pubkey*>(&pub.key),
+                               parent->key,
+                               precPtr,
+                               precPitch);
+
+    thread uchar hmac_input[40];
+    serialized_public_key(reinterpret_cast<thread uchar*>(&pub.key), hmac_input);
+    hmac_input[33] = uchar((normal_child_number >> 24u) & 0xffu);
+    hmac_input[34] = uchar((normal_child_number >> 16u) & 0xffu);
+    hmac_input[35] = uchar((normal_child_number >> 8u) & 0xffu);
+    hmac_input[36] = uchar(normal_child_number & 0xffu);
+
+    hmac_sha512_const(reinterpret_cast<const thread uint*>(parent->chain_code),
+                      reinterpret_cast<const thread uint*>(hmac_input),
+                      hmacsha512_result);
+    secp256k1_ec_seckey_tweak_add(reinterpret_cast<thread uchar*>(hmacsha512_result), parent->key);
+    recovery_copy_thread_bytes_local(child->key, reinterpret_cast<thread uchar*>(hmacsha512_result), 32u);
+    recovery_copy_thread_bytes_local(child->chain_code, reinterpret_cast<thread uchar*>(hmacsha512_result) + 32, 32u);
+}
+
+static inline void recovery_hardened_private_child_from_private_ed25519_metal(const thread extended_private_key_t* parent,
+                                                                             thread extended_private_key_t* child,
+                                                                             uint hardened_child_number) {
+    thread uchar hmacsha512_result[64];
+    thread uchar hmac_input[40];
+    hmac_input[0] = 0u;
+    recovery_copy_thread_bytes_local(hmac_input + 1, parent->key, 32u);
+    hmac_input[33] = uchar((hardened_child_number >> 24u) & 0xffu);
+    hmac_input[34] = uchar((hardened_child_number >> 16u) & 0xffu);
+    hmac_input[35] = uchar((hardened_child_number >> 8u) & 0xffu);
+    hmac_input[36] = uchar(hardened_child_number & 0xffu);
+    hmac_sha512_const(reinterpret_cast<const thread uint*>(parent->chain_code),
+                      reinterpret_cast<const thread uint*>(hmac_input),
+                      reinterpret_cast<thread uint*>(hmacsha512_result));
+    recovery_copy_thread_bytes_local(child->key, hmacsha512_result, 32u);
+    recovery_copy_thread_bytes_local(child->chain_code, hmacsha512_result + 32, 32u);
+}
+
+static inline void recovery_copy_device_char_to_thread(thread char* dst,
+                                                       const device char* src,
+                                                       uint len) {
+    for (uint i = 0u; i < len; ++i) {
+        dst[i] = src[i];
+    }
+}
+
+static inline void recovery_copy_device_uchar_to_thread(thread uchar* dst,
+                                                        const device uchar* src,
+                                                        uint len) {
+    for (uint i = 0u; i < len; ++i) {
+        dst[i] = src[i];
+    }
+}
+
+static inline void recovery_copy_thread_uchar(thread uchar* dst,
+                                              const thread uchar* src,
+                                              uint len) {
+    for (uint i = 0u; i < len; ++i) {
+        dst[i] = src[i];
+    }
+}
+
+static inline void recovery_copy_thread_uint(thread uint* dst,
+                                             const thread uint* src,
+                                             uint len) {
+    for (uint i = 0u; i < len; ++i) {
+        dst[i] = src[i];
+    }
+}
+
+static inline void recovery_make_found_buffers(device char* foundStrings,
+                                               device uchar* foundPrvKeys,
+                                               device uint* foundHash160,
+                                               device uint* foundLen,
+                                               device uint* foundIter,
+                                               device uchar* foundType,
+                                               device uint* foundDerivations,
+                                               device uint* foundDerivations2,
+                                               device char* foundPass,
+                                               device ushort* foundPassSize,
+                                               device long* foundRound,
+                                               device ulong* foundSeed,
+                                               device atomic_uint* resultsCount,
+                                               uint maxFounds,
+                                               thread FoundBuffers& found) {
+    found.foundStrings = foundStrings;
+    found.foundPrvKeys = foundPrvKeys;
+    found.foundHash160 = foundHash160;
+    found.len = foundLen;
+    found.iter = foundIter;
+    found.type = foundType;
+    found.foundDerivations = foundDerivations;
+    found.foundDerivations2 = foundDerivations2;
+    found.pass = foundPass;
+    found.passSize = foundPassSize;
+    found.round = foundRound;
+    found.seed = foundSeed;
+    found.resultsCount = resultsCount;
+    found.maxFounds = maxFounds;
+}
+
+static inline bool recovery_make_found_from_runtime(thread FoundBuffers& found,
+                                                    const device RecoveryRuntimeBuffers& runtime) {
+    if (runtime.config == nullptr || runtime.filters == nullptr || runtime.filterStorage == nullptr) {
+        return false;
+    }
+    recovery_make_found_buffers(runtime.foundStrings, runtime.foundPrvKeys,
+                                runtime.foundHash160, runtime.foundLen,
+                                runtime.foundIter, runtime.foundType,
+                                runtime.foundDerivations, runtime.foundDerivations2,
+                                runtime.foundPass, runtime.foundPassSize,
+                                runtime.foundRound, runtime.foundSeed,
+                                runtime.resultsCount, runtime.config->maxFounds, found);
+    return true;
+}
+
+static inline void recovery_store_found_with_length(device bool* isResult,
+                                                   device bool* buffResult,
+                                                   uint starter,
+                                                   uint c_path,
+                                                   const thread char* phrase,
+                                                   uint phrase_len,
+                                                   const thread uchar* private_key32,
+                                                   const thread void* match_data,
+                                                   uint match_data_len,
+                                                   uchar type_value,
+                                                   long current_round,
+                                                   const device char* pass_start,
+                                                   int pass_size,
+                                                   uchar derivation_tag,
+                                                   device RuntimeConfig& config,
+                                                   FoundBuffers found) {
+    if (buffResult != nullptr) {
+        buffResult[starter] = true;
+    }
+    if (isResult != nullptr) {
+        isResult[0] = true;
+    }
+    if (found.resultsCount == nullptr) {
+        return;
+    }
+
+    const ulong idx64 = found_atomic_add_count(found.resultsCount, 1u);
+    if (idx64 >= ulong(found.maxFounds)) {
+        return;
+    }
+    const uint idx = uint(idx64);
+
+    if (found.foundDerivations != nullptr) {
+        found.foundDerivations[idx] = c_path;
+    }
+    if (found.foundStrings != nullptr && phrase != nullptr && phrase_len > 0u) {
+        const uint n = min(phrase_len, uint(kFoundStringBytes));
+        found_copy_thread_to_device_char(found.foundStrings + ulong(idx) * kFoundStringBytes, phrase, n);
+    }
+    if (found.len != nullptr) {
+        found.len[idx] = phrase_len;
+    }
+    if (found.foundPrvKeys != nullptr && private_key32 != nullptr) {
+        found_copy_thread_to_device_uchar(found.foundPrvKeys + ulong(idx) * kFoundPrivateKeyBytes, private_key32, 32u);
+    }
+    if (found.foundHash160 != nullptr && match_data != nullptr && match_data_len > 0u) {
+        const uint n = min(match_data_len, kFoundHashWords * 4u);
+        device uchar* out = reinterpret_cast<device uchar*>(found.foundHash160 + ulong(idx) * kFoundHashWords);
+        found_copy_thread_to_device_bytes(out, match_data, n);
+    }
+    if (found.type != nullptr) {
+        found.type[idx] = type_value;
+    }
+    if (found.round != nullptr) {
+        found.round[idx] = current_round;
+    }
+    if (found.foundDerivations2 != nullptr) {
+        found.foundDerivations2[idx] = uint(derivation_tag);
+    }
+
+    if (config.isPass != 0u) {
+        int copy_len = pass_size;
+        if (copy_len < 0) {
+            copy_len = 0;
+        }
+        if (copy_len > int(kFoundPassBytes)) {
+            copy_len = int(kFoundPassBytes);
+        }
+        if (found.passSize != nullptr) {
+            found.passSize[idx] = ushort(copy_len);
+        }
+        if (found.pass != nullptr && copy_len > 0 && pass_start != nullptr) {
+            for (int i = 0; i < copy_len; ++i) {
+                found.pass[ulong(idx) * kFoundPassBytes + ulong(i)] = pass_start[i];
+            }
+        }
+    }
+}
+
+static inline void recovery_store_found_from_ids(device bool* isResult,
+                                                 device bool* buffResult,
+                                                 uint starter,
+                                                 uint c_path,
+                                                 const thread ushort* ids,
+                                                 int words_count,
+                                                 const thread uchar* private_key32,
+                                                 const thread void* match_data,
+                                                 uint match_data_len,
+                                                 uchar type_value,
+                                                 long current_round,
+                                                 const device char* pass_start,
+                                                 int pass_size,
+                                                 uchar derivation_tag,
+                                                 device RuntimeConfig& config,
+                                                 const device char* customDict,
+                                                 FoundBuffers found) {
+    thread char phrase[512];
+    const uint phrase_len = recovery_build_phrase_from_ids_metal(ids, words_count, config, customDict, phrase, uint(sizeof(phrase)));
+    if (phrase_len == 0u) {
+        return;
+    }
+    recovery_store_found_with_length(isResult, buffResult, starter, c_path, phrase, phrase_len,
+                                    private_key32, match_data, match_data_len, type_value,
+                                    current_round, pass_start, pass_size, derivation_tag,
+                                    config, found);
+}
+
+static inline bool recovery_check_hash_words(device RuntimeConfig& config,
+                                             device XorFilterState& filters,
+                                             device FilterStorageState& storage,
+                                             const device uchar* bloom_storage,
+                                             const device uchar* xor_storage,
+                                             const device uchar* xor_un_storage,
+                                             const device uchar* xor_uc_storage,
+                                             const device uchar* xor_hc_storage,
+                                             const thread uint* hash_words) {
+    return filter_check_hash(config, filters, storage, bloom_storage, xor_storage,
+                             xor_un_storage, xor_uc_storage, xor_hc_storage, hash_words);
+}
+
+static inline void recovery_get_child_key_secp256k1(const constant secp256k1_ge_storage* precPtr,
+                                                    size_t precPitch,
+                                                    const thread extended_private_key_t* master_private,
+                                                    const device uint* d_derivations,
+                                                    uint path_offset,
+                                                    uint path_len,
+                                                    thread uchar out32[32]) {
+    extended_private_key_t cur = *master_private;
+    for (uint i = 0u; i < path_len; ++i) {
+        const uint derivation_value = d_derivations[path_offset + i];
+        if (derivation_value < 0x80000000u) {
+            recovery_normal_private_child_from_private_metal(precPtr, precPitch, &cur, &cur, derivation_value);
+        } else {
+            recovery_hardened_private_child_from_private_metal(&cur, &cur, derivation_value);
+        }
+    }
+    for (int i = 0; i < 32; ++i) {
+        out32[i] = cur.key[i];
+    }
+}
+
+static inline void recovery_get_child_key_ed25519(const thread extended_private_key_t* master_private,
+                                                  const device uint* d_derivations,
+                                                  uint path_offset,
+                                                  uint path_len,
+                                                  thread uchar out32[32]) {
+    extended_private_key_t cur = *master_private;
+    for (uint i = 0u; i < path_len; ++i) {
+        uint derivation_value = d_derivations[path_offset + i];
+        if (derivation_value < 0x80000000u) {
+            derivation_value |= 0x80000000u;
+        }
+        recovery_hardened_private_child_from_private_ed25519_metal(&cur, &cur, derivation_value);
+    }
+    for (int i = 0; i < 32; ++i) {
+        out32[i] = cur.key[i];
+    }
+}
+
+static inline void recovery_materialize_private_from_offset(const device uchar* start_private_key,
+                                                            ulong step,
+                                                            ulong candidate_index,
+                                                            thread uchar out_private_key32[32]) {
+    thread uint base_words[8];
+    thread uint result_words[8];
+    ulong add_lo = 0ul;
+    ulong add_hi = 0ul;
+    loadBE256toWords(start_private_key, base_words);
+    mul_u64_u64_to_u128(candidate_index, step, add_lo, add_hi);
+    add128to256_device(base_words, add_lo, add_hi, result_words);
+    storeWordsToBE256(result_words, out_private_key32);
+}
+
+static inline void recovery_apply_nibble(thread uchar key32[32],
+                                         int nibble_pos,
+                                         uchar nibble_value) {
+    const int byte_index = nibble_pos >> 1;
+    const uchar nibble = uchar(nibble_value & 0x0fu);
+    if ((nibble_pos & 1) == 0) {
+        key32[byte_index] = uchar((key32[byte_index] & 0x0fu) | (nibble << 4));
+    } else {
+        key32[byte_index] = uchar((key32[byte_index] & 0xf0u) | nibble);
+    }
+}
+
+static inline void recovery_eval_secp_private_phrase(device bool* isResult,
+                                                     device bool* buffResult,
+                                                     uint starter,
+                                                     uint c_path,
+                                                     const thread char* phrase,
+                                                     uint phrase_len,
+                                                     thread uchar base_private_key[32],
+                                                     const constant secp256k1_ge_storage* precPtr,
+                                                     size_t precPitch,
+                                                     ulong round,
+                                                     const device char* pass_start,
+                                                     int pass_size,
+                                                     uchar derivation_tag,
+                                                     device RuntimeConfig& config,
+                                                     device XorFilterState& filters,
+                                                     device FilterStorageState& storage,
+                                                     const device uchar* bloom_storage,
+                                                     const device uchar* xor_storage,
+                                                     const device uchar* xor_un_storage,
+                                                     const device uchar* xor_uc_storage,
+                                                     const device uchar* xor_hc_storage,
+                                                     FoundBuffers found) {
+    thread uchar pubKeys[65];
+    thread uchar prvKeys[32];
+    thread uint hash160[8] = { 0u };
+    recovery_copy_thread_uchar(prvKeys, base_private_key, 32u);
+
+    if (round > 0ul) {
+        bump_key_256(prvKeys, round, false);
+    }
+
+    for (ulong s = 0ul; s <= (2ul * round); ++s) {
+        const long current_round = long(s) - long(round);
+        pubKeys[0] = 0x04u;
+        const int pubkey_ok = secp256k1_ec_pubkey_create(reinterpret_cast<thread secp256k1_pubkey*>(pubKeys + 1),
+                                                         prvKeys,
+                                                         precPtr,
+                                                         precPitch);
+        if (pubkey_ok != 0) {
+            int keylenskip = 0;
+            if (config.uncompressed != 0u) {
+                _GetHash160(pubKeys, keylenskip, reinterpret_cast<thread uchar*>(hash160));
+                if (recovery_check_hash_words(config, filters, storage, bloom_storage, xor_storage, xor_un_storage, xor_uc_storage, xor_hc_storage, hash160)) {
+                    recovery_store_found_with_length(isResult, buffResult, starter, c_path, phrase, phrase_len, prvKeys, hash160, 32u, 0x01u, current_round, pass_start, pass_size, derivation_tag, config, found);
+                }
+            }
+            if (config.compressed != 0u) {
+                _GetHash160Comp(pubKeys, keylenskip, reinterpret_cast<thread uchar*>(hash160));
+                if (recovery_check_hash_words(config, filters, storage, bloom_storage, xor_storage, xor_un_storage, xor_uc_storage, xor_hc_storage, hash160)) {
+                    recovery_store_found_with_length(isResult, buffResult, starter, c_path, phrase, phrase_len, prvKeys, hash160, 32u, 0x02u, current_round, pass_start, pass_size, derivation_tag, config, found);
+                }
+            }
+            if (config.segwit != 0u) {
+                if (config.compressed == 0u) {
+                    _GetHash160Comp(pubKeys, keylenskip, reinterpret_cast<thread uchar*>(hash160));
+                }
+                _GetHash160P2SHCompFromHash(hash160, hash160);
+                if (recovery_check_hash_words(config, filters, storage, bloom_storage, xor_storage, xor_un_storage, xor_uc_storage, xor_hc_storage, hash160)) {
+                    recovery_store_found_with_length(isResult, buffResult, starter, c_path, phrase, phrase_len, prvKeys, hash160, 32u, 0x03u, current_round, pass_start, pass_size, derivation_tag, config, found);
+                }
+            }
+            if (config.p2wsh != 0u) {
+                thread uchar p2wsh_hash[32];
+                thread uint p2wsh_rmd[8] = { 0u };
+                _GetP2WSHComp(pubKeys, p2wsh_hash, p2wsh_rmd);
+                if (recovery_check_hash_words(config, filters, storage, bloom_storage, xor_storage, xor_un_storage, xor_uc_storage, xor_hc_storage, p2wsh_rmd)) {
+                    recovery_store_found_with_length(isResult, buffResult, starter, c_path, phrase, phrase_len, prvKeys, p2wsh_hash, 32u, 0x07u, current_round, pass_start, pass_size, derivation_tag, config, found);
+                }
+            }
+            if (config.ethereum != 0u) {
+                thread uchar keccak_hash[32];
+                thread uint eth_hash160[8] = { 0u };
+                keccak(reinterpret_cast<thread char*>(pubKeys + 1), 64, keccak_hash, 32);
+                for (uint h = 12u, i = 0u; i < 5u; ++i) {
+                    eth_hash160[i] = uint(keccak_hash[h]) |
+                        ((uint(keccak_hash[h + 1u]) << 8u) & 0x0000ff00u) |
+                        ((uint(keccak_hash[h + 2u]) << 16u) & 0x00ff0000u) |
+                        ((uint(keccak_hash[h + 3u]) << 24u) & 0xff000000u);
+                    h += 4u;
+                }
+                if (recovery_check_hash_words(config, filters, storage, bloom_storage, xor_storage, xor_un_storage, xor_uc_storage, xor_hc_storage, eth_hash160)) {
+                    recovery_store_found_with_length(isResult, buffResult, starter, c_path, phrase, phrase_len, prvKeys, eth_hash160, 32u, 0x06u, current_round, pass_start, pass_size, derivation_tag, config, found);
+                }
+            }
+            if (config.taproot != 0u) {
+                thread uchar tap_hash[32] = { 0u };
+                recovery_tweak_taproot_metal(tap_hash, pubKeys, precPtr, precPitch);
+                _GetRMD160(reinterpret_cast<thread uint*>(tap_hash), hash160);
+                if (recovery_check_hash_words(config, filters, storage, bloom_storage, xor_storage, xor_un_storage, xor_uc_storage, xor_hc_storage, hash160)) {
+                    recovery_store_found_with_length(isResult, buffResult, starter, c_path, phrase, phrase_len, prvKeys, tap_hash, 32u, 0x04u, current_round, pass_start, pass_size, derivation_tag, config, found);
+                }
+            }
+            if (config.xpoint != 0u) {
+                thread uint xpoint_hash[8] = { 0u };
+                thread uchar* xbytes = reinterpret_cast<thread uchar*>(xpoint_hash);
+                recovery_copy_thread_uchar(xbytes, pubKeys + 1, 32u);
+                if (recovery_check_hash_words(config, filters, storage, bloom_storage, xor_storage, xor_un_storage, xor_uc_storage, xor_hc_storage, xpoint_hash)) {
+                    recovery_store_found_with_length(isResult, buffResult, starter, c_path, phrase, phrase_len, prvKeys, xpoint_hash, 32u, 0x05u, current_round, pass_start, pass_size, derivation_tag, config, found);
+                }
+            }
+        }
+        if (s < (2ul * round)) {
+            bump_key_256(prvKeys, 1ul, true);
+        }
+    }
+}
+
+static inline void recovery_eval_master_secp_phrase(device bool* isResult,
+                                                    device bool* buffResult,
+                                                    uint starter,
+                                                    const constant secp256k1_ge_storage* precPtr,
+                                                    size_t precPitch,
+                                                    const thread char* phrase,
+                                                    uint phrase_len,
+                                                    const thread uint master_words[RECOVERY_MASTER_WORDS_METAL],
+                                                    const device uint* d_derivations,
+                                                    const device uint* derindex,
+                                                    uint der_indexes_size,
+                                                    uint der_start_index,
+                                                    const device char* passwd,
+                                                    uint pass_size,
+                                                    ulong round,
+                                                    device RuntimeConfig& config,
+                                                    device XorFilterState& filters,
+                                                    device FilterStorageState& storage,
+                                                    const device uchar* bloom_storage,
+                                                    const device uchar* xor_storage,
+                                                    const device uchar* xor_un_storage,
+                                                    const device uchar* xor_uc_storage,
+                                                    const device uchar* xor_hc_storage,
+                                                    FoundBuffers found) {
+    thread extended_private_key_t master_private;
+    const thread uchar* master_bytes = reinterpret_cast<const thread uchar*>(master_words);
+    for (int i = 0; i < 32; ++i) {
+        master_private.key[i] = master_bytes[i];
+        master_private.chain_code[i] = master_bytes[32 + i];
+    }
+
+    uint processed = 0u;
+    uint c_path = 0u;
+    for (uint path = der_start_index; path < der_indexes_size; ++path) {
+        const uint path_len = derindex[path];
+        thread uchar prvKeys[32];
+        recovery_get_child_key_secp256k1(precPtr, precPitch, &master_private, d_derivations, processed, path_len, prvKeys);
+        recovery_eval_secp_private_phrase(isResult, buffResult, starter, c_path, phrase, phrase_len,
+                                          prvKeys, precPtr, precPitch, round, passwd, int(pass_size),
+                                          0u, config, filters, storage, bloom_storage, xor_storage,
+                                          xor_un_storage, xor_uc_storage, xor_hc_storage, found);
+        processed += path_len;
+        ++c_path;
+    }
+}
+
+static inline void recovery_eval_master_secp_ids(device bool* isResult,
+                                                 device bool* buffResult,
+                                                 uint starter,
+                                                 const constant secp256k1_ge_storage* precPtr,
+                                                 size_t precPitch,
+                                                 const thread ushort* ids,
+                                                 int words_count,
+                                                 const thread uint master_words[RECOVERY_MASTER_WORDS_METAL],
+                                                 const device uint* d_derivations,
+                                                 const device uint* derindex,
+                                                 uint der_indexes_size,
+                                                 uint der_start_index,
+                                                 const device char* passwd,
+                                                 uint pass_size,
+                                                 ulong round,
+                                                 device RuntimeConfig& config,
+                                                 const device char* customDict,
+                                                 device XorFilterState& filters,
+                                                 device FilterStorageState& storage,
+                                                 const device uchar* bloom_storage,
+                                                 const device uchar* xor_storage,
+                                                 const device uchar* xor_un_storage,
+                                                 const device uchar* xor_uc_storage,
+                                                 const device uchar* xor_hc_storage,
+                                                 FoundBuffers found) {
+    if (words_count <= 0 || words_count > 48 || (words_count % 3) != 0 || pass_size > 128u) {
+        return;
+    }
+    thread char phrase[512];
+    const uint phrase_len = recovery_build_phrase_from_ids_metal(ids, words_count, config, customDict,
+                                                                 phrase, uint(sizeof(phrase)));
+    if (phrase_len == 0u) {
+        return;
+    }
+    recovery_eval_master_secp_phrase(isResult, buffResult, starter, precPtr, precPitch, phrase,
+                                     phrase_len, master_words, d_derivations, derindex,
+                                     der_indexes_size, der_start_index, passwd, pass_size, round,
+                                     config, filters, storage, bloom_storage, xor_storage,
+                                     xor_un_storage, xor_uc_storage, xor_hc_storage, found);
+}
+
+static inline void recovery_eval_candidate_secp_ids(device bool* isResult,
+                                                    device bool* buffResult,
+                                                    uint starter,
+                                                    const constant secp256k1_ge_storage* precPtr,
+                                                    size_t precPitch,
+                                                    const thread ushort* ids,
+                                                    int words_count,
+                                                    const device uint* d_derivations,
+                                                    const device uint* derindex,
+                                                    uint der_indexes_size,
+                                                    uint der_start_index,
+                                                    const device char* passwd,
+                                                    uint pass_size,
+                                                    ulong round,
+                                                    const device uint* iterations,
+                                                    uint iterations_size,
+                                                    device RuntimeConfig& config,
+                                                    const device char* customDict,
+                                                    device XorFilterState& filters,
+                                                    device FilterStorageState& storage,
+                                                    const device uchar* bloom_storage,
+                                                    const device uchar* xor_storage,
+                                                    const device uchar* xor_un_storage,
+                                                    const device uchar* xor_uc_storage,
+                                                    const device uchar* xor_hc_storage,
+                                                    FoundBuffers found) {
+    thread char phrase[512];
+    const uint phrase_len = recovery_build_phrase_from_ids_metal(ids, words_count, config, customDict, phrase, uint(sizeof(phrase)));
+    if (phrase_len == 0u || iterations == nullptr || iterations_size == 0u ||
+        words_count <= 0 || words_count > 48 || (words_count % 3) != 0 || pass_size > 128u) {
+        return;
+    }
+
+    for (uint num = 0u; num < iterations_size; ++num) {
+        if (iterations[num] == 0u) {
+            continue;
+        }
+        thread uint master_words[RECOVERY_MASTER_WORDS_METAL];
+        if (!recovery_build_master_words_from_phrase_metal(phrase, phrase_len, passwd, pass_size,
+                                                           iterations, iterations_size, config,
+                                                           master_words)) {
+            continue;
+        }
+        recovery_eval_master_secp_phrase(isResult, buffResult, starter, precPtr, precPitch,
+                                         phrase, phrase_len, master_words, d_derivations, derindex,
+                                         der_indexes_size, der_start_index, passwd, pass_size, round,
+                                         config, filters, storage, bloom_storage, xor_storage,
+                                         xor_un_storage, xor_uc_storage, xor_hc_storage, found);
+    }
+}
+
+static inline void recovery_atomic_add_u64(device atomic_uint* counter, ulong value) {
+    if (counter == nullptr || value == 0ul) {
+        return;
+    }
+    const uint lo_add = uint(value & 0xfffffffful);
+    const uint hi_add = uint(value >> 32u);
+    const uint old_lo = atomic_fetch_add_explicit(counter, lo_add, memory_order_relaxed);
+    if (old_lo + lo_add < old_lo) {
+        atomic_fetch_add_explicit(counter + 1, 1u, memory_order_relaxed);
+    }
+    if (hi_add != 0u) {
+        atomic_fetch_add_explicit(counter + 1, hi_add, memory_order_relaxed);
+    }
+}
+
+static inline bool recovery_template_phrase(const device char* template_text,
+                                            uint template_len,
+                                            thread char phrase[512],
+                                            thread uint& phrase_len) {
+    phrase_len = min(template_len, 511u);
+    for (uint i = 0u; i < phrase_len; ++i) {
+        phrase[i] = template_text != nullptr ? template_text[i] : char(0);
+    }
+    phrase[phrase_len] = '\0';
+    return true;
+}
+
+static inline void recovery_eval_ed_private_phrase(device bool* isResult,
+                                                   device bool* buffResult,
+                                                   uint starter,
+                                                   uint c_path,
+                                                   const thread char* phrase,
+                                                   uint phrase_len,
+                                                   thread uchar base_private_key[32],
+                                                   ulong round,
+                                                   const device char* pass_start,
+                                                   int pass_size,
+                                                   uchar derivation_tag,
+                                                   device RuntimeConfig& config,
+                                                   device XorFilterState& filters,
+                                                   device FilterStorageState& storage,
+                                                   const device uchar* bloom_storage,
+                                                   const device uchar* xor_storage,
+                                                   const device uchar* xor_un_storage,
+                                                   const device uchar* xor_uc_storage,
+                                                   const device uchar* xor_hc_storage,
+                                                   FoundBuffers found) {
+    const bool need_ed = config.solana != 0u || config.ton != 0u || config.tonAll != 0u;
+    if (!need_ed) {
+        return;
+    }
+
+    thread uchar private_key[32];
+    recovery_copy_thread_uchar(private_key, base_private_key, 32u);
+    if (round > 0ul) {
+        bump_key_256(private_key, round, false);
+    }
+
+    for (ulong s = 0ul; s <= (2ul * round); ++s) {
+        const long current_round = long(s) - long(round);
+        thread uchar public_key[32];
+        ed25519_key_to_pub(private_key, public_key);
+        thread uint hash_words[8] = { 0u };
+
+        if (config.solana != 0u) {
+            for (int i = 0; i < 8; ++i) {
+                hash_words[i] = reinterpret_cast<thread uint*>(public_key)[i];
+            }
+            if (recovery_check_hash_words(config, filters, storage, bloom_storage, xor_storage, xor_un_storage, xor_uc_storage, xor_hc_storage, hash_words)) {
+                recovery_store_found_with_length(isResult, buffResult, starter, c_path, phrase, phrase_len,
+                                                private_key, public_key, 32u, 0x60u, current_round,
+                                                pass_start, pass_size, derivation_tag, config, found);
+            }
+        }
+        if (config.ton != 0u || config.tonAll != 0u) {
+            thread uchar ton_hash[32];
+            if (config.ton != 0u) {
+                const constant char* names[4] = { "v3r1", "v3r2", "v4r2", "v5r1" };
+                const uchar types[4] = { 0x85u, 0x86u, 0x88u, 0x89u };
+                for (int i = 0; i < 4; ++i) {
+                    if (pubkey_to_hash_ton(public_key, names[i], ton_hash, config.tonTypeMask) &&
+                        recovery_check_hash_words(config, filters, storage, bloom_storage, xor_storage, xor_un_storage, xor_uc_storage, xor_hc_storage, reinterpret_cast<thread uint*>(ton_hash))) {
+                        recovery_store_found_with_length(isResult, buffResult, starter, c_path, phrase, phrase_len,
+                                                        private_key, ton_hash, 32u, types[i], current_round,
+                                                        pass_start, pass_size, derivation_tag, config, found);
+                    }
+                }
+            }
+            if (config.tonAll != 0u) {
+                const constant char* names_all[13] = { "v1r1", "v1r2", "v1r3", "v2r1", "v2r2", "v3r1", "v3r2", "v4r1", "v4r2", "v5r1", "hv1", "hv2", "hv3" };
+                for (int i = 0; i < 13; ++i) {
+                    const uchar type_value = uchar(0x80u + uint(i));
+                    if (pubkey_to_hash_ton(public_key, names_all[i], ton_hash, config.tonTypeMask) &&
+                        recovery_check_hash_words(config, filters, storage, bloom_storage, xor_storage, xor_un_storage, xor_uc_storage, xor_hc_storage, reinterpret_cast<thread uint*>(ton_hash))) {
+                        recovery_store_found_with_length(isResult, buffResult, starter, c_path, phrase, phrase_len,
+                                                        private_key, ton_hash, 32u, type_value, current_round,
+                                                        pass_start, pass_size, derivation_tag, config, found);
+                    }
+                }
+            }
+        }
+        if (s < (2ul * round)) {
+            bump_key_256(private_key, 1ul, true);
+        }
+    }
+}
+
+static inline void worker_pvk_recovery_seq_secp_impl(device bool* isResult,
+                                                     device bool* buffResult,
+                                                     const constant secp256k1_ge_storage* precPtr,
+                                                     ulong precPitch,
+                                                     const device char* template_text,
+                                                     uint template_len,
+                                                     const device uchar* start_private_key,
+                                                     ulong step,
+                                                     ulong range_start,
+                                                     ulong range_count,
+                                                     device RuntimeConfig& config,
+                                                     device XorFilterState& filters,
+                                                     device FilterStorageState& storage,
+                                                     const device uchar* bloom_storage,
+                                                     const device uchar* xor_storage,
+                                                     const device uchar* xor_un_storage,
+                                                     const device uchar* xor_uc_storage,
+                                                     const device uchar* xor_hc_storage,
+                                                     device char* foundStrings,
+                                                     device uchar* foundPrvKeys,
+                                                     device uint* foundHash160,
+                                                     device uint* foundLen,
+                                                     device uint* foundIter,
+                                                     device uchar* foundType,
+                                                     device uint* foundDerivations,
+                                                     device uint* foundDerivations2,
+                                                     device char* foundPass,
+                                                     device ushort* foundPassSize,
+                                                     device long* foundRound,
+                                                     device ulong* foundSeed,
+                                                     device atomic_uint* resultsCount,
+                                                     uint tid,
+                                                     uint stride) {
+    if (start_private_key == nullptr || range_count == 0ul) {
+        return;
+    }
+    const bool need_secp = config.compressed != 0u || config.uncompressed != 0u ||
+                           config.segwit != 0u || config.p2wsh != 0u ||
+                           config.taproot != 0u || config.ethereum != 0u ||
+                           config.xpoint != 0u;
+    if (!need_secp) {
+        return;
+    }
+
+    FoundBuffers found;
+    recovery_make_found_buffers(foundStrings, foundPrvKeys, foundHash160, foundLen, foundIter,
+                                foundType, foundDerivations, foundDerivations2, foundPass,
+                                foundPassSize, foundRound, foundSeed, resultsCount, config.maxFounds, found);
+    thread char phrase[512];
+    thread uint phrase_len = 0u;
+    recovery_template_phrase(template_text, template_len, phrase, phrase_len);
+
+    for (ulong local = ulong(tid); local < range_count; local += ulong(stride)) {
+        const ulong candidate_index = range_start + local;
+        thread uchar private_key[32];
+        recovery_materialize_private_from_offset(start_private_key, step, candidate_index, private_key);
+        recovery_eval_secp_private_phrase(isResult, buffResult, tid, 0u, phrase, phrase_len, private_key,
+                                          precPtr, size_t(precPitch), 0ul, nullptr, 0, 0u, config,
+                                          filters, storage, bloom_storage, xor_storage, xor_un_storage,
+                                          xor_uc_storage, xor_hc_storage, found);
+    }
+}
+
+static inline void worker_pvk_recovery_batch_impl(device bool* isResult,
+                                                  device bool* buffResult,
+                                                  const constant secp256k1_ge_storage* precPtr,
+                                                  ulong precPitch,
+                                                  const device char* template_text,
+                                                  uint template_len,
+                                                  const device uchar* base_private_key,
+                                                  const device int* missing_positions,
+                                                  int missing_count,
+                                                  ulong range_start,
+                                                  ulong range_count,
+                                                  ulong round,
+                                                  bool ed_only,
+                                                  device RuntimeConfig& config,
+                                                  device XorFilterState& filters,
+                                                  device FilterStorageState& storage,
+                                                  const device uchar* bloom_storage,
+                                                  const device uchar* xor_storage,
+                                                  const device uchar* xor_un_storage,
+                                                  const device uchar* xor_uc_storage,
+                                                  const device uchar* xor_hc_storage,
+                                                  device char* foundStrings,
+                                                  device uchar* foundPrvKeys,
+                                                  device uint* foundHash160,
+                                                  device uint* foundLen,
+                                                  device uint* foundIter,
+                                                  device uchar* foundType,
+                                                  device uint* foundDerivations,
+                                                  device uint* foundDerivations2,
+                                                  device char* foundPass,
+                                                  device ushort* foundPassSize,
+                                                  device long* foundRound,
+                                                  device ulong* foundSeed,
+                                                  device atomic_uint* resultsCount,
+                                                  uint tid) {
+    if (ulong(tid) >= range_count || base_private_key == nullptr) {
+        return;
+    }
+
+    FoundBuffers found;
+    recovery_make_found_buffers(foundStrings, foundPrvKeys, foundHash160, foundLen, foundIter,
+                                foundType, foundDerivations, foundDerivations2, foundPass,
+                                foundPassSize, foundRound, foundSeed, resultsCount, config.maxFounds, found);
+    thread char phrase[512];
+    thread uint phrase_len = 0u;
+    recovery_template_phrase(template_text, template_len, phrase, phrase_len);
+
+    thread uchar private_key[32];
+    recovery_copy_device_uchar_to_thread(private_key, base_private_key, 32u);
+    ulong combo = range_start + ulong(tid);
+    for (int i = 0; i < missing_count; ++i) {
+        const uchar nibble = uchar(combo & 0x0ful);
+        combo >>= 4;
+        recovery_apply_nibble(private_key, missing_positions[i], nibble);
+    }
+
+    if (!ed_only) {
+        recovery_eval_secp_private_phrase(isResult, buffResult, tid, 0u, phrase, phrase_len,
+                                          private_key, precPtr, size_t(precPitch), round,
+                                          nullptr, 0, 0u, config, filters, storage,
+                                          bloom_storage, xor_storage, xor_un_storage,
+                                          xor_uc_storage, xor_hc_storage, found);
+    }
+    recovery_eval_ed_private_phrase(isResult, buffResult, tid, 0u, phrase, phrase_len,
+                                    private_key, round, nullptr, 0, 0u, config, filters,
+                                    storage, bloom_storage, xor_storage, xor_un_storage,
+                                    xor_uc_storage, xor_hc_storage, found);
+}
+
+#endif
