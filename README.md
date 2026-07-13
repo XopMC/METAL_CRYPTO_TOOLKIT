@@ -156,15 +156,6 @@ Show the main mode list:
 ./METAL_CRYPTO_TOOLKIT -help
 ```
 
-Установка необязательного набора конвертеров:
-
-```bash
-shasum -a 256 -c METAL_CRYPTO_TOOLKIT-tools-v14-macos-arm64.tar.gz.sha256
-tar -xzf METAL_CRYPTO_TOOLKIT-tools-v14-macos-arm64.tar.gz
-chmod +x tools/*
-tools/cardano_address_to_hex -h
-```
-
 Show the detailed help for a mode:
 
 ```bash
