@@ -66,11 +66,17 @@ METAL_HEADERS := KernelState.metalh $(sort $(wildcard Kernels/*.metalh) $(METAL_
 METAL_AIRS := $(METAL_SRCS:%.metal=$(BUILD_DIR)/%.air)
 METAL_DEPS := $(METAL_AIRS:.air=.d)
 
-.PHONY: all host clean metal-toolchain-check
+.PHONY: all host clean metal-toolchain-check tools tools-clean
 
 all: $(TARGET) $(ROOT_TARGET)
 
 host: $(TARGET)
+
+tools:
+	$(MAKE) -C tools all
+
+tools-clean:
+	$(MAKE) -C tools clean
 
 $(TARGET): $(HOST_OBJS) $(CPP_OBJS) $(C_OBJS) $(METALLIB) | $(BIN_DIR)
 	$(CXX) $(CXXFLAGS) $(HOST_OBJS) $(CPP_OBJS) $(C_OBJS) -o $@ $(LDFLAGS) $(EMBED_METALLIB_LDFLAGS)

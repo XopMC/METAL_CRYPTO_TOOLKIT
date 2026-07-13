@@ -13,10 +13,16 @@
 *.d
 
 # Local verification and performance tooling
-/tools/
 /_perf/
 __pycache__/
 *.pyc
+
+# Address conversion tool build products
+/tools/*/build/
+/tools/*/bin/
+/tools/dist/
+/tools/**/*-hex.txt
+/tools/**/*-invalid.txt
 
 # Local inputs, outputs, and logs
 /*.txt
