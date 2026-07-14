@@ -20,6 +20,9 @@ struct FoundBuffers {
     uint maxFounds;
 };
 
+constant uint FOUND_DEFERRED_POETRY_FLAG = 0x80000000u;
+constant uint FOUND_DEFERRED_POETRY_BYTES = 38u;
+
 static inline ulong found_atomic_add_count(device atomic_uint* counter, uint value) {
     const uint low = atomic_fetch_add_explicit(counter, value, memory_order_relaxed);
     if (low + value < low) {
@@ -46,6 +49,35 @@ static inline void found_copy_thread_to_device_bytes(device uchar* dst, const th
     for (uint i = 0u; i < len; ++i) {
         dst[i] = p[i];
     }
+}
+
+static inline bool found_is_deferred_poetry_source(ulong source_len) {
+    return (uint(source_len) & FOUND_DEFERRED_POETRY_FLAG) != 0u;
+}
+
+static inline uint found_copy_selected_source(device char* output,
+                                              const thread char* source,
+                                              ulong source_len) {
+    if (found_is_deferred_poetry_source(source_len)) {
+        if (output != nullptr && source != nullptr) {
+            output[0] = 0;
+            output[1] = 'P';
+            output[2] = 'O';
+            output[3] = 'K';
+            output[4] = char((uint(source_len) >> 8u) & 0xffu);
+            output[5] = char(uint(source_len) & 0xffu);
+            found_copy_thread_to_device_char(output + 6u, source, 32u);
+        }
+        return FOUND_DEFERRED_POETRY_BYTES;
+    }
+
+    const uint copy_len = (source_len > ulong(kFoundStringBytes))
+        ? kFoundStringBytes
+        : uint(source_len);
+    if (output != nullptr && source != nullptr && copy_len > 0u) {
+        found_copy_thread_to_device_char(output, source, copy_len);
+    }
+    return uint(source_len);
 }
 
 static inline void found_store_result_compat_len(device bool* isResult,
@@ -83,12 +115,12 @@ static inline void found_store_result_compat_len(device bool* isResult,
     if (found.foundDerivations != nullptr) {
         found.foundDerivations[idx] = c_path;
     }
-    if (found.foundStrings != nullptr && phrase != nullptr && phrase_len > 0u) {
-        const uint n = (phrase_len > kFoundStringBytes) ? kFoundStringBytes : phrase_len;
-        found_copy_thread_to_device_char(found.foundStrings + ulong(idx) * kFoundStringBytes, phrase, n);
-    }
+    device char* selected_output = found.foundStrings != nullptr
+        ? found.foundStrings + ulong(idx) * kFoundStringBytes
+        : nullptr;
+    const uint stored_phrase_len = found_copy_selected_source(selected_output, phrase, ulong(phrase_len));
     if (found.len != nullptr) {
-        found.len[idx] = phrase_len;
+        found.len[idx] = stored_phrase_len;
     }
     if (found.foundPrvKeys != nullptr && private_key32 != nullptr) {
         found_copy_thread_to_device_uchar(found.foundPrvKeys + ulong(idx) * kFoundPrivateKeyBytes, private_key32, 32u);

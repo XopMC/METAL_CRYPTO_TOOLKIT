@@ -30,6 +30,7 @@ constant bool TFC_SUI_ED [[function_constant(23)]];
 constant bool TFC_IOTA_ED [[function_constant(24)]];
 constant bool TFC_ICP_ED [[function_constant(25)]];
 constant bool TFC_XTZ_ED [[function_constant(26)]];
+constant bool TFC_POETRY_HAS_ROUNDS [[function_constant(71)]];
 #endif
 
 static inline void poetry_found_buffers(device char* foundStrings,
@@ -61,7 +62,7 @@ kernel void workerPoetry(device bool* isResult [[buffer(0)]],
                          device bool* buffResult [[buffer(1)]],
                          const device PoetryTemplateDevice* poetry_template [[buffer(2)]],
                          device PoetryThreadState* poetry_states [[buffer(3)]],
-                         constant ulong& global_stride [[buffer(4)]],
+                         constant ulong& stride_or_random_limit [[buffer(4)]],
                          const device char* dictionary_blob [[buffer(5)]],
                          const device ushort* dictionary_offsets [[buffer(6)]],
                          const device uchar* dictionary_lengths [[buffer(7)]],
@@ -97,6 +98,7 @@ kernel void workerPoetry(device bool* isResult [[buffer(0)]],
     uchar prvKeys[PRIV_THREAD_STEPS * 32u];
     uchar pubKeys[PRIV_THREAD_STEPS * 65u];
     uchar pubKeysED[PRIV_THREAD_STEPS * 32u];
+    uchar overflow_masks[PRIV_THREAD_STEPS];
     ushort batch_start_digits[POETRY_MAX_WORDS];
     ulong lane_seeds[PRIV_THREAD_STEPS];
     for (uint i = 0u; i < POETRY_MAX_WORDS; ++i) batch_start_digits[i] = state.digits[i];
@@ -104,12 +106,17 @@ kernel void workerPoetry(device bool* isResult [[buffer(0)]],
 
     int key_count = 0;
     if (poetry_template->random_mode != 0u) {
+        const ulong thread_candidate_start = ulong(tid) * ulong(PRIV_THREAD_STEPS);
+        if (thread_candidate_start >= stride_or_random_limit) return;
+        const ulong random_candidates_remaining = stride_or_random_limit - thread_candidate_start;
+        const uint random_lane_count = uint(min(random_candidates_remaining, ulong(PRIV_THREAD_STEPS)));
         ulong persistent_state = state.random_state;
-        for (uint lane = 0u; lane < PRIV_THREAD_STEPS; ++lane) {
+        for (uint lane = 0u; lane < random_lane_count; ++lane) {
             lane_seeds[lane] = rng_splitmix64(persistent_state);
             ushort word_ids[POETRY_MAX_WORDS];
             poetry_materialize_random_ids(*poetry_template, lane_seeds[lane], word_ids);
-            poetry_decode_private_key(word_ids, poetry_template->word_count, prvKeys + lane * 32u);
+            overflow_masks[lane] = poetry_decode_private_key(
+                word_ids, poetry_template->word_count, prvKeys + lane * 32u);
             ++key_count;
         }
         state.random_state = persistent_state;
@@ -119,9 +126,10 @@ kernel void workerPoetry(device bool* isResult [[buffer(0)]],
         for (uint lane = 0u; lane < PRIV_THREAD_STEPS; ++lane) {
             ushort word_ids[POETRY_MAX_WORDS];
             poetry_materialize_finite_ids(*poetry_template, digits, word_ids);
-            poetry_decode_private_key(word_ids, poetry_template->word_count, prvKeys + lane * 32u);
+            overflow_masks[lane] = poetry_decode_private_key(
+                word_ids, poetry_template->word_count, prvKeys + lane * 32u);
             ++key_count;
-            if (!poetry_add_stride(digits, poetry_template->wildcard_count, global_stride)) {
+            if (!poetry_add_stride(digits, poetry_template->wildcard_count, stride_or_random_limit)) {
                 state.active = 0u;
                 break;
             }
@@ -178,19 +186,32 @@ kernel void workerPoetry(device bool* isResult [[buffer(0)]],
             }
             if (taproot) TweakTaproot_batch(tap_hash, pubKeys, key_count, precPtr, size_t(precPitch));
             for (uint lane = 0u; lane < uint(key_count); ++lane) {
-                char phrase[POETRY_MAX_PHRASE_BYTES];
-                const ushort phrase_len = poetry_phrase_for_lane(*poetry_template, batch_start_digits,
-                                                                  lane_seeds, lane, global_stride,
-                                                                  dictionary_blob, dictionary_offsets,
-                                                                  dictionary_lengths, phrase);
-                priv_emit_secp_targets_round(isResult, buffResult, phrase, ulong(phrase_len),
-                                             prvKeys, pubKeys, tap_hash, lane, 0u, current_round,
-                                             0u, false, compressed, uncompressed, segwit, p2wsh,
-                                             taproot, ethereum, xpoint, xrp_secp, sui_secp,
-                                             aptos_secp, iota_secp, icp_secp, fil_secp, xtz_secp,
-                                             config, filters, filter_storage, bloom_storage,
-                                             xor_storage, xor_un_storage, xor_uc_storage,
-                                             xor_hc_storage, found);
+                if (TFC_POETRY_HAS_ROUNDS) {
+                    char phrase[POETRY_MAX_PHRASE_BYTES];
+                    const ushort phrase_len = poetry_phrase_for_lane(
+                        *poetry_template, batch_start_digits, lane_seeds, lane, stride_or_random_limit,
+                        dictionary_blob, dictionary_offsets, dictionary_lengths, phrase);
+                    priv_emit_secp_targets_round(
+                        isResult, buffResult, phrase, ulong(phrase_len), prvKeys, pubKeys,
+                        tap_hash, lane, 0u, current_round, 0u, false, compressed, uncompressed,
+                        segwit, p2wsh, taproot, ethereum, xpoint, xrp_secp, sui_secp,
+                        aptos_secp, iota_secp, icp_secp, fil_secp, xtz_secp, config, filters,
+                        filter_storage, bloom_storage, xor_storage, xor_un_storage,
+                        xor_uc_storage, xor_hc_storage, found);
+                }
+                else {
+                    const thread char* deferred_phrase =
+                        reinterpret_cast<const thread char*>(prvKeys + lane * 32u);
+                    const ulong deferred_len = poetry_deferred_result_length(
+                        poetry_template->word_count, overflow_masks[lane]);
+                    priv_emit_secp_targets_round(
+                        isResult, buffResult, deferred_phrase, deferred_len, prvKeys, pubKeys,
+                        tap_hash, lane, 0u, current_round, 0u, false, compressed, uncompressed,
+                        segwit, p2wsh, taproot, ethereum, xpoint, xrp_secp, sui_secp,
+                        aptos_secp, iota_secp, icp_secp, fil_secp, xtz_secp, config, filters,
+                        filter_storage, bloom_storage, xor_storage, xor_un_storage,
+                        xor_uc_storage, xor_hc_storage, found);
+                }
             }
         }
 
@@ -199,20 +220,33 @@ kernel void workerPoetry(device bool* isResult [[buffer(0)]],
                 priv_ed25519_key_to_pub_batch_config(prvKeys, pubKeysED, key_count, config);
             }
             for (uint lane = 0u; lane < uint(key_count); ++lane) {
-                char phrase[POETRY_MAX_PHRASE_BYTES];
-                const ushort phrase_len = poetry_phrase_for_lane(*poetry_template, batch_start_digits,
-                                                                  lane_seeds, lane, global_stride,
-                                                                  dictionary_blob, dictionary_offsets,
-                                                                  dictionary_lengths, phrase);
                 thread uchar* pkey = prvKeys + lane * 32u;
                 thread uchar* publ = ed_common_pub_needed ? (pubKeysED + lane * 32u) : nullptr;
                 const thread uchar* next_key = (lane + 1u < uint(key_count)) ? (pkey + 32u) : nullptr;
-                priv_emit_ed_targets_round(isResult, buffResult, phrase, ulong(phrase_len), pkey,
-                                           next_key, publ, 0u, current_round, 0u, false, solana,
-                                           dot, ton, ton_all, xrp_ed, aptos_ed, sui_ed, iota_ed,
-                                           ada, icp_ed, xtz_ed, substratePaths, config, filters,
-                                           filter_storage, bloom_storage, xor_storage, xor_un_storage,
-                                           xor_uc_storage, xor_hc_storage, found);
+                if (TFC_POETRY_HAS_ROUNDS) {
+                    char phrase[POETRY_MAX_PHRASE_BYTES];
+                    const ushort phrase_len = poetry_phrase_for_lane(
+                        *poetry_template, batch_start_digits, lane_seeds, lane, stride_or_random_limit,
+                        dictionary_blob, dictionary_offsets, dictionary_lengths, phrase);
+                    priv_emit_ed_targets_round(isResult, buffResult, phrase, ulong(phrase_len), pkey,
+                                               next_key, publ, 0u, current_round, 0u, false, solana,
+                                               dot, ton, ton_all, xrp_ed, aptos_ed, sui_ed, iota_ed,
+                                               ada, icp_ed, xtz_ed, substratePaths, config, filters,
+                                               filter_storage, bloom_storage, xor_storage, xor_un_storage,
+                                               xor_uc_storage, xor_hc_storage, found);
+                }
+                else {
+                    const thread char* deferred_phrase =
+                        reinterpret_cast<const thread char*>(prvKeys + lane * 32u);
+                    const ulong deferred_len = poetry_deferred_result_length(
+                        poetry_template->word_count, overflow_masks[lane]);
+                    priv_emit_ed_targets_round(isResult, buffResult, deferred_phrase, deferred_len, pkey,
+                                               next_key, publ, 0u, current_round, 0u, false, solana,
+                                               dot, ton, ton_all, xrp_ed, aptos_ed, sui_ed, iota_ed,
+                                               ada, icp_ed, xtz_ed, substratePaths, config, filters,
+                                               filter_storage, bloom_storage, xor_storage, xor_un_storage,
+                                               xor_uc_storage, xor_hc_storage, found);
+                }
             }
         }
 

@@ -157,12 +157,14 @@ static inline void adadot_store_result_with_found_len(device bool* isResult,
         if (found.foundDerivations2 != nullptr) {
             found.foundDerivations2[idx] = c_path2;
         }
-        if (found.foundStrings != nullptr) {
-            const uint copy_len = (len > ulong(kFoundStringBytes)) ? kFoundStringBytes : uint(len);
-            found_copy_thread_to_device_char(found.foundStrings + ulong(idx) * kFoundStringBytes, toHash, copy_len);
-        }
+        device char* selected_output = found.foundStrings != nullptr
+            ? found.foundStrings + ulong(idx) * kFoundStringBytes
+            : nullptr;
+        const uint selected_len = found_copy_selected_source(selected_output, toHash, len);
         if (found.len != nullptr) {
-            found.len[idx] = uint(stored_len);
+            found.len[idx] = found_is_deferred_poetry_source(len)
+                ? selected_len
+                : uint(stored_len);
         }
     }
     if (found.foundPrvKeys != nullptr) {

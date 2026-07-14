@@ -191,6 +191,7 @@ constexpr size_t kSecpWalkStateBytes = 4096;
 static constexpr NSUInteger kSecpEcmultWindowSizeFunctionConstantIndex = 90;
 static constexpr NSUInteger kSecpWindowsSizeFunctionConstantIndex = 91;
 static constexpr NSUInteger kBrowserVaultProfileFunctionConstantIndex = 92;
+static constexpr NSUInteger kPoetryHasRoundsFunctionConstantIndex = 71;
 static constexpr uint32_t kBrowserVaultDynamicProfile = UINT32_MAX;
 
 struct XorFilterUploadMetadata {
@@ -712,6 +713,36 @@ bool read_launch_value_arg(const MetalLaunchArg* args,
                            size_t count,
                            size_t index,
                            T& out);
+
+struct PoetryFunctionConstants {
+    WorkerFunctionConstants targets;
+    bool hasRounds = false;
+};
+
+PoetryFunctionConstants make_poetry_function_constants(const MetalLaunchArg* args,
+                                                        size_t count) {
+    PoetryFunctionConstants constants{};
+    constants.targets = make_worker_function_constants();
+    uint64_t rounds = 0u;
+    if (read_launch_value_arg(args, count, 12u, rounds)) {
+        constants.hasRounds = rounds != 0u;
+    }
+    return constants;
+}
+
+std::string poetry_function_constants_key(const PoetryFunctionConstants& constants) {
+    return worker_function_constants_key(constants.targets) + ":poetry-rounds:" +
+           (constants.hasRounds ? "1" : "0");
+}
+
+void bind_poetry_function_constants(MTLFunctionConstantValues* values,
+                                    const PoetryFunctionConstants& constants) {
+    bind_worker_function_constants(values, constants.targets);
+    bool hasRounds = constants.hasRounds;
+    [values setConstantValue:&hasRounds
+                        type:MTLDataTypeBool
+                     atIndex:kPoetryHasRoundsFunctionConstantIndex];
+}
 
 struct PrivFileFunctionConstants {
     WorkerFunctionConstants targets;
@@ -2951,6 +2982,13 @@ metalError_t metal_launch_impl(const char* function_name,
         pipelineKey = priv_gen_function_constants_key(privGenConstants);
         constants = [privGenConstants](MTLFunctionConstantValues* values) {
             bind_priv_gen_function_constants(values, privGenConstants);
+        };
+    } else if (name == "workerPoetry") {
+        const PoetryFunctionConstants poetryConstants =
+            make_poetry_function_constants(args, count);
+        pipelineKey = poetry_function_constants_key(poetryConstants);
+        constants = [poetryConstants](MTLFunctionConstantValues* values) {
+            bind_poetry_function_constants(values, poetryConstants);
         };
     } else if (uses_worker_common_function_constants(name)) {
         const WorkerFunctionConstants workerConstants = make_worker_function_constants();

@@ -94,29 +94,37 @@ static uint32_t gpuCoreCountFromRegistry(id<MTLDevice> device) {
     }
 
     uint32_t coreCount = 0u;
+    uint32_t soleAcceleratorCoreCount = 0u;
+    uint32_t acceleratorsWithCoreCount = 0u;
     io_service_t service = IO_OBJECT_NULL;
     while ((service = IOIteratorNext(iterator)) != IO_OBJECT_NULL) {
         uint64_t serviceRegistryId = 0u;
-        if (IORegistryEntryGetRegistryEntryID(service, &serviceRegistryId) == KERN_SUCCESS &&
-            serviceRegistryId == selectedRegistryId) {
-            CFTypeRef value = IORegistryEntryCreateCFProperty(
-                service, CFSTR("gpu-core-count"), kCFAllocatorDefault, 0);
-            if (value != nullptr && CFGetTypeID(value) == CFNumberGetTypeID()) {
-                int64_t count = 0;
-                if (CFNumberGetValue(static_cast<CFNumberRef>(value), kCFNumberSInt64Type, &count) &&
-                    count > 0 && count <= static_cast<int64_t>(std::numeric_limits<uint32_t>::max())) {
-                    coreCount = static_cast<uint32_t>(count);
+        const bool registryIdMatches =
+            IORegistryEntryGetRegistryEntryID(service, &serviceRegistryId) == KERN_SUCCESS &&
+            serviceRegistryId == selectedRegistryId;
+        CFTypeRef value = IORegistryEntryCreateCFProperty(
+            service, CFSTR("gpu-core-count"), kCFAllocatorDefault, 0);
+        if (value != nullptr && CFGetTypeID(value) == CFNumberGetTypeID()) {
+            int64_t count = 0;
+            if (CFNumberGetValue(static_cast<CFNumberRef>(value), kCFNumberSInt64Type, &count) &&
+                count > 0 && count <= static_cast<int64_t>(std::numeric_limits<uint32_t>::max())) {
+                const uint32_t valueCoreCount = static_cast<uint32_t>(count);
+                ++acceleratorsWithCoreCount;
+                soleAcceleratorCoreCount = valueCoreCount;
+                if (registryIdMatches) {
+                    coreCount = valueCoreCount;
                 }
             }
-            if (value != nullptr) {
-                CFRelease(value);
-            }
+        }
+        if (value != nullptr) {
+            CFRelease(value);
         }
         IOObjectRelease(service);
         if (coreCount != 0u) break;
     }
     IOObjectRelease(iterator);
-    return coreCount;
+    if (coreCount != 0u) return coreCount;
+    return acceleratorsWithCoreCount == 1u ? soleAcceleratorCoreCount : 0u;
 }
 
 constexpr std::size_t kBloomSizeBytes = 512ull * 1024ull * 1024ull;

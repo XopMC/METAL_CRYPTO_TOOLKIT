@@ -888,7 +888,8 @@ The resulting key is sent through the target families selected by `-c`. Direct `
 | Mode | Behavior |
 | --- | --- |
 | Finite, default | Enumerates all `1626^N` combinations for `N` wildcards. The rightmost `*` changes fastest. A template without `*` is checked once. The exact combination count is printed before the task. Multiple templates run sequentially, while selected Metal devices divide each task without intentionally overlapping candidate ordinals. |
-| `-random` | Replaces wildcard positions indefinitely with randomly generated dictionary words. It requires exactly one template and at least one `*`; there is no natural completion point. Fixed words never change. |
+| `-random` | Replaces wildcard positions indefinitely with randomly generated dictionary words. Without `-n`, it requires exactly one template and at least one `*`; there is no natural completion point. Fixed words never change. |
+| `-random -n N` | Accepts one or more templates. For each template, exactly `N` random wildcard combinations are generated in total across all selected Metal devices. The program then switches to the next template; after the last template it starts a new numbered cycle from the first. Every template must contain at least one `*`. |
 
 Useful key-processing controls are `-round N` for plus/minus keys around every decoded value and `-em` for secp256k1 endomorphism. For ed25519-oriented checks, `-scalar` treats the decoded bytes as a scalar, `-LE` selects little-endian scalar input together with `-scalar`, and `-shash` treats the decoded bytes as pre-clamp ed25519 hash material.
 
@@ -925,6 +926,18 @@ Infinite random example:
 ./METAL_CRYPTO_TOOLKIT -poetry "* * *" -random \
   -c e -xc ethereum-targets.xor_c -o poetry-found.txt
 ```
+
+Cyclic random batches for several templates:
+
+```bash
+./METAL_CRYPTO_TOOLKIT \
+  -poetry "just * * * * *" \
+  -poetry "love * * * * *" \
+  -random -n 1000000000 \
+  -c e -xc ethereum-targets.xor_c -o poetry-found.txt
+```
+
+Here each template receives exactly one billion candidates per cycle. With several devices, that billion is divided between them; it is not repeated independently on every device.
 
 #### `-der_thread`
 
@@ -2772,7 +2785,8 @@ mkdir -p filters
 | Вариант | Что происходит |
 | --- | --- |
 | Конечный, по умолчанию | Полностью перебирает все `1626^N` сочетаний для `N` звездочек. Быстрее всего меняется крайняя правая `*`. Шаблон без звездочек проверяется один раз. Перед запуском задания печатается точное число сочетаний. Несколько шаблонов выполняются по очереди, а выбранные Metal-устройства делят пространство одного задания без намеренного пересечения номеров кандидатов. |
-| `-random` | Бесконечно подставляет случайные слова словаря только вместо звездочек. Допускается ровно один шаблон, и в нем должна быть хотя бы одна `*`. Фиксированные слова не меняются; естественной точки завершения у такого запуска нет. |
+| `-random` | Бесконечно подставляет случайные слова словаря только вместо звездочек. Без `-n` допускается ровно один шаблон, и в нем должна быть хотя бы одна `*`. Фиксированные слова не меняются; естественной точки завершения у такого запуска нет. |
+| `-random -n N` | Принимает один или несколько шаблонов. Для каждого шаблона программа создает ровно `N` случайных сочетаний звездочек суммарно на всех выбранных Metal-устройствах, затем переходит к следующему шаблону. После последнего шаблона начинается новый пронумерованный цикл с первого. В каждом шаблоне должна быть хотя бы одна `*`. |
 
 `-round N` дополнительно проверяет ключи в обе стороны от каждого декодированного значения, а `-em` включает эндоморфизм secp256k1. Для проверок ed25519 флаг `-scalar` считает декодированные байты скаляром, `-LE` вместе с `-scalar` задает little-endian, а `-shash` считает декодированные байты уже полученным хеш-материалом ed25519 до clamp.
 
@@ -2809,6 +2823,18 @@ phrase:private:currency:payload
 ./METAL_CRYPTO_TOOLKIT -poetry "* * *" -random \
   -c e -xc ethereum-targets.xor_c -o poetry-found.txt
 ```
+
+Циклические случайные пакеты для нескольких шаблонов:
+
+```bash
+./METAL_CRYPTO_TOOLKIT \
+  -poetry "just * * * * *" \
+  -poetry "love * * * * *" \
+  -random -n 1000000000 \
+  -c e -xc ethereum-targets.xor_c -o poetry-found.txt
+```
+
+В этом примере каждый шаблон получает ровно один миллиард кандидатов за цикл. Если выбрано несколько устройств, этот миллиард делится между ними, а не повторяется целиком на каждом устройстве.
 
 #### `-der_thread`
 

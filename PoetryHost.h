@@ -25,6 +25,7 @@ bool poetry_mode_selected();
 bool poetry_validate_cli_surface(int argc, char** argv, std::string& error);
 void poetry_print_help();
 bool poetry_prepare_templates(bool random_mode,
+                              bool random_batch_enabled,
                               std::vector<PoetryPreparedTemplate>& templates,
                               PoetryDictionaryHost& dictionary,
                               std::string& error);

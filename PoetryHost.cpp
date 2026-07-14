@@ -300,7 +300,7 @@ bool poetry_validate_cli_surface(int argc, char** argv, std::string& error)
 		"-mnemonic", "-brain", "-minikey", "-minikeys", "-mini", "-priv", "-old", "-armory", "-root",
 		"-entropy", "-seed", "-hmac", "-bip32", "-hexset", "-hex", "-seq", "-backward",
 		"-both", "-prng", "-prng64", "-recovery", "-wordlist", "-comb", "-mutation",
-		"-gen", "-mode", "-byte", "-shift", "-start", "-end", "-step", "-back", "-n", "-s", "-e",
+		"-gen", "-mode", "-byte", "-shift", "-start", "-end", "-step", "-back", "-s", "-e",
 		"-f", "-d", "-d-dot", "-d-type", "-pass", "-passbrute", "-space", "-rep", "-delete", "-all",
 		"-size", "-sizes", "-pass_thread", "-der_thread",
 		"-profanity", "-xp", "-keystore", "-walletdat", "-browservault",
@@ -349,7 +349,11 @@ void poetry_print_help()
 [!]
 [!] Random mode:
 [!] -random                         Infinite GPU generation of wildcard words.
-[!]                                 Requires exactly one template with at least one '*'.
+[!]                                 Without -n, requires exactly one template with at least one '*'.
+[!] -n N                            With -random, generate exactly N random combinations
+[!]                                 for each template, then switch to the next template.
+[!]                                 After the last template, continue again from the first.
+[!]                                 N is the total across all selected GPUs.
 [!]
 [!] Private-key processing:
 [!] -round N                        Plus/minus rounds around every decoded key.
@@ -370,6 +374,7 @@ void poetry_print_help()
 [!] Examples:
 [!] METAL_CRYPTO_TOOLKIT -poetry "just just *" -c cus -bf btc.blf
 [!] METAL_CRYPTO_TOOLKIT -poetry "* * *" -random -c e -xc eth.xor
+[!] METAL_CRYPTO_TOOLKIT -poetry "just * *" -poetry "love * *" -random -n 1000000000 -c e -xc eth.xor
 [!] METAL_CRYPTO_TOOLKIT -poetry -i templates.txt -device 0-3 -c cus -save
 [!] METAL_CRYPTO_TOOLKIT -poetry < templates.txt
 [!]
@@ -378,6 +383,7 @@ void poetry_print_help()
 
 bool poetry_prepare_templates(
 	bool random_mode,
+	bool random_batch_enabled,
 	std::vector<PoetryPreparedTemplate>& templates,
 	PoetryDictionaryHost& dictionary,
 	std::string& error)
@@ -427,15 +433,17 @@ bool poetry_prepare_templates(
 	}
 
 	if (random_mode) {
-		if (templates.size() != 1U) {
-			error = "-random requires exactly one Poetry template";
+		if (!random_batch_enabled && templates.size() != 1U) {
+			error = "-random with multiple Poetry templates requires -n N";
 			return false;
 		}
-		if (templates.front().device.wildcard_count == 0U) {
-			error = "-random requires at least one '*' in the Poetry template";
-			return false;
+		for (PoetryPreparedTemplate& prepared : templates) {
+			if (prepared.device.wildcard_count == 0U) {
+				error = "-random requires at least one '*' in every Poetry template";
+				return false;
+			}
+			prepared.device.random_mode = 1U;
 		}
-		templates.front().device.random_mode = 1U;
 	}
 	return true;
 }

@@ -1,4 +1,5 @@
 #include "KernelRuntime.h"
+#include "Poetry.h"
 #include "lib/hash/sha256.h"
 #include "lib/hash/ripemd160.h"
 #include "sr25519-donna-32bit/dot.h"
@@ -3400,6 +3401,52 @@ fail:
 	delete[] rounds;
 }
 
+static bool decode_poetry_key_descriptor(const unsigned char* encoded,
+	size_t encoded_len,
+	std::string& phrase) {
+	if (encoded_len != 38u) return false;
+	const unsigned char* private_key = encoded + 6u;
+	const uint32_t word_count = encoded[4];
+	if (word_count < 3u || word_count > POETRY_MAX_WORDS || word_count % 3u != 0u) {
+		return false;
+	}
+
+	const uint32_t group_count = word_count / 3u;
+	const uint32_t overflow_mask = encoded[5];
+	if ((overflow_mask >> group_count) != 0u) return false;
+
+	constexpr uint64_t dictionary_size = POETRY_WORD_COUNT;
+	constexpr uint64_t dictionary_square = dictionary_size * dictionary_size;
+	constexpr uint64_t dictionary_cube = dictionary_square * dictionary_size;
+	const uint32_t key_offset = 32u - group_count * 4u;
+
+	std::string decoded;
+	for (uint32_t group = 0u; group < group_count; ++group) {
+		const unsigned char* block_bytes = private_key + key_offset + group * 4u;
+		const uint32_t block = (static_cast<uint32_t>(block_bytes[0]) << 24u) |
+			(static_cast<uint32_t>(block_bytes[1]) << 16u) |
+			(static_cast<uint32_t>(block_bytes[2]) << 8u) |
+			static_cast<uint32_t>(block_bytes[3]);
+		const uint64_t full_block = static_cast<uint64_t>(block) +
+			(((overflow_mask >> group) & 1u) != 0u ? (uint64_t{1} << 32u) : 0u);
+		if (full_block >= dictionary_cube) return false;
+
+		const uint32_t first = static_cast<uint32_t>(full_block % dictionary_size);
+		const uint32_t second = static_cast<uint32_t>(
+			(first + (full_block / dictionary_size) % dictionary_size) % dictionary_size);
+		const uint32_t third = static_cast<uint32_t>(
+			(second + (full_block / dictionary_square) % dictionary_size) % dictionary_size);
+		const uint32_t ids[3] = { first, second, third };
+		for (uint32_t id : ids) {
+			if (id >= POETRY_WORD_COUNT || wordsOLD[id] == nullptr) return false;
+			if (!decoded.empty()) decoded.push_back(' ');
+			decoded.append(wordsOLD[id]);
+		}
+	}
+	phrase.swap(decoded);
+	return !phrase.empty();
+}
+
 static void SaveResultPoetry_Worker(FILE* file,
 	uint32_t* pFounds,
 	bool save,
@@ -3411,10 +3458,22 @@ static void SaveResultPoetry_Worker(FILE* file,
 	int64_t* rounds,
 	unsigned long long count) {
 	for (uint64_t i = 0; i < count; ++i) {
+		const unsigned char* encoded = reinterpret_cast<const unsigned char*>(foundStrings[i]);
+		const size_t encoded_len = static_cast<size_t>(len_h[i][0]);
+		std::string phrase;
+		if (encoded_len >= 4u && encoded[0] == 0u && encoded[1] == 'P' &&
+			encoded[2] == 'O' && encoded[3] == 'K') {
+			if (!decode_poetry_key_descriptor(encoded, encoded_len, phrase)) {
+				gpu_prefixed_fprintf(stderr, "[!] Invalid Poetry key descriptor [!]\n");
+				continue;
+			}
+		}
+		else {
+			phrase.assign(foundStrings[i], encoded_len);
+		}
 		if (!save_cpu_postcheck_and_count(pFounds, foundHash160, i, coin_type[i])) {
 			continue;
 		}
-		const std::string phrase(foundStrings[i], static_cast<size_t>(len_h[i][0]));
 		const PrivEmitHeads heads = make_priv_emit_heads(
 			phrase + ":",
 			"\n[!] Found: " + phrase + ":");
@@ -6710,4 +6769,3 @@ METAL_HOST void SaveResultArmoryRootGen(FILE* file, uint32_t& Founds, bool save,
 
 
 }
-

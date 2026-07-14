@@ -10802,8 +10802,16 @@ int main(int argc, char** argv)
     }
     if (POETRY_MODE) {
         std::string poetry_error;
+        if (use_n_count && !isRandom) {
+            std::cerr << "[!] Error: -poetry -n requires -random [!]" << std::endl;
+            return 2;
+        }
+        if (use_n_count && n_number == 0U) {
+            std::cerr << "[!] Error: -poetry -n requires N > 0 [!]" << std::endl;
+            return 2;
+        }
         if (!poetry_validate_cli_surface(argc, argv, poetry_error) ||
-            !poetry_prepare_templates(isRandom, g_poetry_templates, g_poetry_dictionary, poetry_error)) {
+            !poetry_prepare_templates(isRandom, use_n_count, g_poetry_templates, g_poetry_dictionary, poetry_error)) {
             std::cerr << "[!] Error: " << poetry_error << " [!]" << std::endl;
             return 2;
         }
@@ -19011,7 +19019,8 @@ bool checkDevice() {
                 }
             }
             else if (POETRY_MODE) {
-                blocksPerSm = 8u;
+                // The shorter lazy kernel benefits from larger batches on M4 Max; M3 Max regresses above 8.
+                blocksPerSm = std::strstr(props.name, "Apple M4 Max") != nullptr ? 16u : 8u;
                 tuneProfile = isRandomInputMode ? "poetry_random" : "poetry_finite";
             }
             else if (IS_PRIV || (IS_MINIKEYS && !IS_MINIKEYS_SEED)) {
