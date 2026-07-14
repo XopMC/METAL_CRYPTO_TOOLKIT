@@ -12,7 +12,8 @@ PROJECTS := \
 	ton_address_to_hex \
 	tron_address_to_hex \
 	xrp_address_to_hex \
-	tezos_address_to_hex
+	tezos_address_to_hex \
+	profanity_basepoint_generator
 
 CLEAN_TARGETS := $(addsuffix .clean,$(PROJECTS))
 

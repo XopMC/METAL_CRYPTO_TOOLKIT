@@ -501,7 +501,7 @@ Rules that matter:
 
 ## Address conversion tools
 
-The `tools/` directory contains 14 small programs that validate printable cryptocurrency addresses or encoded values and derive the binary comparison value required by the selected target branch. They write that value as lowercase hex. They do not search for keys and do not create Bloom or XOR filters. Their only job is to prepare a clean, homogeneous source list for a filter builder.
+The `tools/` directory contains 14 small address converters plus the separate `profanity_basepoint_generator`. The converters validate printable cryptocurrency addresses or encoded values and derive the binary comparison value required by the selected target branch. They write that value as lowercase hex. They do not search for keys and do not create Bloom or XOR filters. Their only job is to prepare a clean, homogeneous source list for a filter builder.
 
 All converters use the same interface:
 
@@ -520,7 +520,7 @@ TOOL -h
 
 The first valid result fixes the byte width of the output file. Any later valid address that decodes to another width is moved to `-invalid.txt`. This prevents a 20-byte target and a 32-byte target from being mixed accidentally.
 
-When built from source, a binary is placed at `tools/<project>/bin/<tool>`. In the release archive, all 14 ready-to-run binaries are directly inside the unpacked `tools/` directory.
+When built from source, a binary is placed at `tools/<project>/bin/<tool>`. In the release archive, the 14 converters and the Profanity basepoint generator are directly inside the unpacked `tools/` directory.
 
 | Tool | Accepted input | Hex result | Compatible Toolkit branch |
 | --- | --- | --- | --- |
@@ -538,6 +538,8 @@ When built from source, a binary is placed at `tools/<project>/bin/<tool>`. In t
 | `tron_address_to_hex` | Tron Base58Check address beginning with `T`, or raw 20-byte hex | Ethereum-compatible account ID, 20 bytes / 40 hex characters | `-c e` |
 | `xrp_address_to_hex` | XRP Classic Base58Check or raw 20-byte hex | 20-byte account ID / 40 hex characters | `-c X` with `-xrp-type 1` or `2` |
 | `tezos_address_to_hex` | Tezos `tz1` or `tz2` Base58Check address | 20-byte key hash / 40 hex characters | `-c Z`; `tz1` uses `-xtz-type 2`, `tz2` uses `1` |
+
+`profanity_basepoint_generator` is not an address converter. It creates the complete fixed-width basepoint source list required by `-profanity -recovery`; its format and workflow are documented separately below.
 
 ### Binary compatibility and result formatting
 
@@ -698,6 +700,43 @@ XorFilter -i tezos-tz1-key-hashes.txt -check
 ./METAL_CRYPTO_TOOLKIT -priv -hex -i private-seeds.txt \
   -c Z -xtz-type 2 -xu tezos-tz1-key-hashes_0.xor_u
 ```
+
+#### `profanity_basepoint_generator` - Profanity recovery basepoints
+
+This is a generator, not an address converter. For every selected 32-bit Profanity seed it recreates the vulnerable MT19937-64 state, calculates the seed's secp256k1 base public point, and writes the first 20 bytes of its canonical affine X coordinate. The output is exactly one 40-character lowercase hex value plus `\n` per seed, in ascending seed order. That is the source format required by the `-profanity -recovery` XOR filters.
+
+The implementation uses a shared 14-bit secp256k1 precompute table tuned for Apple Silicon CPUs, multithreaded scalar multiplication, batch field inversion, bounded ordered output, and 256 MiB flush checkpoints. It does not create an XOR filter itself.
+
+```text
+profanity_basepoint_generator [output.txt] [-s HEX32] [-e HEX32] [-t N] [--resume]
+```
+
+- without an output name it writes `PROFANITY_BASEPOINT.txt`;
+- `-s` and `-e` are inclusive seed32 bounds, defaulting to `00000000..ffffffff`;
+- `-t` selects `1..256` CPU workers and defaults to the Mac's logical processor count;
+- `--resume` derives the next seed from the existing file size. Resume is accepted only when the size is divisible by the fixed 41-byte line length, does not exceed the selected range, and the first/last existing lines match that range;
+- `SIGINT`/`SIGTERM` stops after already assigned blocks are written, leaving a contiguous file that can be resumed.
+
+Build and make a small verification range first:
+
+```bash
+make -C tools/profanity_basepoint_generator
+tools/profanity_basepoint_generator/bin/profanity_basepoint_generator \
+  profanity-test.txt -s 0 -e ffff -t 8
+```
+
+Generate the complete source on a local SSD with at least 200 GB free:
+
+```bash
+tools/profanity_basepoint_generator/bin/profanity_basepoint_generator \
+  PROFANITY_BASEPOINT.txt -t "$(sysctl -n hw.logicalcpu)"
+
+# Continue the same range after a controlled interruption:
+tools/profanity_basepoint_generator/bin/profanity_basepoint_generator \
+  PROFANITY_BASEPOINT.txt -t "$(sysctl -n hw.logicalcpu)" --resume
+```
+
+The full `2^32` source is exactly `176,093,659,136` bytes: 176.09 GB in decimal units or 164 GiB. Generate it on fast local storage and move it afterward; direct output to SMB/network storage can make the writer the bottleneck. See the dedicated `-profanity -recovery` section for filter construction and memory requirements.
 
 For `multicoin_base58_bech32_address_to_hex`, the resulting P2WSH and Taproot files can be passed directly to XorFilter; no additional OpenSSL conversion is required. A raw 32-byte line is preserved intentionally. If it is a full Taproot output key rather than an already prepared matcher, provide the Bech32m address or calculate the required 20-byte RIPEMD-160 before building the filter.
 
@@ -1217,9 +1256,46 @@ This is a deliberately small bounded demonstration. A production search domain m
 
 #### `-profanity -recovery`
 
-**Use it for:** recovering a key from a known public key produced by the vulnerable Profanity process.
+**Use it for:** recovering the Profanity seed, lane/offset, and private key from a known secp256k1 public key produced by the vulnerable Profanity process.
 
-`-target` must contain a 33-byte compressed or 65-byte uncompressed public key. The recovery path requires at least one compatible GPU XOR basepoint filter. In file mode, `-i` accepts:
+This mode cannot work from an address, HASH160, or Ethereum account alone. `-target`/`-hash` must contain the complete 33-byte compressed or 65-byte uncompressed public key. The recovery process is:
+
+1. The GPU reverse-walks the known public point `Q` through candidate Profanity rounds and lanes.
+2. For each candidate basepoint it takes the first 20 bytes of the canonical 32-byte affine-X coordinate.
+3. A mandatory GPU XOR filter checks whether that value belongs to a Profanity seed basepoint.
+4. Filter hits are resolved through the selected seed32 range and then verified against the complete public key. Probabilistic filter hits therefore cannot become results without exact curve verification.
+
+The filter is not bundled because its source contains one item for every Profanity seed32. With the default `-s 0 -e ffffffff`, it must cover all `4,294,967,296` basepoints. A partial source/filter is valid only when `-s` and `-e` deliberately restrict recovery to the identical seed range. Missing a seed from the filter makes keys from that seed unrecoverable.
+
+Use `tools/profanity_basepoint_generator` to create `PROFANITY_BASEPOINT.txt`. Each line is 40 lowercase hex characters plus `\n`, so the complete text file is exactly `176,093,659,136` bytes (176.09 GB / 164 GiB). Users must build the required Binary Fuse filter themselves with [XopMC/XorFilter](https://github.com/XopMC/XorFilter).
+
+Reference sizes measured for the complete `2^32` source and current filter format are:
+
+| Source/filter | Toolkit switch | Exact bytes | Decimal size | Binary size |
+| --- | --- | ---: | ---: | ---: |
+| `PROFANITY_BASEPOINT.txt` | not loaded directly | `176,093,659,136` | 176.09 GB | 164.000 GiB |
+| `.xor_u` | `-xu` | `36,939,235,376` | 36.94 GB | 34.402 GiB |
+| `.xor_c` | `-xc` | `18,471,714,864` | 18.47 GB | 17.203 GiB |
+| `.xor_uc` | `-xuc` | `9,235,857,456` | 9.24 GB | 8.602 GiB |
+| `.xor_hc` | `-xh` | `4,617,928,752` | 4.62 GB | 4.301 GiB |
+
+These are output sizes, not the RAM required while XorFilter builds them. `-mini` is the practical low-memory builder preset and produces several numbered shards for this `2^32` dataset. Put only one filter format in a directory and pass that directory to Toolkit; all matching shards are loaded. `-max` can produce one large filter file but the current XorFilter documentation warns that large builds can require more than 256 GB RAM.
+
+The compressed `.xor_c` profile is the normal balance between size and false-positive work. `.xor_uc` and especially `.xor_hc` save unified memory but send more candidates to the expensive seed-resolution stage. `.xor_u` uses about 34.4 GiB by itself. `-xx` may additionally load the corresponding `.xor_u` into CPU-visible memory to reject compressed-filter false positives before seed resolution; it does not replace the mandatory GPU filter and adds its full memory cost to the selected GPU filter in Apple Silicon unified memory.
+
+Example filter creation with memory-bounded shards:
+
+```bash
+mkdir -p profanity-xc
+XorFilter -i PROFANITY_BASEPOINT.txt -compress -mini -check -o profanity-xc
+
+./METAL_CRYPTO_TOOLKIT -profanity -recovery \
+  -target 02... -xc profanity-xc -save -o profanity-found.txt
+```
+
+To build a different format, replace `-compress` with `-ultra` or `-hyper`, or omit the compression flag for `.xor_u`; then use `-xuc`, `-xh`, or `-xu` respectively. Do not mix formats or an incomplete set of shards in the same directory.
+
+In file mode, `-i` accepts:
 
 ```text
 <public_key_hex>
@@ -1227,15 +1303,15 @@ This is a deliberately small bounded demonstration. A production search domain m
 <public_key_hex>:<offset_hex>:found
 ```
 
-The third form marks a previously solved line for restartable batches. `-n` is the per-file round/window size (default 16384); single-target `-offset` defaults to 0.
+The third form marks a previously solved line for restartable batches. `-n` is the per-file round/window size (default 16384); single-target `-offset` defaults to 0. `-s` and `-e` select the seed-resolution range and default to the full 32-bit domain.
 
 ```bash
 ./METAL_CRYPTO_TOOLKIT -profanity -recovery \
   -target 0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798 \
-  -xu profanity_basepoints.xor_u -c c -save
+  -xc profanity-xc -save
 ```
 
-The public key is the well-known secp256k1 generator point and is used only to demonstrate the required 33-byte format. The XOR file must be a real Profanity recovery basepoint filter built for the selected search domain.
+The public key is the well-known secp256k1 generator point and is used only to demonstrate the required 33-byte format. The filter directory must contain a complete, verified Profanity recovery filter for the selected seed domain.
 
 #### `-xp PROFILE`
 
@@ -1901,7 +1977,8 @@ xattr -d com.apple.quarantine METAL_CRYPTO_TOOLKIT
 | `lib/`, `host_secp/`, `sr25519-donna-32bit/` | hashing, encoding, curve, and host verification code |
 | `tools/common/` | shared strict decoders, checksums, hashes, ordered reader, and CLI used by all converters |
 | `tools/<converter>/` | one standalone address converter with its own `Source.cpp` and `Makefile` |
-| `tools/Makefile` | build or clean all 14 address converters |
+| `tools/profanity_basepoint_generator/` | optimized macOS generator for the complete Profanity recovery basepoint source list |
+| `tools/Makefile` | build or clean all 14 address converters and the Profanity generator |
 | `Makefile` | standalone macOS build, embedded Metal-library link, and separate `tools` targets |
 
 ---
@@ -2385,7 +2462,7 @@ Metal-кернел -> компактный фильтр -> редкое совп
 
 ## Преобразование адресов в hex
 
-В папке `tools/` находятся 14 небольших программ. Они проверяют обычные адреса криптовалют или закодированные строки и формируют из них то двоичное значение, которое сравнивает выбранная ветка цели. Это значение записывается в виде строчного hex. Конвертеры не перебирают ключи и не создают Bloom- или XOR-фильтры. Их единственная задача — подготовить чистый однородный список для программы, которая строит фильтр.
+В папке `tools/` находятся 14 небольших конвертеров адресов и отдельная программа `profanity_basepoint_generator`. Конвертеры проверяют обычные адреса криптовалют или закодированные строки и формируют из них то двоичное значение, которое сравнивает выбранная ветка цели. Это значение записывается в виде строчного hex. Конвертеры не перебирают ключи и не создают Bloom- или XOR-фильтры. Их единственная задача — подготовить чистый однородный список для программы, которая строит фильтр.
 
 У всех программ одинаковый интерфейс:
 
@@ -2404,7 +2481,7 @@ TOOL -h
 
 Первый правильный результат задает длину всех значений в текущем выходном файле. Если следующий адрес преобразуется в другое число байтов, он попадет в `-invalid.txt`. Такая проверка не дает случайно смешать, например, 20-байтовые и 32-байтовые цели.
 
-После сборки из исходников исполняемый файл находится по пути `tools/<проект>/bin/<программа>`. В готовом архиве выпуска все 14 программ лежат прямо в распакованной папке `tools/`.
+После сборки из исходников исполняемый файл находится по пути `tools/<проект>/bin/<программа>`. В готовом архиве выпуска 14 конвертеров и генератор базовых точек Profanity лежат прямо в распакованной папке `tools/`.
 
 | Программа | Что можно подать на вход | Что записывается в hex | Совместимая ветка Toolkit |
 | --- | --- | --- | --- |
@@ -2422,6 +2499,8 @@ TOOL -h
 | `tron_address_to_hex` | адрес Tron Base58Check с буквы `T` либо готовый 20-байтовый hex | совместимый с Ethereum account ID, 20 байтов / 40 hex-символов | `-c e` |
 | `xrp_address_to_hex` | XRP Classic Base58Check либо готовый 20-байтовый hex | account ID 20 байтов / 40 hex-символов | `-c X` с `-xrp-type 1` или `2` |
 | `tezos_address_to_hex` | адрес Tezos `tz1` или `tz2` с Base58Check | key hash 20 байтов / 40 hex-символов | `-c Z`; для `tz1` нужен `-xtz-type 2`, для `tz2` — `1` |
+
+`profanity_basepoint_generator` не является конвертером адресов. Он создает полный список базовых точек фиксированной длины, обязательный для `-profanity -recovery`; формат и порядок работы описаны ниже отдельно.
 
 ### Совместимость двоичного значения и формат результата
 
@@ -2582,6 +2661,43 @@ XorFilter -i tezos-tz1-key-hashes.txt -check
 ./METAL_CRYPTO_TOOLKIT -priv -hex -i private-seeds.txt \
   -c Z -xtz-type 2 -xu tezos-tz1-key-hashes_0.xor_u
 ```
+
+#### `profanity_basepoint_generator` - базовые точки Profanity recovery
+
+Это генератор, а не конвертер адресов. Для каждого выбранного 32-битного seed Profanity он повторяет уязвимое состояние MT19937-64, вычисляет базовую открытую точку secp256k1 и записывает первые 20 байтов ее канонической affine-X координаты. На каждый seed получается ровно 40 строчных hex-символов и `\n`; строки идут по возрастанию seed. Именно такой исходный список нужен для XOR-фильтров режима `-profanity -recovery`.
+
+Программа использует общую 14-битную таблицу secp256k1, подобранную для процессоров Apple Silicon, многопоточное умножение, пакетную инверсию поля, ограниченную очередь упорядоченной записи и сброс данных каждые 256 MiB. Сам XOR-фильтр она не создает.
+
+```text
+profanity_basepoint_generator [output.txt] [-s HEX32] [-e HEX32] [-t N] [--resume]
+```
+
+- без имени файла создается `PROFANITY_BASEPOINT.txt`;
+- `-s` и `-e` задают включительные границы seed32; по умолчанию используется весь диапазон `00000000..ffffffff`;
+- `-t` задает `1..256` потоков CPU; по умолчанию берется число логических процессоров Mac;
+- `--resume` вычисляет следующий seed по размеру уже записанного файла. Продолжение разрешено только при размере, кратном фиксированным 41 байтам на строку, если файл не длиннее выбранного диапазона, а первая и последняя записанные строки соответствуют этому диапазону;
+- при `SIGINT`/`SIGTERM` программа дописывает уже взятые блоки и оставляет непрерывный файл, который можно продолжить.
+
+Сначала соберите программу и проверьте небольшой диапазон:
+
+```bash
+make -C tools/profanity_basepoint_generator
+tools/profanity_basepoint_generator/bin/profanity_basepoint_generator \
+  profanity-test.txt -s 0 -e ffff -t 8
+```
+
+Полный список лучше создавать на локальном SSD, где свободно не менее 200 GB:
+
+```bash
+tools/profanity_basepoint_generator/bin/profanity_basepoint_generator \
+  PROFANITY_BASEPOINT.txt -t "$(sysctl -n hw.logicalcpu)"
+
+# Продолжение того же диапазона после штатной остановки:
+tools/profanity_basepoint_generator/bin/profanity_basepoint_generator \
+  PROFANITY_BASEPOINT.txt -t "$(sysctl -n hw.logicalcpu)" --resume
+```
+
+Полный исходник для `2^32` seed имеет точный размер `176 093 659 136` байт: 176,09 GB в десятичной записи или 164 GiB. Создавайте его на быстром локальном диске и переносите после завершения: при прямой записи на SMB или сетевой диск ограничением может стать сеть. Создание фильтров и требования к памяти подробно описаны в разделе `-profanity -recovery`.
 
 Результаты P2WSH и Taproot из `multicoin_base58_bech32_address_to_hex` можно сразу передавать в XorFilter: дополнительная обработка через OpenSSL не нужна. Строка raw hex на 32 байта сохраняется полностью. Если это полный выходной ключ Taproot, а не заранее подготовленное значение сравнения, передайте адрес Bech32m либо самостоятельно рассчитайте требуемый 20-байтовый RIPEMD-160 перед созданием фильтра.
 
@@ -3116,9 +3232,44 @@ Seq/random, PRNG, числовые подрежимы priv, `-pb`, `-last`, `-si
 
 #### `-profanity -recovery`
 
-**Когда использовать:** известен открытый ключ, созданный уязвимым Profanity, и требуется восстановить связанное состояние и приват.
+**Когда использовать:** известен открытый ключ secp256k1, созданный уязвимым Profanity, и нужно восстановить seed Profanity, lane/offset и приватный ключ.
 
-`-target` должен содержать сжатый открытый ключ длиной 33 байта или несжатый длиной 65 байт. Нужен хотя бы один совместимый XOR-фильтр базовых точек на GPU: `-xc`, `-xu`, `-xuc` или `-xh`; Bloom здесь не подходит. `-xx` можно использовать для дополнительной проверки.
+Адреса, HASH160 или одного Ethereum account ID для этого режима недостаточно. В `-target`/`-hash` обязательно передается полный сжатый открытый ключ длиной 33 байта либо несжатый ключ длиной 65 байтов. Работа идет в четыре этапа:
+
+1. GPU выполняет обратный проход от известной открытой точки `Q` по возможным раундам и lane Profanity.
+2. Для каждой возможной базовой точки берутся первые 20 байтов канонической 32-байтовой affine-X координаты.
+3. Обязательный XOR-фильтр на GPU проверяет, относится ли это значение к базовой точке какого-либо seed Profanity.
+4. Совпадения фильтра проверяются в выбранном диапазоне seed32, после чего программа сравнивает полный открытый ключ. Поэтому ложное совпадение вероятностного фильтра не может стать готовым результатом без точной проверки кривой.
+
+Готового фильтра в выпуске нет: его исходник содержит одну запись для каждого seed32 Profanity. При стандартных `-s 0 -e ffffffff` фильтр обязан покрывать все `4 294 967 296` базовых точек. Частичный список допустим только тогда, когда `-s` и `-e` намеренно ограничивают восстановление точно тем же диапазоном. Если нужного seed нет в фильтре, соответствующий ключ найден не будет.
+
+Исходный файл `PROFANITY_BASEPOINT.txt` создает программа `tools/profanity_basepoint_generator`. В каждой строке находится 40 строчных hex-символов и `\n`, поэтому полный текстовый файл имеет точный размер `176 093 659 136` байт (176,09 GB или 164 GiB). Сам Binary Fuse-фильтр пользователь создает отдельно через [XopMC/XorFilter](https://github.com/XopMC/XorFilter).
+
+Фактические размеры файлов для полного диапазона `2^32` и текущего формата фильтров:
+
+| Исходник/фильтр | Параметр Toolkit | Точный размер, байт | Десятичный размер | Двоичный размер |
+| --- | --- | ---: | ---: | ---: |
+| `PROFANITY_BASEPOINT.txt` | напрямую не загружается | `176 093 659 136` | 176,09 GB | 164,000 GiB |
+| `.xor_u` | `-xu` | `36 939 235 376` | 36,94 GB | 34,402 GiB |
+| `.xor_c` | `-xc` | `18 471 714 864` | 18,47 GB | 17,203 GiB |
+| `.xor_uc` | `-xuc` | `9 235 857 456` | 9,24 GB | 8,602 GiB |
+| `.xor_hc` | `-xh` | `4 617 928 752` | 4,62 GB | 4,301 GiB |
+
+Это размеры готовых файлов, а не объем ОЗУ во время их построения. Для обычной машины практичнее preset `-mini`: он ограничивает пиковую память, но разделит набор `2^32` на несколько пронумерованных фильтров. Сложите файлы только одного формата в отдельную папку и передайте папку Toolkit — программа загрузит все подходящие части. `-max` позволяет получить один крупный фильтр, но документация текущего XorFilter предупреждает, что большая сборка может потребовать более 256 GB ОЗУ.
+
+Обычный выбор — `.xor_c`: он заметно меньше исходного набора и дает мало ложных совпадений. `.xor_uc` и особенно `.xor_hc` экономят общую память Apple Silicon, но чаще запускают тяжелую проверку seed. Один `.xor_u` занимает около 34,4 GiB. Параметр `-xx` может дополнительно загрузить соответствующий `.xor_u` для проверки совпадений от сжатого фильтра до этапа seed resolve. Он не заменяет обязательный фильтр на GPU и в общей памяти Apple Silicon добавляет полный размер `.xor_u` к уже загруженному фильтру.
+
+Пример создания сжатого фильтра с ограниченным потреблением памяти:
+
+```bash
+mkdir -p profanity-xc
+XorFilter -i PROFANITY_BASEPOINT.txt -compress -mini -check -o profanity-xc
+
+./METAL_CRYPTO_TOOLKIT -profanity -recovery \
+  -target 02... -xc profanity-xc -save -o profanity-found.txt
+```
+
+Для другого формата замените `-compress` на `-ultra` или `-hyper`, либо не указывайте сжатие для `.xor_u`; в Toolkit им соответствуют `-xuc`, `-xh` и `-xu`. Не смешивайте разные форматы и неполный набор частей в одной папке.
 
 Файл `-i` понимает три вида строк:
 
@@ -3128,15 +3279,15 @@ Seq/random, PRNG, числовые подрежимы priv, `-pb`, `-last`, `-si
 <public_key_hex>:<offset_hex>:found
 ```
 
-Последняя форма помечает уже решенную строку при продолжении пакетной работы. В файловом режиме окно `-n` по умолчанию равно 16384. Для одной цели `-offset` по умолчанию равен 0, а `-n` не используется.
+Последняя форма помечает уже решенную строку при продолжении пакетной работы. В файловом режиме окно `-n` по умолчанию равно 16384. Для одной цели `-offset` по умолчанию равен 0, а `-n` не используется. Параметры `-s` и `-e` задают диапазон проверки seed и по умолчанию охватывают все 32 бита.
 
 ```bash
 ./METAL_CRYPTO_TOOLKIT -profanity -recovery \
   -target 0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798 \
-  -xu profanity_basepoints.xor_u -c c -save
+  -xc profanity-xc -save
 ```
 
-Здесь указан общеизвестный открытый ключ базовой точки secp256k1: он лишь показывает требуемую длину 33 байта. Файл XOR должен быть настоящим фильтром базовых точек Profanity для выбранной области восстановления.
+Здесь указан общеизвестный открытый ключ базовой точки secp256k1: он лишь показывает требуемую длину 33 байта. В папке фильтра должен находиться полный проверенный набор базовых точек Profanity для выбранного диапазона seed.
 
 #### `-xp PROFILE`
 
@@ -3792,5 +3943,6 @@ xattr -d com.apple.quarantine METAL_CRYPTO_TOOLKIT
 | `lib/`, `host_secp/`, `sr25519-donna-32bit/` | хеши, кодирование, кривые и проверка на CPU |
 | `tools/common/` | общие строгие декодеры, checksum, хеши, упорядоченное чтение и командная строка конвертеров |
 | `tools/<конвертер>/` | отдельная программа преобразования адресов со своими `Source.cpp` и `Makefile` |
-| `tools/Makefile` | сборка и очистка всех 14 конвертеров |
+| `tools/profanity_basepoint_generator/` | оптимизированный генератор полного списка базовых точек Profanity для macOS |
+| `tools/Makefile` | сборка и очистка 14 конвертеров и генератора Profanity |
 | `Makefile` | самостоятельная сборка для macOS, встраивание библиотеки Metal и отдельные цели `tools` |
