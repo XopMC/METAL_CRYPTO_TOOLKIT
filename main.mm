@@ -34572,7 +34572,7 @@ Error:
 
 //Mnemonic Modes
 
-static bool mnemonic_has_one_seekable_input_line(std::istream& stream)
+static bool mnemonic_should_auto_pass_thread(std::istream& stream)
 {
     const std::ios::iostate initial_state = stream.rdstate();
     if (initial_state != std::ios::goodbit) return false;
@@ -34583,16 +34583,21 @@ static bool mnemonic_has_one_seekable_input_line(std::istream& stream)
         return false;
     }
 
-    std::string first;
-    std::string second;
-    const bool has_first = static_cast<bool>(std::getline(stream, first));
-    const bool has_second = static_cast<bool>(std::getline(stream, second));
+    const size_t cached_password_count = passwords_files.empty() ? passwords_list.size() : 0u;
+    const size_t scan_limit = cached_password_count > 2u ? cached_password_count : 2u;
+    size_t input_line_count = 0u;
+    std::string line;
+    while (input_line_count < scan_limit && std::getline(stream, line)) {
+        ++input_line_count;
+    }
+    const bool reached_eof = stream.eof();
 
     stream.clear();
     stream.seekg(initial_position);
     const bool restored = static_cast<bool>(stream);
     stream.clear(initial_state);
-    return restored && has_first && !has_second;
+    return restored && reached_eof && input_line_count > 0u &&
+        (input_line_count == 1u || input_line_count < cached_password_count);
 }
 
 metalError_t processMetal2(std::istream& stream)
@@ -34600,7 +34605,7 @@ metalError_t processMetal2(std::istream& stream)
     if (pass_thread_mode) return processMetal2PassThread(stream);
     if (der_thread_mode)  return processMetalDerThread(2, stream);
     if (!FULL && &stream != &std::cin && pass_set && !pass_brute &&
-        !g_crypted_input_decode_enabled && mnemonic_has_one_seekable_input_line(stream)) {
+        !g_crypted_input_decode_enabled && mnemonic_should_auto_pass_thread(stream)) {
         return processMetal2PassThread(stream);
     }
     if (is_multi_gpu_active() && !g_disable_multi_gpu_dispatch) {
