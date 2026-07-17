@@ -34580,7 +34580,7 @@ Error:
 
 static bool entropy_should_auto_pass_thread(std::istream& stream)
 {
-    constexpr size_t minimum_cartesian_candidates = 256u;
+    constexpr size_t minimum_cartesian_candidates = 128u;
     const size_t cached_password_count = passwords_files.empty() ? passwords_list.size() : 0u;
     if (cached_password_count < 2u) return false;
 
