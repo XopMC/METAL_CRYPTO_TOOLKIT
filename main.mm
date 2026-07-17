@@ -34572,10 +34572,37 @@ Error:
 
 //Mnemonic Modes
 
+static bool mnemonic_has_one_seekable_input_line(std::istream& stream)
+{
+    const std::ios::iostate initial_state = stream.rdstate();
+    if (initial_state != std::ios::goodbit) return false;
+
+    const std::istream::pos_type initial_position = stream.tellg();
+    if (initial_position == std::istream::pos_type(-1)) {
+        stream.clear(initial_state);
+        return false;
+    }
+
+    std::string first;
+    std::string second;
+    const bool has_first = static_cast<bool>(std::getline(stream, first));
+    const bool has_second = static_cast<bool>(std::getline(stream, second));
+
+    stream.clear();
+    stream.seekg(initial_position);
+    const bool restored = static_cast<bool>(stream);
+    stream.clear(initial_state);
+    return restored && has_first && !has_second;
+}
+
 metalError_t processMetal2(std::istream& stream)
 {
     if (pass_thread_mode) return processMetal2PassThread(stream);
     if (der_thread_mode)  return processMetalDerThread(2, stream);
+    if (!FULL && &stream != &std::cin && pass_set && !pass_brute &&
+        !g_crypted_input_decode_enabled && mnemonic_has_one_seekable_input_line(stream)) {
+        return processMetal2PassThread(stream);
+    }
     if (is_multi_gpu_active() && !g_disable_multi_gpu_dispatch) {
         return dispatch_stream_mode_multi_gpu(__func__, stream, [](std::istream& shared_stream) -> metalError_t {
             return processMetal2(shared_stream);
