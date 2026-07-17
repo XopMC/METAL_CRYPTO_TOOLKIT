@@ -32179,10 +32179,16 @@ DTGDone:
 
 //Entropy modes
 
+static bool entropy_should_auto_pass_thread(std::istream& stream);
+
 metalError_t processMetalEntropy(std::istream& stream)
 {
     if (pass_thread_mode) return processMetalEntropyPassThread(stream);
     if (der_thread_mode)  return processMetalDerThread(3, stream);
+    if (!FULL && &stream != &std::cin && pass_set && !pass_brute &&
+        !g_crypted_input_decode_enabled && entropy_should_auto_pass_thread(stream)) {
+        return processMetalEntropyPassThread(stream);
+    }
     if (is_multi_gpu_active() && !g_disable_multi_gpu_dispatch) {
         return dispatch_stream_mode_multi_gpu(__func__, stream, [](std::istream& shared_stream) -> metalError_t {
             return processMetalEntropy(shared_stream);
@@ -34571,6 +34577,39 @@ Error:
 }
 
 //Mnemonic Modes
+
+static bool entropy_should_auto_pass_thread(std::istream& stream)
+{
+    constexpr size_t minimum_cartesian_candidates = 256u;
+    const size_t cached_password_count = passwords_files.empty() ? passwords_list.size() : 0u;
+    if (cached_password_count < 2u) return false;
+
+    const std::ios::iostate initial_state = stream.rdstate();
+    if (initial_state != std::ios::goodbit) return false;
+
+    const std::istream::pos_type initial_position = stream.tellg();
+    if (initial_position == std::istream::pos_type(-1)) {
+        stream.clear(initial_state);
+        return false;
+    }
+
+    size_t input_line_count = 0u;
+    std::string line;
+    while (input_line_count < cached_password_count && std::getline(stream, line)) {
+        ++input_line_count;
+    }
+    const bool reached_eof = stream.eof();
+
+    stream.clear();
+    stream.seekg(initial_position);
+    const bool restored = static_cast<bool>(stream);
+    stream.clear(initial_state);
+
+    const size_t minimum_input_lines =
+        (minimum_cartesian_candidates + cached_password_count - 1u) / cached_password_count;
+    return restored && reached_eof && input_line_count < cached_password_count &&
+        input_line_count >= minimum_input_lines;
+}
 
 static bool mnemonic_should_auto_pass_thread(std::istream& stream)
 {
