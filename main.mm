@@ -31486,6 +31486,124 @@ EPT2Done:
     return st;
 }
 
+// Flatten the seekable entropy/passphrase Cartesian product used by the
+// automatic route. Explicit pass_thread and multi-GPU dispatch keep their
+// established per-entropy path and serve as regression controls.
+static metalError_t processMetalEntropyPassThreadCartesian(std::istream& stream)
+{
+    if (is_multi_gpu_active() && !g_disable_multi_gpu_dispatch) {
+        return processMetalEntropyPassThread(stream);
+    }
+
+    ensure_pt_pass_reader();
+    const uint32_t batch_sz = BLOCK_NUMBER * BLOCK_THREADS;
+    const std::istream::pos_type initial_position = stream.tellg();
+    std::vector<char> packed_entropies;
+    std::vector<uint32_t> entropy_lengths;
+    std::string entropy;
+    while (read_trimmed_line(stream, entropy, 512)) {
+        STATUS = entropy;
+        const size_t offset = packed_entropies.size();
+        packed_entropies.resize(offset + 512u, 0);
+        if (!entropy.empty()) {
+            memcpy(packed_entropies.data() + offset, entropy.data(), entropy.size());
+        }
+        entropy_lengths.push_back((uint32_t)entropy.size());
+    }
+    if (entropy_lengths.empty()) {
+        return metalSuccess;
+    }
+    if (entropy_lengths.size() > batch_sz) {
+        stream.clear();
+        stream.seekg(initial_position);
+        return processMetalEntropyPassThread(stream);
+    }
+
+    const uint32_t entropy_count = (uint32_t)entropy_lengths.size();
+    const uint32_t max_pass_batch = std::max<uint32_t>(1u, batch_sz / entropy_count);
+    const uint32_t iteration_size = (uint32_t)Iterations.size();
+    const uint32_t sizes_size = (uint32_t)Sizes.size();
+    char* dev_entropies = nullptr;
+    uint32_t* dev_entropy_lengths = nullptr;
+    char* dev_pass_data = nullptr;
+    uint8_t* dev_pass_lens = nullptr;
+    bool* buffIsResult = nullptr;
+    bool* buffDeviceResult = nullptr;
+    PtGpuDeviceState state;
+
+    metalError_t st = pt_prepare_device_state(state, true);
+    if (st == metalSuccess) {
+        st = acquire_shared_result_buffers(batch_sz, &buffIsResult, &buffDeviceResult);
+    }
+    if (st == metalSuccess) {
+        st = copy_to_device_grow((void**)&dev_entropies, packed_entropies.data(),
+                                 packed_entropies.size());
+    }
+    if (st == metalSuccess) {
+        st = copy_to_device_grow((void**)&dev_entropy_lengths, entropy_lengths.data(),
+                                 entropy_lengths.size() * sizeof(uint32_t));
+    }
+
+    if (st == metalSuccess) {
+        g_pt_pass_reader.rewind();
+        PtPassBuf pass_batch;
+        bool any_dispatched = false;
+        while (g_pt_pass_reader.read_batch(pass_batch, max_pass_batch)) {
+            st = copy_to_device_grow((void**)&dev_pass_data, pass_batch.data.data(),
+                                     pass_batch.data.empty() ? 1u : pass_batch.data.size());
+            if (st != metalSuccess) break;
+            st = copy_to_device_grow((void**)&dev_pass_lens, pass_batch.lens.data(),
+                                     pass_batch.lens.empty() ? 1u : pass_batch.lens.size());
+            if (st != metalSuccess) break;
+
+            st = metalDeviceSynchronize();
+            if (st != metalSuccess) break;
+            if (read_result_flag_host(buffIsResult)) {
+                clear_result_flag_host(buffIsResult);
+                SaveResult(OUT_FILE, Founds, save, Derivations_list);
+            }
+            st = metalDeviceSynchronize();
+            if (st != metalSuccess) break;
+
+            const uint32_t pair_count = entropy_count * pass_batch.count;
+            st = metal_launch("workerPassThreadEntropyBatch", BLOCK_NUMBER, BLOCK_THREADS,
+                              buffIsResult, buffDeviceResult, _dev_precomp, pitch,
+                              (const char*)dev_entropies, (const uint32_t*)dev_entropy_lengths,
+                              entropy_count, state.derivation_list, state.der_index,
+                              derIndex_size, 0, (const char*)dev_pass_data,
+                              (const uint8_t*)dev_pass_lens, pass_batch.count,
+                              use_custom_size, state.dev_size, sizes_size, ENTROPY_MODE,
+                              state.dev_iter, iteration_size, Rounds, dub_mnem);
+            if (st != metalSuccess) break;
+            st = metalGetLastError();
+            if (st != metalSuccess) break;
+            counterTotal += (uint64_t)pair_count * iteration_size * sizes_size;
+            any_dispatched = true;
+        }
+        if (st == metalSuccess && !any_dispatched) {
+            st = metalErrorInvalidValue;
+        }
+    }
+
+    if (st == metalSuccess) {
+        st = metalDeviceSynchronize();
+        if (st == metalSuccess && read_result_flag_host(buffIsResult)) {
+            clear_result_flag_host(buffIsResult);
+            SaveResult(OUT_FILE, Founds, save, Derivations_list);
+        }
+    }
+    if (st != metalSuccess) {
+        fprintf(stderr, "processMetalEntropyPassThreadCartesian error: %s\n",
+                metalGetErrorString(st));
+    }
+    if (dev_entropies) metalFree(dev_entropies);
+    if (dev_entropy_lengths) metalFree(dev_entropy_lengths);
+    if (dev_pass_data) metalFree(dev_pass_data);
+    if (dev_pass_lens) metalFree(dev_pass_lens);
+    pt_release_device_state(state);
+    return st;
+}
+
 // ??? der_thread support ??????????????????????????????????????????????????????
 // One input per round: derive master key on 1 GPU thread (workerDerThread_mkd),
 // then distribute ALL derivation paths across GPU threads (workerDerThread).
@@ -32187,7 +32305,7 @@ metalError_t processMetalEntropy(std::istream& stream)
     if (der_thread_mode)  return processMetalDerThread(3, stream);
     if (!FULL && &stream != &std::cin && pass_set && !pass_brute &&
         !g_crypted_input_decode_enabled && entropy_should_auto_pass_thread(stream)) {
-        return processMetalEntropyPassThread(stream);
+        return processMetalEntropyPassThreadCartesian(stream);
     }
     if (is_multi_gpu_active() && !g_disable_multi_gpu_dispatch) {
         return dispatch_stream_mode_multi_gpu(__func__, stream, [](std::istream& shared_stream) -> metalError_t {

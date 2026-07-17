@@ -971,6 +971,7 @@ bool uses_worker_common_function_constants(const std::string& name) {
         "workerDerThread_mkd_gen",
         "workerPassThread",
         "workerPassThreadEntropy",
+        "workerPassThreadEntropyBatch",
         "workerEntropy",
         "workerEntropy_seq",
         "workerEntropy_seq_hexset",
@@ -3222,7 +3223,8 @@ metalError_t metal_launch_impl(const char* function_name,
             st = append_xp_runtime_bindings(bindings, temporaries);
             if (st != metalSuccess) return st;
         } else if (name == "workerDerThread" || name == "workerPassThread" ||
-                   name == "workerPassThreadEntropy" || name == "worker" ||
+                   name == "workerPassThreadEntropy" || name == "workerPassThreadEntropyBatch" ||
+                   name == "worker" ||
                    name == "worker_gen" || name == "worker_seq" ||
                    name == "worker_seq_hexset" || name == "worker_recovery_hexset" ||
                    starts_with(name, "workerEntropy") ||
@@ -3239,6 +3241,7 @@ metalError_t metal_launch_impl(const char* function_name,
                                           name == "workerRecoveryFused";
             const bool mnemonic_runtime = name == "workerPassThread" ||
                                           name == "workerPassThreadEntropy" ||
+                                          name == "workerPassThreadEntropyBatch" ||
                                           name == "worker_gen" ||
                                           starts_with(name, "workerEntropy") ||
                                           starts_with(name, "workerHmac") ||
