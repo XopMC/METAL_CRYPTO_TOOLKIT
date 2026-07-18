@@ -76,6 +76,17 @@ static inline bool minikey_mul_u64_checked(ulong a,
 static inline bool minikey_add_base58_counter(thread uchar* digits,
                                               const uchar len,
                                               ulong delta) {
+    if (delta == 1ul) {
+        for (int pos = int(len) - 1; pos >= 0; --pos) {
+            if (digits[pos] != 57u) {
+                digits[pos] = uchar(digits[pos] + 1u);
+                return true;
+            }
+            digits[pos] = 0u;
+        }
+        return false;
+    }
+
     for (int pos = int(len) - 1; pos >= 0; --pos) {
         if (delta == 0ul) {
             return true;
