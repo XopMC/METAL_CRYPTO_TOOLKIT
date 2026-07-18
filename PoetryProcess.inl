@@ -3,14 +3,45 @@
 static std::vector<PoetryPreparedTemplate> g_poetry_templates;
 static PoetryDictionaryHost g_poetry_dictionary;
 
+static uint64_t poetry_finite_useful_thread_count(uint8_t wildcard_count) {
+    uint64_t combinations = 1u;
+    for (uint8_t index = 0u; index < wildcard_count; ++index) {
+        if (combinations > std::numeric_limits<uint64_t>::max() /
+                               static_cast<uint64_t>(POETRY_WORD_COUNT)) {
+            return std::numeric_limits<uint64_t>::max();
+        }
+        combinations *= static_cast<uint64_t>(POETRY_WORD_COUNT);
+    }
+    return combinations / static_cast<uint64_t>(THREAD_STEPS) +
+        (combinations % static_cast<uint64_t>(THREAD_STEPS) != 0u ? 1u : 0u);
+}
+
+static uint32_t poetry_launch_block_count(const GpuRuntimeContext& context,
+                                          const PoetryPreparedTemplate& prepared,
+                                          size_t gpu_count) {
+    if (prepared.device.random_mode != 0u || context.block_threads == 0u || gpu_count == 0u) {
+        return context.block_number;
+    }
+    const uint64_t useful_threads =
+        poetry_finite_useful_thread_count(prepared.device.wildcard_count);
+    const uint64_t threads_for_gpu = useful_threads / static_cast<uint64_t>(gpu_count) +
+        (useful_threads % static_cast<uint64_t>(gpu_count) != 0u ? 1u : 0u);
+    const uint64_t required_blocks = threads_for_gpu /
+            static_cast<uint64_t>(context.block_threads) +
+        (threads_for_gpu % static_cast<uint64_t>(context.block_threads) != 0u ? 1u : 0u);
+    return static_cast<uint32_t>(std::max<uint64_t>(
+        1u, std::min<uint64_t>(context.block_number, required_blocks)));
+}
+
 static metalError_t processMetalPoetryGpuSlot(const GpuRuntimeContext& context,
+                                              uint32_t launch_block_number,
                                               uint64_t global_thread_prefix,
                                               uint64_t global_stride,
                                               const PoetryPreparedTemplate& prepared,
                                               const PoetryDictionaryHost& dictionary,
                                               bool random_quota_enabled,
                                               uint64_t random_candidate_quota) {
-    const uint64_t thread_count64 = static_cast<uint64_t>(context.block_number) *
+    const uint64_t thread_count64 = static_cast<uint64_t>(launch_block_number) *
         static_cast<uint64_t>(context.block_threads);
     if (thread_count64 == 0u || thread_count64 > std::numeric_limits<uint32_t>::max()) {
         return metalErrorInvalidConfiguration;
@@ -85,7 +116,7 @@ static metalError_t processMetalPoetryGpuSlot(const GpuRuntimeContext& context,
         (global_thread_prefix * 0x9e3779b97f4a7c15ull) ^
         static_cast<uint64_t>(context.device_id + 1);
     const uint32_t gpu_id = static_cast<uint32_t>(context.device_id);
-    status = metal_launch("initPoetryThreadStates", context.block_number, context.block_threads,
+    status = metal_launch("initPoetryThreadStates", launch_block_number, context.block_threads,
                           device_states, thread_count, device_template, global_thread_prefix,
                           gpu_id, seed_nonce);
     if (!checked(status, "initPoetryThreadStates launch")) { cleanup(); return status; }
@@ -110,7 +141,7 @@ static metalError_t processMetalPoetryGpuSlot(const GpuRuntimeContext& context,
             status = metalMemset(device_active, 0, sizeof(uint32_t));
             if (!checked(status, "clear active counter")) break;
 
-            status = metal_launch("workerPoetry", context.block_number, context.block_threads,
+            status = metal_launch("workerPoetry", launch_block_number, context.block_threads,
                                   buffIsResult, buffDeviceResult, device_template, device_states,
                                   stride_or_random_limit, device_dictionary_blob, device_dictionary_offsets,
                                   device_dictionary_lengths, device_processed, device_active,
@@ -162,11 +193,9 @@ static metalError_t processMetalPoetryGpuSlot(const GpuRuntimeContext& context,
 static metalError_t processMetalPoetry() {
     if (g_gpu_contexts.empty()) return metalErrorInvalidDevice;
 
-    std::vector<uint64_t> prefixes(g_gpu_contexts.size(), 0u);
     std::vector<uint64_t> random_capacities(g_gpu_contexts.size(), 0u);
     uint64_t global_stride = 0u;
     for (size_t i = 0; i < g_gpu_contexts.size(); ++i) {
-        prefixes[i] = global_stride;
         const uint64_t count = static_cast<uint64_t>(g_gpu_contexts[i].block_number) *
             static_cast<uint64_t>(g_gpu_contexts[i].block_threads);
         if (count == 0u || global_stride > std::numeric_limits<uint64_t>::max() - count) {
@@ -193,6 +222,23 @@ static metalError_t processMetalPoetry() {
                 g_poetry_templates[template_index];
             STATUS = prepared.normalized_phrase;
             const bool random_mode = prepared.device.random_mode != 0u;
+            std::vector<uint32_t> template_launch_blocks(g_gpu_contexts.size(), 0u);
+            std::vector<uint64_t> template_prefixes(g_gpu_contexts.size(), 0u);
+            uint64_t template_stride = 0u;
+            for (size_t gpu_index = 0; gpu_index < g_gpu_contexts.size(); ++gpu_index) {
+                const GpuRuntimeContext& context = g_gpu_contexts[gpu_index];
+                template_launch_blocks[gpu_index] = poetry_launch_block_count(
+                    context, prepared, g_gpu_contexts.size());
+                template_prefixes[gpu_index] = template_stride;
+                const uint64_t launched_threads =
+                    static_cast<uint64_t>(template_launch_blocks[gpu_index]) *
+                    static_cast<uint64_t>(context.block_threads);
+                if (template_stride > std::numeric_limits<uint64_t>::max() - launched_threads) {
+                    return metalErrorInvalidConfiguration;
+                }
+                template_stride += launched_threads;
+            }
+            if (template_stride == 0u) return metalErrorInvalidConfiguration;
             if (random_mode) {
                 if (cycling_random) {
                     printf(
@@ -264,8 +310,8 @@ static metalError_t processMetalPoetry() {
                         }
                     }
                     statuses[gpu_index] = processMetalPoetryGpuSlot(
-                        g_gpu_contexts[gpu_index], prefixes[gpu_index],
-                        global_stride, prepared, g_poetry_dictionary,
+                        g_gpu_contexts[gpu_index], template_launch_blocks[gpu_index],
+                        template_prefixes[gpu_index], template_stride, prepared, g_poetry_dictionary,
                         cycling_random, random_quotas[gpu_index]);
                 });
             }
