@@ -60,9 +60,9 @@ static inline void poetry_found_buffers(device char* foundStrings,
 
 kernel void workerPoetry(device bool* isResult [[buffer(0)]],
                          device bool* buffResult [[buffer(1)]],
-                         const device PoetryTemplateDevice* poetry_template [[buffer(2)]],
+                         const device PoetryTemplateDevice* poetry_templates [[buffer(2)]],
                          device PoetryThreadState* poetry_states [[buffer(3)]],
-                         constant ulong& stride_or_random_limit [[buffer(4)]],
+                         constant PoetryDispatchDevice& dispatch [[buffer(4)]],
                          const device char* dictionary_blob [[buffer(5)]],
                          const device ushort* dictionary_offsets [[buffer(6)]],
                          const device uchar* dictionary_lengths [[buffer(7)]],
@@ -88,6 +88,11 @@ kernel void workerPoetry(device bool* isResult [[buffer(0)]],
                          device atomic_uint* resultsCount [[buffer(27)]],
                          const device SubstratePathDevice* substratePaths [[buffer(28)]],
                          uint tid [[thread_position_in_grid]]) {
+    if (dispatch.thread_count_per_template == 0u) return;
+    const uint template_index = tid / dispatch.thread_count_per_template;
+    const uint template_tid = tid - template_index * dispatch.thread_count_per_template;
+    const device PoetryTemplateDevice* poetry_template = &poetry_templates[template_index];
+    const ulong stride_or_random_limit = dispatch.stride_or_random_limit;
     device PoetryThreadState& state = poetry_states[tid];
     if (state.active == 0u) return;
 
@@ -106,7 +111,7 @@ kernel void workerPoetry(device bool* isResult [[buffer(0)]],
 
     int key_count = 0;
     if (poetry_template->random_mode != 0u) {
-        const ulong thread_candidate_start = ulong(tid) * ulong(PRIV_THREAD_STEPS);
+        const ulong thread_candidate_start = ulong(template_tid) * ulong(PRIV_THREAD_STEPS);
         if (thread_candidate_start >= stride_or_random_limit) return;
         const ulong random_candidates_remaining = stride_or_random_limit - thread_candidate_start;
         const uint random_lane_count = uint(min(random_candidates_remaining, ulong(PRIV_THREAD_STEPS)));

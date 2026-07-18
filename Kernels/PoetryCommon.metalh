@@ -28,6 +28,12 @@ struct PoetryThreadState {
     uchar reserved[7];
 };
 
+struct PoetryDispatchDevice {
+    ulong stride_or_random_limit;
+    uint thread_count_per_template;
+    uint reserved;
+};
+
 static inline bool poetry_add_stride(thread ushort* digits, uchar digit_count, ulong stride) {
     ulong carry = stride;
     for (int i = int(digit_count) - 1; i >= 0 && carry != 0ul; --i) {

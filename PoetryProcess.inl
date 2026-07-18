@@ -3,6 +3,21 @@
 static std::vector<PoetryPreparedTemplate> g_poetry_templates;
 static PoetryDictionaryHost g_poetry_dictionary;
 
+struct PoetryDispatchHost {
+    uint64_t stride_or_random_limit;
+    uint32_t thread_count_per_template;
+    uint32_t reserved;
+};
+
+static_assert(sizeof(PoetryDispatchHost) == 16u, "Poetry dispatch ABI mismatch");
+
+static bool poetry_templates_equal_for_batch(const PoetryPreparedTemplate& left,
+                                             const PoetryPreparedTemplate& right) {
+    return left.device.random_mode == 0u && right.device.random_mode == 0u &&
+        left.normalized_phrase == right.normalized_phrase &&
+        std::memcmp(&left.device, &right.device, sizeof(PoetryTemplateDevice)) == 0;
+}
+
 static uint64_t poetry_finite_useful_thread_count(uint8_t wildcard_count) {
     uint64_t combinations = 1u;
     for (uint8_t index = 0u; index < wildcard_count; ++index) {
@@ -37,17 +52,36 @@ static metalError_t processMetalPoetryGpuSlot(const GpuRuntimeContext& context,
                                               uint32_t launch_block_number,
                                               uint64_t global_thread_prefix,
                                               uint64_t global_stride,
-                                              const PoetryPreparedTemplate& prepared,
+                                              const PoetryPreparedTemplate* prepared_templates,
+                                              size_t batch_template_count,
                                               const PoetryDictionaryHost& dictionary,
                                               bool random_quota_enabled,
                                               uint64_t random_candidate_quota) {
+    if (prepared_templates == nullptr || batch_template_count == 0u) {
+        return metalErrorInvalidValue;
+    }
+    const PoetryPreparedTemplate& prepared = prepared_templates[0];
     const uint64_t thread_count64 = static_cast<uint64_t>(launch_block_number) *
         static_cast<uint64_t>(context.block_threads);
     if (thread_count64 == 0u || thread_count64 > std::numeric_limits<uint32_t>::max()) {
         return metalErrorInvalidConfiguration;
     }
+    if (batch_template_count > std::numeric_limits<uint64_t>::max() / thread_count64 ||
+        batch_template_count > std::numeric_limits<uint32_t>::max() /
+                                   static_cast<uint64_t>(launch_block_number)) {
+        return metalErrorInvalidConfiguration;
+    }
+    const uint64_t batch_thread_count64 =
+        thread_count64 * static_cast<uint64_t>(batch_template_count);
+    if (batch_thread_count64 > std::numeric_limits<uint32_t>::max()) {
+        return metalErrorInvalidConfiguration;
+    }
+    const uint32_t batch_launch_block_number = static_cast<uint32_t>(
+        static_cast<uint64_t>(launch_block_number) *
+        static_cast<uint64_t>(batch_template_count));
     const uint32_t thread_count = static_cast<uint32_t>(thread_count64);
-    const uint64_t candidates_per_launch = thread_count64 * static_cast<uint64_t>(THREAD_STEPS);
+    const uint64_t candidates_per_launch =
+        batch_thread_count64 * static_cast<uint64_t>(THREAD_STEPS);
     const bool bounded_random = prepared.device.random_mode != 0u && random_quota_enabled;
     if (bounded_random && random_candidate_quota == 0u) {
         return metalSuccess;
@@ -80,14 +114,16 @@ static metalError_t processMetalPoetryGpuSlot(const GpuRuntimeContext& context,
     };
 
     metalError_t status = acquire_shared_result_buffers(
-        thread_count64 * static_cast<uint64_t>(THREAD_STEPS),
+        batch_thread_count64 * static_cast<uint64_t>(THREAD_STEPS),
         &buffIsResult,
         &buffDeviceResult);
     if (!checked(status, "acquire_shared_result_buffers")) return status;
 
-    status = metalMalloc(&device_template, sizeof(PoetryTemplateDevice));
+    status = metalMalloc(&device_template,
+                         batch_template_count * sizeof(PoetryTemplateDevice));
     if (!checked(status, "allocate template")) { cleanup(); return status; }
-    status = metalMalloc(&device_states, thread_count64 * sizeof(PoetryThreadState));
+    status = metalMalloc(&device_states,
+                         batch_thread_count64 * sizeof(PoetryThreadState));
     if (!checked(status, "allocate states")) { cleanup(); return status; }
     status = metalMalloc(&device_dictionary_blob, dictionary.blob.size());
     if (!checked(status, "allocate dictionary")) { cleanup(); return status; }
@@ -100,7 +136,13 @@ static metalError_t processMetalPoetryGpuSlot(const GpuRuntimeContext& context,
     status = metalMalloc(&device_active, sizeof(uint32_t));
     if (!checked(status, "allocate active counter")) { cleanup(); return status; }
 
-    status = metalMemcpy(device_template, &prepared.device, sizeof(PoetryTemplateDevice), metalMemcpyHostToDevice);
+    std::vector<PoetryTemplateDevice> host_templates(batch_template_count);
+    for (size_t index = 0u; index < batch_template_count; ++index) {
+        host_templates[index] = prepared_templates[index].device;
+    }
+    status = metalMemcpy(device_template, host_templates.data(),
+                         host_templates.size() * sizeof(PoetryTemplateDevice),
+                         metalMemcpyHostToDevice);
     if (!checked(status, "copy template")) { cleanup(); return status; }
     status = metalMemcpy(device_dictionary_blob, dictionary.blob.data(), dictionary.blob.size(), metalMemcpyHostToDevice);
     if (!checked(status, "copy dictionary")) { cleanup(); return status; }
@@ -116,7 +158,7 @@ static metalError_t processMetalPoetryGpuSlot(const GpuRuntimeContext& context,
         (global_thread_prefix * 0x9e3779b97f4a7c15ull) ^
         static_cast<uint64_t>(context.device_id + 1);
     const uint32_t gpu_id = static_cast<uint32_t>(context.device_id);
-    status = metal_launch("initPoetryThreadStates", launch_block_number, context.block_threads,
+    status = metal_launch("initPoetryThreadStates", batch_launch_block_number, context.block_threads,
                           device_states, thread_count, device_template, global_thread_prefix,
                           gpu_id, seed_nonce);
     if (!checked(status, "initPoetryThreadStates launch")) { cleanup(); return status; }
@@ -134,16 +176,19 @@ static metalError_t processMetalPoetryGpuSlot(const GpuRuntimeContext& context,
                     candidates_per_launch,
                     random_candidate_quota - random_processed);
             }
-            const uint64_t stride_or_random_limit =
-                prepared.device.random_mode != 0u ? random_candidate_limit : global_stride;
+            const PoetryDispatchHost dispatch{
+                prepared.device.random_mode != 0u ? random_candidate_limit : global_stride,
+                thread_count,
+                0u,
+            };
             status = metalMemset(device_processed, 0, sizeof(uint64_t));
             if (!checked(status, "clear processed counter")) break;
             status = metalMemset(device_active, 0, sizeof(uint32_t));
             if (!checked(status, "clear active counter")) break;
 
-            status = metal_launch("workerPoetry", launch_block_number, context.block_threads,
+            status = metal_launch("workerPoetry", batch_launch_block_number, context.block_threads,
                                   buffIsResult, buffDeviceResult, device_template, device_states,
-                                  stride_or_random_limit, device_dictionary_blob, device_dictionary_offsets,
+                                  dispatch, device_dictionary_blob, device_dictionary_offsets,
                                   device_dictionary_lengths, device_processed, device_active,
                                   context.dev_precomp, context.pitch, Rounds);
             if (!checked(status, "workerPoetry launch")) break;
@@ -239,6 +284,24 @@ static metalError_t processMetalPoetry() {
                 template_stride += launched_threads;
             }
             if (template_stride == 0u) return metalErrorInvalidConfiguration;
+            size_t batch_template_count = 1u;
+            if (!random_mode && host_silent_mode) {
+                size_t batch_limit = g_poetry_templates.size() - template_index;
+                for (size_t gpu_index = 0u; gpu_index < g_gpu_contexts.size(); ++gpu_index) {
+                    const uint32_t launch_blocks = template_launch_blocks[gpu_index];
+                    if (launch_blocks == 0u) return metalErrorInvalidConfiguration;
+                    batch_limit = std::min(
+                        batch_limit,
+                        static_cast<size_t>(g_gpu_contexts[gpu_index].block_number /
+                                            launch_blocks));
+                }
+                while (batch_template_count < batch_limit &&
+                       poetry_templates_equal_for_batch(
+                           prepared,
+                           g_poetry_templates[template_index + batch_template_count])) {
+                    ++batch_template_count;
+                }
+            }
             if (random_mode) {
                 if (cycling_random) {
                     printf(
@@ -272,6 +335,18 @@ static metalError_t processMetalPoetry() {
                     static_cast<unsigned int>(prepared.device.word_count),
                     static_cast<unsigned int>(prepared.device.wildcard_count),
                     prepared.combination_count.c_str());
+            }
+            for (size_t batch_index = 1u; batch_index < batch_template_count; ++batch_index) {
+                const PoetryPreparedTemplate& batched =
+                    g_poetry_templates[template_index + batch_index];
+                printf(
+                    "[!] Poetry task %llu/%llu: words=%u missing=%u "
+                    "combinations=%s [!]\n",
+                    static_cast<unsigned long long>(template_index + batch_index + 1u),
+                    static_cast<unsigned long long>(g_poetry_templates.size()),
+                    static_cast<unsigned int>(batched.device.word_count),
+                    static_cast<unsigned int>(batched.device.wildcard_count),
+                    batched.combination_count.c_str());
             }
 
             std::vector<uint64_t> random_quotas(g_gpu_contexts.size(), 0u);
@@ -311,7 +386,9 @@ static metalError_t processMetalPoetry() {
                     }
                     statuses[gpu_index] = processMetalPoetryGpuSlot(
                         g_gpu_contexts[gpu_index], template_launch_blocks[gpu_index],
-                        template_prefixes[gpu_index], template_stride, prepared, g_poetry_dictionary,
+                        template_prefixes[gpu_index], template_stride,
+                        &g_poetry_templates[template_index], batch_template_count,
+                        g_poetry_dictionary,
                         cycling_random, random_quotas[gpu_index]);
                 });
             }
@@ -334,6 +411,7 @@ static metalError_t processMetalPoetry() {
                     return statuses[gpu_index];
                 }
             }
+            template_index += batch_template_count - 1u;
         }
         if (!cycling_random)
             break;
