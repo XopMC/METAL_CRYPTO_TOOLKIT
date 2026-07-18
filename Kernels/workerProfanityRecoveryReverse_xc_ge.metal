@@ -15,10 +15,20 @@ kernel void workerProfanityRecoveryReverse_xc_ge(constant secp256k1_ge_storage* 
                                                  constant ulong& walk_state_capacity [[buffer(12)]],
                                                  constant bool& use_walk_state [[buffer(13)]],
                                                  constant bool& store_walk_state [[buffer(14)]],
+                                                 device RuntimeConfig& config [[buffer(15)]],
+                                                 device XorFilterState& filters [[buffer(16)]],
+                                                 device FilterStorageState& filter_storage [[buffer(17)]],
+                                                 const device uchar* bloom_storage [[buffer(18)]],
+                                                 const device uchar* xor_storage [[buffer(19)]],
+                                                 const device uchar* xor_un_storage [[buffer(20)]],
+                                                 const device uchar* xor_uc_storage [[buffer(21)]],
+                                                 const device uchar* xor_hc_storage [[buffer(22)]],
                                                  uint tid [[thread_position_in_grid]]) {
     worker_profanity_recovery_reverse_direct_impl(precPtr, precPitch, target_ge, lane_start,
                                                   lane_count, state_index_start, round_start,
                                                   round_count, hits, hit_count, max_hits,
                                                   walk_state, walk_state_capacity, use_walk_state,
-                                                  store_walk_state, 0x01u, tid);
+                                                  store_walk_state, config, filters, filter_storage,
+                                                  bloom_storage, xor_storage, xor_un_storage,
+                                                  xor_uc_storage, xor_hc_storage, 0x01u, tid);
 }

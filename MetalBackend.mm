@@ -3198,6 +3198,9 @@ metalError_t metal_launch_impl(const char* function_name,
             if (st != metalSuccess) return st;
             st = push_pointer_binding(bindings, g_found.profanityCount);
             if (st != metalSuccess) return st;
+        } else if (starts_with(name, "workerProfanityRecoveryReverse")) {
+            st = append_filter_bindings(bindings);
+            if (st != metalSuccess) return st;
         } else if (name == "workerProfanitySeedResolve" ||
                    name == "workerProfanitySeedResolveBatch") {
             st = push_pointer_binding(bindings, g_found.profanityResults);

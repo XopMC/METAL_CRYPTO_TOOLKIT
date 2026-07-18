@@ -539,6 +539,27 @@ static inline void profanity_reverse_emit_hit_metal(device ProfanityRecoveryHit*
     }
 }
 
+static inline bool profanity_recovery_xor_match_metal(const thread uchar x32[32],
+                                                       device RuntimeConfig& config,
+                                                       device XorFilterState& filters,
+                                                       device FilterStorageState& storage,
+                                                       const device uchar* bloom_storage,
+                                                       const device uchar* xor_storage,
+                                                       const device uchar* xor_un_storage,
+                                                       const device uchar* xor_uc_storage,
+                                                       const device uchar* xor_hc_storage) {
+    thread uint value20[5];
+    for (uint word = 0u; word < 5u; ++word) {
+        const uint offset = word * 4u;
+        value20[word] = uint(x32[offset]) |
+            (uint(x32[offset + 1u]) << 8u) |
+            (uint(x32[offset + 2u]) << 16u) |
+            (uint(x32[offset + 3u]) << 24u);
+    }
+    return filter_check_hash(config, filters, storage, bloom_storage, xor_storage,
+                             xor_un_storage, xor_uc_storage, xor_hc_storage, value20);
+}
+
 static inline void worker_profanity_recovery_reverse_direct_impl(const constant secp256k1_ge_storage* precPtr,
                                                                  ulong precPitch,
                                                                  const device secp256k1_ge* target_ge,
@@ -554,6 +575,14 @@ static inline void worker_profanity_recovery_reverse_direct_impl(const constant 
                                                                  ulong walk_state_capacity,
                                                                  bool use_walk_state,
                                                                  bool store_walk_state,
+                                                                 device RuntimeConfig& config,
+                                                                 device XorFilterState& filters,
+                                                                 device FilterStorageState& storage,
+                                                                 const device uchar* bloom_storage,
+                                                                 const device uchar* xor_storage,
+                                                                 const device uchar* xor_un_storage,
+                                                                 const device uchar* xor_uc_storage,
+                                                                 const device uchar* xor_hc_storage,
                                                                  uchar filter_type,
                                                                  uint tid) {
     (void)use_walk_state;
@@ -580,6 +609,11 @@ static inline void worker_profanity_recovery_reverse_direct_impl(const constant 
             last_py[i] = py[i];
         }
         have_last = true;
+        if (!profanity_recovery_xor_match_metal(x32, config, filters, storage,
+                                                bloom_storage, xor_storage, xor_un_storage,
+                                                xor_uc_storage, xor_hc_storage)) {
+            continue;
+        }
         profanity_reverse_emit_hit_metal(hits, hit_count, max_hits, x32, round, lane_id, filter_type);
     }
 
