@@ -275,6 +275,17 @@ static inline void armory_make_root_save_blob(thread char out[512],
     }
 }
 
+static inline bool armory_can_reuse_compressed_pubkey(device RuntimeConfig& config,
+                                                       ulong round) {
+    return round == 0ul &&
+           WC_FC_COMPRESSED && config.compressed != 0u &&
+           !WC_FC_UNCOMPRESSED && !WC_FC_SEGWIT && !WC_FC_P2WSH &&
+           !WC_FC_TAPROOT && !WC_FC_ETHEREUM && !WC_FC_XPOINT &&
+           !WC_FC_XRP_SECP && !WC_FC_SUI_SECP && !WC_FC_IOTA_SECP &&
+           !WC_FC_APTOS_SECP && !WC_FC_ICP_SECP && !WC_FC_FIL_SECP &&
+           !WC_FC_XTZ_SECP && !WC_FC_ED_ANY && config.ed25519 == 0u;
+}
+
 static inline void armory_process_root_and_chain(thread WorkerEnv& env,
                                                  const thread char* source,
                                                  ulong source_len,
@@ -332,10 +343,22 @@ static inline void armory_process_root_and_chain(thread WorkerEnv& env,
         }
 
         if ((*env.config).secp256 != 0u) {
-            worker_emit_secp_targets_from_key(env, emit_source, emit_len, prvKeys,
-                                              current_child, current_child, 0u, nullptr, 0u,
-                                              buff_index, round, store_seed, seed_value,
-                                              iter_value, store_iter);
+            if (armory_can_reuse_compressed_pubkey(*env.config, round)) {
+                uint hash160[8] = { 0 };
+                int keyLenSkip = 0;
+                _GetHash160Comp(pubKeys, keyLenSkip,
+                                reinterpret_cast<thread uchar*>(hash160));
+                worker_check_and_store_words(env, emit_source, emit_len, prvKeys,
+                                             reinterpret_cast<thread uchar*>(hash160), 20u,
+                                             hash160, 0x02u, current_child, current_child,
+                                             0, 0u, nullptr, 0u, buff_index, store_seed,
+                                             seed_value, iter_value, store_iter);
+            } else {
+                worker_emit_secp_targets_from_key(env, emit_source, emit_len, prvKeys,
+                                                  current_child, current_child, 0u, nullptr, 0u,
+                                                  buff_index, round, store_seed, seed_value,
+                                                  iter_value, store_iter);
+            }
         }
         if ((*env.config).ed25519 != 0u) {
             worker_emit_ed_targets_from_key(env, emit_source, emit_len, prvKeys, nullptr,
