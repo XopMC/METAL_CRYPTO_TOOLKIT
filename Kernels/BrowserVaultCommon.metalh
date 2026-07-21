@@ -213,6 +213,107 @@ static inline void wallet_gcm_mul(thread uchar x[16], const thread uchar h[16]) 
     wallet_store_be64(x + 8, z_lo);
 }
 
+struct WalletGcmNibbleTable {
+    ulong hi[16];
+    ulong lo[16];
+};
+
+static constant ulong WALLET_GCM_REDUCE4[16] = {
+    0x0000000000000000ul, 0x1c20000000000000ul,
+    0x3840000000000000ul, 0x2460000000000000ul,
+    0x7080000000000000ul, 0x6ca0000000000000ul,
+    0x48c0000000000000ul, 0x54e0000000000000ul,
+    0xe100000000000000ul, 0xfd20000000000000ul,
+    0xd940000000000000ul, 0xc560000000000000ul,
+    0x9180000000000000ul, 0x8da0000000000000ul,
+    0xa9c0000000000000ul, 0xb5e0000000000000ul,
+};
+
+static inline void wallet_gcm_shift_right_one(thread ulong* hi, thread ulong* lo) {
+    const ulong reduction_mask = 0ul - (*lo & 1ul);
+    const ulong next_lo = (*lo >> 1u) | (*hi << 63u);
+    const ulong next_hi = (*hi >> 1u) ^ (0xe100000000000000ul & reduction_mask);
+    *hi = next_hi;
+    *lo = next_lo;
+}
+
+static inline void wallet_gcm_build_nibble_table(const thread uchar h[16],
+                                                  thread WalletGcmNibbleTable* table) {
+    ulong values_hi[4];
+    ulong values_lo[4];
+    ulong v_hi = 0ul;
+    ulong v_lo = 0ul;
+    for (uint i = 0u; i < 8u; ++i) {
+        v_hi = (v_hi << 8u) | ulong(h[i]);
+        v_lo = (v_lo << 8u) | ulong(h[i + 8u]);
+    }
+    for (uint bit = 0u; bit < 4u; ++bit) {
+        values_hi[bit] = v_hi;
+        values_lo[bit] = v_lo;
+        wallet_gcm_shift_right_one(&v_hi, &v_lo);
+    }
+    for (uint nibble = 0u; nibble < 16u; ++nibble) {
+        ulong z_hi = 0ul;
+        ulong z_lo = 0ul;
+        for (uint bit = 0u; bit < 4u; ++bit) {
+            const ulong mask = 0ul - ulong((nibble >> (3u - bit)) & 1u);
+            z_hi ^= values_hi[bit] & mask;
+            z_lo ^= values_lo[bit] & mask;
+        }
+        table->hi[nibble] = z_hi;
+        table->lo[nibble] = z_lo;
+    }
+}
+
+static inline void wallet_gcm_mul_nibble(thread uchar x[16],
+                                         const thread WalletGcmNibbleTable* table) {
+    ulong z_hi = 0ul;
+    ulong z_lo = 0ul;
+    for (int byte_index = 15; byte_index >= 0; --byte_index) {
+        const uint byte_value = uint(x[byte_index]);
+        const uint nibbles[2] = { byte_value & 15u, byte_value >> 4u };
+        for (uint part = 0u; part < 2u; ++part) {
+            const uint remainder = uint(z_lo & 15ul);
+            z_lo = (z_lo >> 4u) | (z_hi << 60u);
+            z_hi = (z_hi >> 4u) ^ WALLET_GCM_REDUCE4[remainder];
+            z_hi ^= table->hi[nibbles[part]];
+            z_lo ^= table->lo[nibbles[part]];
+        }
+    }
+    wallet_store_be64(x, z_hi);
+    wallet_store_be64(x + 8, z_lo);
+}
+
+static inline void wallet_gcm_ghash_device_nibble(const thread uchar h[16],
+                                                  const device uchar* data,
+                                                  uint data_len,
+                                                  thread uchar out[16]) {
+    WalletGcmNibbleTable table;
+    wallet_gcm_build_nibble_table(h, &table);
+    uchar y[16] = {};
+    uchar block[16];
+    for (uint off = 0u; off < data_len; off += 16u) {
+        for (int i = 0; i < 16; ++i) {
+            block[i] = 0u;
+        }
+        const uint n = ((data_len - off) < 16u) ? (data_len - off) : 16u;
+        for (uint i = 0u; i < n; ++i) {
+            block[i] = data[off + i];
+        }
+        wallet_gcm_xor16(y, block);
+        wallet_gcm_mul_nibble(y, &table);
+    }
+    for (int i = 0; i < 16; ++i) {
+        block[i] = 0u;
+    }
+    wallet_store_be64(block + 8, ulong(data_len) * 8ul);
+    wallet_gcm_xor16(y, block);
+    wallet_gcm_mul_nibble(y, &table);
+    for (int i = 0; i < 16; ++i) {
+        out[i] = y[i];
+    }
+}
+
 static inline void wallet_gcm_ghash_device(const thread uchar h[16],
                                            const device uchar* data,
                                            uint data_len,
@@ -287,7 +388,11 @@ static inline bool wallet_aes256_gcm_verify(const thread uchar key32[32],
         }
     }
     uchar s[16];
-    wallet_gcm_ghash_device(h, ciphertext, ciphertext_len, s);
+    if (ciphertext_len >= 1024u) {
+        wallet_gcm_ghash_device_nibble(h, ciphertext, ciphertext_len, s);
+    } else {
+        wallet_gcm_ghash_device(h, ciphertext, ciphertext_len, s);
+    }
     uchar e0[16];
     provider_aes_encrypt_block(round_keys, j0, e0);
     uchar diff = 0u;
