@@ -28619,6 +28619,7 @@ struct WalletKeystoreDeviceState {
 static constexpr uint64_t WALLET_SCRYPT_DEFAULT_CONCURRENCY_CAP = 8192ull;
 static constexpr uint64_t WALLET_SCRYPT_FILTERED_CONCURRENCY_CAP = 4096ull;
 static constexpr uint64_t WALLET_KEYSTORE_SCRYPT_DEFAULT_CONCURRENCY_CAP = 512ull;
+static constexpr uint64_t WALLET_KEYSTORE_SCRYPT_LARGE_DICTIONARY_CONCURRENCY_CAP = 1024ull;
 static constexpr uint64_t WALLET_KEYSTORE_SCRYPT_SMALL_BATCH_CONCURRENCY_CAP = 256ull;
 static constexpr uint64_t WALLET_SCRYPT_GPU_MEMORY_RESERVE = 1ull << 30;
 static constexpr uint64_t WALLET_SCRYPT_GPU_MEMORY_RESERVE_FILTERED = 4ull << 30;
@@ -46638,8 +46639,9 @@ metalError_t processMetalKeystore()
     WalletPassReader keystore_dictionary_reader;
     std::vector<WalletPassBuf> keystore_dictionary_batches;
     bool keystore_dictionary_batch_ready = false;
-    uint64_t keystore_dictionary_concurrency_cap =
-        wallet_keystore_scrypt_default_concurrency_cap();
+    uint64_t keystore_dictionary_concurrency_cap = std::min<uint64_t>(
+        wallet_scrypt_default_concurrency_cap(),
+        WALLET_KEYSTORE_SCRYPT_LARGE_DICTIONARY_CONCURRENCY_CAP);
     if (keystore_dictionary_mode) {
         if (mnemonicFiles.empty()) {
             fprintf(stderr, "[!] Error: -keystore requires candidate input: -i FILE, -mask MASK, or -start/-end [!]\n");
@@ -46669,6 +46671,10 @@ metalError_t processMetalKeystore()
             keystore_dictionary_concurrency_cap = std::min<uint64_t>(
                 keystore_dictionary_concurrency_cap,
                 WALLET_KEYSTORE_SCRYPT_SMALL_BATCH_CONCURRENCY_CAP);
+        } else if (max_batch_count <= WALLET_KEYSTORE_SCRYPT_DEFAULT_CONCURRENCY_CAP) {
+            keystore_dictionary_concurrency_cap = std::min<uint64_t>(
+                keystore_dictionary_concurrency_cap,
+                WALLET_KEYSTORE_SCRYPT_DEFAULT_CONCURRENCY_CAP);
         }
     }
 
