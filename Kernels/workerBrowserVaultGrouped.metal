@@ -7,6 +7,83 @@
 constant uint browser_vault_profile_specialization [[function_constant(92)]];
 static constant uint BROWSERVAULT_PROFILE_DYNAMIC = 0xffffffffu;
 
+__attribute__((noinline)) static void wallet_dogechain_hmac_sha256_32(
+    const thread WalletHmacSha256Precomp* ctx,
+    const thread uchar msg[32],
+    thread uchar out_mac[32]) {
+    uint s[8];
+    uint w[16];
+    for (int i = 0; i < 8; ++i) {
+        s[i] = ctx->istate[i];
+        const thread uchar* q = msg + (uint(i) << 2u);
+        w[i] = (uint(q[0]) << 24u) | (uint(q[1]) << 16u) |
+               (uint(q[2]) << 8u) | uint(q[3]);
+    }
+    w[8] = 0x80000000u;
+    for (int i = 9; i < 15; ++i) {
+        w[i] = 0u;
+    }
+    w[15] = 96u * 8u;
+    SHA256Transform(s, w);
+
+    for (int i = 0; i < 8; ++i) {
+        w[i] = s[i];
+        s[i] = ctx->ostate[i];
+    }
+    w[8] = 0x80000000u;
+    for (int i = 9; i < 15; ++i) {
+        w[i] = 0u;
+    }
+    w[15] = 96u * 8u;
+    SHA256Transform(s, w);
+    for (int i = 0; i < 8; ++i) {
+        wallet_store_be32(out_mac + (uint(i) << 2u), s[i]);
+    }
+}
+
+__attribute__((noinline)) static void wallet_dogechain_pbkdf2_sha256_32(
+    const thread uchar pass_b64[44],
+    const device uchar* salt_in,
+    uint salt_len,
+    uint iterations,
+    thread uchar out32[32]) {
+    uchar salt_block[WALLET_MAX_SALT_LEN + 4u];
+    uchar u[32];
+    uchar u_next[32];
+    if (salt_len > WALLET_MAX_SALT_LEN) {
+        salt_len = WALLET_MAX_SALT_LEN;
+    }
+    for (uint i = 0u; i < salt_len; ++i) {
+        salt_block[i] = salt_in[i];
+    }
+    wallet_store_be32(salt_block + salt_len, 1u);
+
+    WalletHmacSha256Precomp hmac_ctx;
+    wallet_hmac_sha256_precompute(pass_b64, 44u, &hmac_ctx);
+    wallet_hmac_sha256_from_precomp(&hmac_ctx, salt_block, salt_len + 4u, u);
+    for (int i = 0; i < 32; ++i) {
+        out32[i] = u[i];
+    }
+
+    uint iter = 1u;
+    for (; iter + 1u < iterations; iter += 2u) {
+        wallet_dogechain_hmac_sha256_32(&hmac_ctx, u, u_next);
+        for (int i = 0; i < 32; ++i) {
+            out32[i] = uchar(out32[i] ^ u_next[i]);
+        }
+        wallet_dogechain_hmac_sha256_32(&hmac_ctx, u_next, u);
+        for (int i = 0; i < 32; ++i) {
+            out32[i] = uchar(out32[i] ^ u[i]);
+        }
+    }
+    if (iter < iterations) {
+        wallet_dogechain_hmac_sha256_32(&hmac_ctx, u, u_next);
+        for (int i = 0; i < 32; ++i) {
+            out32[i] = uchar(out32[i] ^ u_next[i]);
+        }
+    }
+}
+
 __attribute__((noinline)) static bool wallet_browservault_scrypt_sha256_32(
     const thread uchar* pass,
     uint pass_len,
@@ -181,8 +258,8 @@ kernel void workerBrowserVaultGrouped(device bool* isResult [[buffer(0)]],
             thread uchar pass_b64[44];
             SHA256(pass_local, size_t(pass_len), pass_sha);
             wallet_base64_encode_32_device(pass_sha, pass_b64);
-            wallet_pbkdf2_sha256_32(pass_b64, 44u, group.salt, group.salt_len,
-                                    group.iterations, key32);
+            wallet_dogechain_pbkdf2_sha256_32(pass_b64, group.salt, group.salt_len,
+                                              group.iterations, key32);
         } else if (group_profile == BROWSERVAULT_PROFILE_ETHPRESALE_PBKDF2_AES_CBC) {
             wallet_pbkdf2_sha256_32_thread_salt(pass_local, pass_len, pass_local,
                                                 pass_len, group.iterations, key32);
