@@ -28618,7 +28618,7 @@ struct WalletKeystoreDeviceState {
 
 static constexpr uint64_t WALLET_SCRYPT_DEFAULT_CONCURRENCY_CAP = 8192ull;
 static constexpr uint64_t WALLET_SCRYPT_FILTERED_CONCURRENCY_CAP = 4096ull;
-static constexpr uint64_t WALLET_KEYSTORE_SCRYPT_DEFAULT_CONCURRENCY_CAP = 128ull;
+static constexpr uint64_t WALLET_KEYSTORE_SCRYPT_DEFAULT_CONCURRENCY_CAP = 256ull;
 static constexpr uint64_t WALLET_SCRYPT_GPU_MEMORY_RESERVE = 1ull << 30;
 static constexpr uint64_t WALLET_SCRYPT_GPU_MEMORY_RESERVE_FILTERED = 4ull << 30;
 static constexpr uint64_t WALLET_SCRYPT_SCRATCH_BUDGET = 16ull << 30;
