@@ -29297,7 +29297,7 @@ static metalError_t wallet_flush_walletdat_results(
 }
 
 static constexpr uint32_t WALLETDAT_MAX_TARGETS_PER_CHUNK = 4096u;
-static constexpr uint32_t WALLETDAT_DICT_EARLY_PROBE_STEPS[] = { 256u, 1024u, 4096u };
+static constexpr uint32_t WALLETDAT_DICT_EARLY_PROBE_STEPS[] = { 4096u, 65536u, 262144u };
 
 static uint64_t walletdat_launch_thread_count()
 {
@@ -47445,7 +47445,7 @@ metalError_t processMetalWalletDat()
             const bool use_early_probe = walletdat_dict_use_early_probe(target_chunks);
             const uint32_t first_probe_batch = walletdat_dict_batch_for_round(steady_per_gpu_batch_sz, 0ull, use_early_probe);
             if (first_probe_batch < steady_per_gpu_batch_sz) {
-                printf("[!] wallet.dat dictionary early probe: 256/1024/4096 password(s)/GPU before steady %u [!]\n",
+                printf("[!] wallet.dat dictionary early probe: 4096/65536/262144 password(s)/GPU before steady %u [!]\n",
                     steady_per_gpu_batch_sz);
                 fflush(stdout);
             }
