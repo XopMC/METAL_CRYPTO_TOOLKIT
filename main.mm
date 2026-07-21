@@ -28625,6 +28625,8 @@ static constexpr uint64_t WALLET_SCRYPT_GPU_MEMORY_RESERVE = 1ull << 30;
 static constexpr uint64_t WALLET_SCRYPT_GPU_MEMORY_RESERVE_FILTERED = 4ull << 30;
 static constexpr uint64_t WALLET_SCRYPT_SCRATCH_BUDGET = 16ull << 30;
 static constexpr uint64_t WALLET_SCRYPT_SCRATCH_BUDGET_FILTERED = 4ull << 30;
+static constexpr uint64_t WALLET_BISQ_SCRYPT_LARGE_STRIDE_THRESHOLD = 128ull << 10;
+static constexpr uint64_t WALLET_BISQ_SCRYPT_LARGE_STRIDE_BUDGET = 8ull << 30;
 
 static inline uint64_t wallet_scrypt_memory_reserve_bytes()
 {
@@ -48100,12 +48102,23 @@ metalError_t processMetalBrowserVault()
             const uint64_t reserve = std::min<uint64_t>(static_cast<uint64_t>(free_mem / 2u), reserve_target);
             const uint64_t hard_cap = static_cast<uint64_t>(free_mem > reserve ? free_mem - reserve : free_mem / 2u);
             uint64_t scratch_bytes = wallet_scrypt_scratch_budget_bytes(hard_cap, max_scrypt_scratch_stride);
+            const bool bisq_auto_large_stride_cap =
+                bisq_mode && !wallet_scrypt_scratch_budget_explicit &&
+                max_scrypt_scratch_stride >= WALLET_BISQ_SCRYPT_LARGE_STRIDE_THRESHOLD;
+            if (bisq_auto_large_stride_cap) {
+                scratch_bytes = std::min<uint64_t>(
+                    scratch_bytes, WALLET_BISQ_SCRYPT_LARGE_STRIDE_BUDGET);
+            }
             uint64_t concurrency = max_scrypt_scratch_stride ? scratch_bytes / max_scrypt_scratch_stride : 0ull;
             const uint64_t launch_lanes = static_cast<uint64_t>(BLOCK_NUMBER) * BLOCK_THREADS;
             concurrency = std::min<uint64_t>(concurrency, launch_lanes);
-            const uint64_t requested_concurrency_cap = use_n_count && n_number > 0
+            uint64_t requested_concurrency_cap = use_n_count && n_number > 0
                 ? std::min<uint64_t>(n_number, launch_lanes)
                 : launch_lanes;
+            if (bisq_auto_large_stride_cap) {
+                requested_concurrency_cap = std::min<uint64_t>(
+                    requested_concurrency_cap, wallet_scrypt_default_concurrency_cap());
+            }
             concurrency = std::min<uint64_t>(concurrency, requested_concurrency_cap);
             if (max_scrypt_scratch_stride != 0ull && requested_concurrency_cap != 0ull) {
                 const uint64_t budget_concurrency = scratch_bytes / max_scrypt_scratch_stride;
