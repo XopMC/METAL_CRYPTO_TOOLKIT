@@ -28618,7 +28618,8 @@ struct WalletKeystoreDeviceState {
 
 static constexpr uint64_t WALLET_SCRYPT_DEFAULT_CONCURRENCY_CAP = 8192ull;
 static constexpr uint64_t WALLET_SCRYPT_FILTERED_CONCURRENCY_CAP = 4096ull;
-static constexpr uint64_t WALLET_KEYSTORE_SCRYPT_DEFAULT_CONCURRENCY_CAP = 256ull;
+static constexpr uint64_t WALLET_KEYSTORE_SCRYPT_DEFAULT_CONCURRENCY_CAP = 512ull;
+static constexpr uint64_t WALLET_KEYSTORE_SCRYPT_SMALL_BATCH_CONCURRENCY_CAP = 256ull;
 static constexpr uint64_t WALLET_SCRYPT_GPU_MEMORY_RESERVE = 1ull << 30;
 static constexpr uint64_t WALLET_SCRYPT_GPU_MEMORY_RESERVE_FILTERED = 4ull << 30;
 static constexpr uint64_t WALLET_SCRYPT_SCRATCH_BUDGET = 16ull << 30;
@@ -46630,6 +46631,47 @@ metalError_t processMetalKeystore()
         return metalSuccess;
     }
 
+    const uint64_t wallet_generated_launch_chunk = use_n_count && n_number > 0
+        ? n_number
+        : static_cast<uint64_t>(BLOCK_NUMBER) * BLOCK_THREADS;
+    const bool keystore_dictionary_mode = wallet_masks.empty() && !seqMode;
+    WalletPassReader keystore_dictionary_reader;
+    std::vector<WalletPassBuf> keystore_dictionary_batches;
+    bool keystore_dictionary_batch_ready = false;
+    uint64_t keystore_dictionary_concurrency_cap =
+        wallet_keystore_scrypt_default_concurrency_cap();
+    if (keystore_dictionary_mode) {
+        if (mnemonicFiles.empty()) {
+            fprintf(stderr, "[!] Error: -keystore requires candidate input: -i FILE, -mask MASK, or -start/-end [!]\n");
+            return metalErrorInvalidValue;
+        }
+        if (!keystore_dictionary_reader.open(mnemonicFiles, IS_HEX)) {
+            fprintf(stderr, "[!] Error: %s [!]\n", keystore_dictionary_reader.error.c_str());
+            return metalErrorInvalidValue;
+        }
+        const uint32_t batch_sz = static_cast<uint32_t>(std::min<uint64_t>(
+            static_cast<uint64_t>(std::numeric_limits<uint32_t>::max()),
+            wallet_generated_launch_chunk));
+        keystore_dictionary_batch_ready = wallet_read_split_pass_batch(
+            keystore_dictionary_reader,
+            batch_sz,
+            g_gpu_contexts.size(),
+            keystore_dictionary_batches);
+        if (keystore_dictionary_reader.failed) {
+            fprintf(stderr, "[!] Error: %s [!]\n", keystore_dictionary_reader.error.c_str());
+            return metalErrorInvalidValue;
+        }
+        uint32_t max_batch_count = 0u;
+        for (const WalletPassBuf& batch : keystore_dictionary_batches) {
+            max_batch_count = std::max<uint32_t>(max_batch_count, batch.count);
+        }
+        if (max_batch_count <= WALLET_KEYSTORE_SCRYPT_SMALL_BATCH_CONCURRENCY_CAP) {
+            keystore_dictionary_concurrency_cap = std::min<uint64_t>(
+                keystore_dictionary_concurrency_cap,
+                WALLET_KEYSTORE_SCRYPT_SMALL_BATCH_CONCURRENCY_CAP);
+        }
+    }
+
     std::vector<WalletKeystoreDeviceState> states(g_gpu_contexts.size());
     std::vector<uint8_t> solved_files(target_files.size(), 0u);
     {
@@ -46638,7 +46680,6 @@ metalError_t processMetalKeystore()
     }
     bool all_solved = false;
     metalError_t st = metalSuccess;
-    uint64_t wallet_generated_launch_chunk = use_n_count && n_number > 0 ? n_number : static_cast<uint64_t>(BLOCK_NUMBER) * BLOCK_THREADS;
     for (size_t gi = 0; gi < g_gpu_contexts.size(); ++gi) {
         if (!activate_gpu_context(g_gpu_contexts[gi])) {
             st = metalErrorInvalidDevice;
@@ -46673,7 +46714,9 @@ metalError_t processMetalKeystore()
             if (concurrency > launch_lanes) concurrency = launch_lanes;
             const uint64_t requested_concurrency_cap = use_n_count && n_number > 0
                 ? n_number
-                : wallet_keystore_scrypt_default_concurrency_cap();
+                : (keystore_dictionary_mode
+                    ? keystore_dictionary_concurrency_cap
+                    : wallet_keystore_scrypt_default_concurrency_cap());
             if (concurrency > requested_concurrency_cap) concurrency = requested_concurrency_cap;
             if (concurrency == 0ull) {
                 fprintf(stderr, "[!] Error: not enough GPU memory for keystore scrypt scratch on GPU %d; need at least %llu bytes [!]\n",
@@ -46841,28 +46884,26 @@ metalError_t processMetalKeystore()
         }
     }
     else {
-        if (mnemonicFiles.empty()) {
-            fprintf(stderr, "[!] Error: -keystore requires candidate input: -i FILE, -mask MASK, or -start/-end [!]\n");
-            st = metalErrorInvalidValue;
-            goto Done;
-        }
-        WalletPassReader reader;
-        if (!reader.open(mnemonicFiles, IS_HEX)) {
-            fprintf(stderr, "[!] Error: %s [!]\n", reader.error.c_str());
-            st = metalErrorInvalidValue;
-            goto Done;
-        }
-        const uint32_t batch_sz = static_cast<uint32_t>(std::min<uint64_t>(
-            static_cast<uint64_t>(std::numeric_limits<uint32_t>::max()),
-            wallet_generated_launch_chunk));
-        std::vector<WalletPassBuf> batches;
         std::vector<metalError_t> gst(g_gpu_contexts.size(), metalSuccess);
         std::vector<std::thread> workers;
         workers.reserve(g_gpu_contexts.size());
         while (!all_solved) {
-            const bool any = wallet_read_split_pass_batch(reader, batch_sz, g_gpu_contexts.size(), batches);
-            if (reader.failed) {
-                fprintf(stderr, "[!] Error: %s [!]\n", reader.error.c_str());
+            bool any = keystore_dictionary_batch_ready;
+            if (keystore_dictionary_batch_ready) {
+                keystore_dictionary_batch_ready = false;
+            }
+            else {
+                const uint32_t batch_sz = static_cast<uint32_t>(std::min<uint64_t>(
+                    static_cast<uint64_t>(std::numeric_limits<uint32_t>::max()),
+                    wallet_generated_launch_chunk));
+                any = wallet_read_split_pass_batch(
+                    keystore_dictionary_reader,
+                    batch_sz,
+                    g_gpu_contexts.size(),
+                    keystore_dictionary_batches);
+            }
+            if (keystore_dictionary_reader.failed) {
+                fprintf(stderr, "[!] Error: %s [!]\n", keystore_dictionary_reader.error.c_str());
                 st = metalErrorInvalidValue;
                 goto Done;
             }
@@ -46870,19 +46911,19 @@ metalError_t processMetalKeystore()
             std::fill(gst.begin(), gst.end(), metalSuccess);
             workers.clear();
             for (size_t gi = 0; gi < g_gpu_contexts.size(); ++gi) {
-                if (batches[gi].count == 0) continue;
+                if (keystore_dictionary_batches[gi].count == 0) continue;
                 workers.emplace_back([&, gi]() {
                     {
                         std::lock_guard<std::mutex> lock(g_metal_context_api_mutex);
                         if (!activate_gpu_context(g_gpu_contexts[gi])) { gst[gi] = metalErrorInvalidDevice; return; }
                     }
                     if (keystore_pbkdf2_count != 0u) {
-                        gst[gi] = wallet_launch_keystore_dict_batch(batches[gi], states[gi],
+                        gst[gi] = wallet_launch_keystore_dict_batch(keystore_dictionary_batches[gi], states[gi],
                             keystore_pbkdf2_offset, keystore_pbkdf2_count, false,
                             target_files, solved_files, all_solved);
                     }
                     if (gst[gi] == metalSuccess && keystore_scrypt_count != 0u && !all_solved) {
-                        gst[gi] = wallet_launch_keystore_dict_batch(batches[gi], states[gi],
+                        gst[gi] = wallet_launch_keystore_dict_batch(keystore_dictionary_batches[gi], states[gi],
                             keystore_scrypt_offset, keystore_scrypt_count, true,
                             target_files, solved_files, all_solved);
                     }
