@@ -700,33 +700,88 @@ __attribute__((noinline)) static bool wallet_aes256_cbc_check_multibit_classic_s
     return true;
 }
 
-static inline void wallet_hmac_sha1(const thread uchar* key,
-                                    uint key_len,
-                                    const thread uchar* msg,
-                                    uint msg_len,
-                                    thread uchar out20[20]) {
+struct WalletHmacSha1Precomp {
+    uint inner_state[5];
+    uint outer_state[5];
+};
+
+static inline void wallet_sha1_init_state(thread uint state[5]) {
+    state[0] = 0x67452301u;
+    state[1] = 0xefcdab89u;
+    state[2] = 0x98badcfeu;
+    state[3] = 0x10325476u;
+    state[4] = 0xc3d2e1f0u;
+}
+
+static inline void wallet_sha1_finish_prefixed(const thread uint prefix_state[5],
+                                               const thread uchar* msg,
+                                               uint msg_len,
+                                               thread uchar out20[20]) {
+    uint state[5];
+    for (uint i = 0u; i < 5u; ++i) {
+        state[i] = prefix_state[i];
+    }
+
+    const uint full_blocks = msg_len / 64u;
+    const uint rem = msg_len & 63u;
+    for (uint i = 0u; i < full_blocks; ++i) {
+        prng32_provider_sha1_compress_block32(state, msg + i * 64u);
+    }
+
+    uchar block[64];
+    memset(block, 0, sizeof(block));
+    if (rem != 0u) {
+        memcpy(block, msg + full_blocks * 64u, rem);
+    }
+    block[rem] = 0x80u;
+    if (rem >= 56u) {
+        prng32_provider_sha1_compress_block32(state, block);
+        memset(block, 0, sizeof(block));
+    }
+    const ulong bit_len = (64ul + ulong(msg_len)) * 8ul;
+    for (uint i = 0u; i < 8u; ++i) {
+        block[56u + i] = uchar(bit_len >> (56u - i * 8u));
+    }
+    prng32_provider_sha1_compress_block32(state, block);
+    for (uint i = 0u; i < 5u; ++i) {
+        out20[i * 4u + 0u] = uchar(state[i] >> 24u);
+        out20[i * 4u + 1u] = uchar(state[i] >> 16u);
+        out20[i * 4u + 2u] = uchar(state[i] >> 8u);
+        out20[i * 4u + 3u] = uchar(state[i]);
+    }
+}
+
+static inline void wallet_hmac_sha1_precompute(const thread uchar* key,
+                                               uint key_len,
+                                               thread WalletHmacSha1Precomp* ctx) {
     uchar key_hash[20];
     if (key_len > 64u) {
         prng32_provider_sha1_hash32(key, int(key_len), key_hash);
         key = key_hash;
         key_len = 20u;
     }
-    uchar inner[64 + WALLET_MAX_SALT_LEN + 4u];
-    uchar outer[84];
+    uchar pad[64];
     for (uint i = 0u; i < 64u; ++i) {
         const uchar k = i < key_len ? key[i] : 0u;
-        inner[i] = uchar(k ^ 0x36u);
-        outer[i] = uchar(k ^ 0x5cu);
+        pad[i] = uchar(k ^ 0x36u);
     }
-    for (uint i = 0u; i < msg_len; ++i) {
-        inner[64u + i] = msg[i];
+    wallet_sha1_init_state(ctx->inner_state);
+    prng32_provider_sha1_compress_block32(ctx->inner_state, pad);
+    for (uint i = 0u; i < 64u; ++i) {
+        const uchar k = i < key_len ? key[i] : 0u;
+        pad[i] = uchar(k ^ 0x5cu);
     }
-    uchar ihash[20];
-    prng32_provider_sha1_hash32(inner, int(64u + msg_len), ihash);
-    for (int i = 0; i < 20; ++i) {
-        outer[64 + i] = ihash[i];
-    }
-    prng32_provider_sha1_hash32(outer, 84, out20);
+    wallet_sha1_init_state(ctx->outer_state);
+    prng32_provider_sha1_compress_block32(ctx->outer_state, pad);
+}
+
+static inline void wallet_hmac_sha1_precomputed(const thread WalletHmacSha1Precomp* ctx,
+                                                const thread uchar* msg,
+                                                uint msg_len,
+                                                thread uchar out20[20]) {
+    uchar inner_hash[20];
+    wallet_sha1_finish_prefixed(ctx->inner_state, msg, msg_len, inner_hash);
+    wallet_sha1_finish_prefixed(ctx->outer_state, inner_hash, 20u, out20);
 }
 
 __attribute__((noinline)) static void wallet_pbkdf2_sha1_32(const thread uchar* pass,
@@ -745,17 +800,19 @@ __attribute__((noinline)) static void wallet_pbkdf2_sha1_32(const thread uchar* 
     uchar u[20];
     uchar u_next[20];
     uchar t[20];
+    WalletHmacSha1Precomp hmac;
+    wallet_hmac_sha1_precompute(pass, pass_len, &hmac);
     for (uint block = 1u, written = 0u; written < 32u; ++block) {
         for (uint i = 0u; i < salt_len; ++i) {
             salt_block[i] = salt_in[i];
         }
         wallet_store_be32(salt_block + salt_len, block);
-        wallet_hmac_sha1(pass, pass_len, salt_block, salt_len + 4u, u);
+        wallet_hmac_sha1_precomputed(&hmac, salt_block, salt_len + 4u, u);
         for (int i = 0; i < 20; ++i) {
             t[i] = u[i];
         }
         for (uint iter = 1u; iter < iterations; ++iter) {
-            wallet_hmac_sha1(pass, pass_len, u, 20u, u_next);
+            wallet_hmac_sha1_precomputed(&hmac, u, 20u, u_next);
             for (int i = 0; i < 20; ++i) {
                 u[i] = u_next[i];
                 t[i] = uchar(t[i] ^ u_next[i]);
