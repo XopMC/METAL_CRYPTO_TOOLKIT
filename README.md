@@ -34,6 +34,14 @@ baseline measurements:
 - `profanity`: reverse recovery with GPU-side hit prefiltering is **10.512–11.779% faster**;
 - `poetry`: finite-grid capping and identical-template batching are **20.735–21.324% faster** together;
 - `armory`: round-0 compressed public-key emission that reuses the derived child key is **10.170–10.361% faster**.
+- `keystore`: adaptive scrypt concurrency on the r=8/256-password profile is **49.499–49.646% faster**;
+- `walletdat`: the 4,096-password uniform KDF dictionary profile is **63.039–63.131% faster**;
+- `stellarwallet`: AES-GCM verification for 64 KiB payloads is **20.397–20.399% faster**;
+- `blockchainwallet`: PBKDF2-SHA1 with reusable HMAC states is **36.971–37.964% faster**;
+- `bisqwallet`: the N=1024/r=1 4,096-password scrypt profile is **48.986–49.203% faster**;
+- `dogechainwallet`: the 10,000-iteration PBKDF2 profile is **2.111–2.693% faster**;
+- `ethpresale`: grouped verification of 608-byte encrypted seeds is **34.941–35.576% faster**;
+- `walletscan`: mnemonic-heavy scanning of a 2 GiB text corpus is **14.131–14.187% faster**.
 
 ### What this program is
 
@@ -2018,6 +2026,14 @@ A1/B/A2. Каждый диапазон показывает результат �
 - `profanity`: reverse recovery с предварительной GPU-фильтрацией совпадений стал **на 10,512–11,779% быстрее**;
 - `poetry`: ограничение finite-grid и пакетная обработка одинаковых шаблонов вместе дали **ускорение на 20,735–21,324%**;
 - `armory`: round-0 вывод compressed public key с переиспользованием вычисленного child key стал **на 10,170–10,361% быстрее**.
+- `keystore`: адаптивная scrypt-конкурентность на профиле r=8/256 паролей дала **ускорение на 49,499–49,646%**;
+- `walletdat`: uniform KDF-профиль словаря из 4 096 паролей стал **на 63,039–63,131% быстрее**;
+- `stellarwallet`: проверка AES-GCM для payload размером 64 КиБ стала **на 20,397–20,399% быстрее**;
+- `blockchainwallet`: PBKDF2-SHA1 с переиспользованием состояний HMAC стал **на 36,971–37,964% быстрее**;
+- `bisqwallet`: scrypt-профиль N=1024/r=1 со словарем из 4 096 паролей стал **на 48,986–49,203% быстрее**;
+- `dogechainwallet`: PBKDF2-профиль с 10 000 итерациями стал **на 2,111–2,693% быстрее**;
+- `ethpresale`: групповая проверка encrypted seed размером 608 байт стала **на 34,941–35,576% быстрее**;
+- `walletscan`: mnemonic-heavy сканирование текстового набора объемом 2 ГиБ стало **на 14,131–14,187% быстрее**.
 
 ### Что это за программа
 
