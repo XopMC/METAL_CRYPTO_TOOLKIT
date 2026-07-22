@@ -901,12 +901,35 @@ __attribute__((noinline)) static bool wallet_ethpresale_priv_from_encseed(const 
     }
     uint round_keys[44];
     provider_aes_expand_key128(key32, round_keys);
+    const uint last_off = ciphertext_len - 16u;
+    uchar last_plain[16];
+    wallet_aes128_decrypt_block(round_keys, ciphertext + last_off, last_plain);
+    if (last_off == 0u) {
+        for (int i = 0; i < 16; ++i) {
+            last_plain[i] = uchar(last_plain[i] ^ iv16[i]);
+        }
+    } else {
+        const device uchar* last_prev = ciphertext + last_off - 16u;
+        for (int i = 0; i < 16; ++i) {
+            last_plain[i] = uchar(last_plain[i] ^ last_prev[i]);
+        }
+    }
+    const uchar pad = last_plain[15];
+    if (pad == 0u || pad > 16u || uint(pad) > ciphertext_len) {
+        return false;
+    }
+    for (uint i = 0u; i < uint(pad); ++i) {
+        if (last_plain[15u - i] != pad) {
+            return false;
+        }
+    }
+
     uchar seed[ETHPRESALE_MAX_ENCSEED_LEN + 2u];
     uchar prev[16];
     for (int i = 0; i < 16; ++i) {
         prev[i] = iv16[i];
     }
-    for (uint off = 0u; off < ciphertext_len; off += 16u) {
+    for (uint off = 0u; off < last_off; off += 16u) {
         uchar block[16];
         wallet_aes128_decrypt_block(round_keys, ciphertext + off, block);
         for (int i = 0; i < 16; ++i) {
@@ -914,14 +937,8 @@ __attribute__((noinline)) static bool wallet_ethpresale_priv_from_encseed(const 
             prev[i] = ciphertext[off + uint(i)];
         }
     }
-    const uchar pad = seed[ciphertext_len - 1u];
-    if (pad == 0u || pad > 16u || uint(pad) > ciphertext_len) {
-        return false;
-    }
-    for (uint i = 0u; i < uint(pad); ++i) {
-        if (seed[ciphertext_len - 1u - i] != pad) {
-            return false;
-        }
+    for (int i = 0; i < 16; ++i) {
+        seed[last_off + uint(i)] = last_plain[i];
     }
     const uint seed_len = ciphertext_len - uint(pad);
     keccak(reinterpret_cast<const thread char*>(seed), int(seed_len), priv32, 32);
