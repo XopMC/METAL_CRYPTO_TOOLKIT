@@ -24205,10 +24205,9 @@ static void wallet_scan_extract_mnemonics(
     };
     auto flush_word = [&]() {
         if (word.empty()) return;
-        const std::string norm = recovery_norm_token(word);
-        if (word_set.find(norm) != word_set.end()) {
+        if (word_set.find(word) != word_set.end()) {
             if (run.empty()) run_line = word_line;
-            run.emplace_back(norm);
+            run.emplace_back(word);
             if (run.size() > 24u) {
                 flush_run();
             }
