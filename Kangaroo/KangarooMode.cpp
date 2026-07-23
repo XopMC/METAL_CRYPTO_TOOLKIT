@@ -432,7 +432,7 @@ constexpr std::uint32_t kMinStepCount = 256;
 constexpr std::uint32_t kMaxStepCount = 8192;
 constexpr std::uint32_t kDefaultStepCount = 1000;
 constexpr std::uint32_t kThreadgroupSize = 256;
-constexpr std::uint32_t kKangaroosPerThread = 4;
+constexpr std::uint32_t kKangaroosPerThread = 16;
 constexpr std::uint32_t kDpCapacity = 256u * 1024u;
 constexpr int kMaxDevices = 32;
 

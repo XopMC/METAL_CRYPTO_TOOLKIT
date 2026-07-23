@@ -6,9 +6,11 @@
 
 using namespace metal;
 
-constant uint KANGAROO_GROUP_SIZE = 4u;
+constant uint KANGAROO_GROUP_SIZE = 16u;
 constant uint KANGAROO_DP_CAPACITY = 256u * 1024u;
 constant ushort KANGAROO_INV_FLAG = 0x4000u;
+constant uint KANGAROO_SECOND_FLAG = 0x8000u;
+constant uint KANGAROO_ESCAPE_FLAG = 0x10000u;
 
 struct KangarooState {
     ulong x[4];
@@ -147,21 +149,9 @@ static inline void kangaroo_walk_impl(
     ulong distances[GroupSize][4];
     uint types[GroupSize];
     uint flags[GroupSize];
-    bool active[GroupSize];
 
     for (uint lane = 0u; lane < GroupSize; ++lane) {
         const uint index = first + lane;
-        active[lane] = index < params.kangaroo_count;
-        if (!active[lane]) {
-            xs[lane][0] = 1ul;
-            xs[lane][1] = xs[lane][2] = xs[lane][3] = 0ul;
-            ys[lane][0] = ys[lane][1] = ys[lane][2] = ys[lane][3] = 0ul;
-            distances[lane][0] = distances[lane][1] =
-                distances[lane][2] = distances[lane][3] = 0ul;
-            types[lane] = 0u;
-            flags[lane] = 0u;
-            continue;
-        }
         const device KangarooState& state = states[index];
         for (uint limb = 0u; limb < 4u; ++limb) {
             xs[lane][limb] = state.x[limb];
@@ -178,39 +168,36 @@ static inline void kangaroo_walk_impl(
         ulong denominators[GroupSize][4];
         ulong prefixes[GroupSize][4];
         uint jump_indices[GroupSize];
-        bool inverted[GroupSize];
-        bool used_second[GroupSize];
-        bool used_escape[GroupSize];
 
         for (uint lane = 0u; lane < GroupSize; ++lane) {
-            if (!active[lane]) {
-                denominators[lane][0] = 1ul;
-                denominators[lane][1] = denominators[lane][2] =
-                    denominators[lane][3] = 0ul;
-            } else {
-                const uint state_index = first + lane;
-                const ulong global_step =
-                    params.launch_index * ulong(params.step_count) + ulong(step);
-                used_escape[lane] =
-                    ((global_step + ulong(state_index) * 0x9e3779b9ul) &
-                     0x000ffffful) == 0x000ffffful;
-                used_second[lane] = !used_escape[lane] && ((flags[lane] & 1u) != 0u);
-                const device ulong* table = used_escape[lane]
-                    ? jumps3
-                    : (used_second[lane] ? jumps2 : jumps1);
-                uint jump_index = uint(xs[lane][0]) & params.jump_mask;
-                ulong jump_x[4];
-                ulong jump_y[4];
+            const uint state_index = first + lane;
+            const ulong global_step =
+                params.launch_index * ulong(params.step_count) + ulong(step);
+            const bool used_escape =
+                ((global_step + ulong(state_index) * 0x9e3779b9ul) &
+                 0x000ffffful) == 0x000ffffful;
+            const bool used_second =
+                !used_escape && ((flags[lane] & 1u) != 0u);
+            const device ulong* table = used_escape
+                ? jumps3
+                : (used_second ? jumps2 : jumps1);
+            uint jump_index = uint(xs[lane][0]) & params.jump_mask;
+            ulong jump_x[4];
+            ulong jump_y[4];
+            kangaroo_jump_point(table, jump_index, jump_x, jump_y);
+            ModSub256(denominators[lane], xs[lane], jump_x);
+            if (kangaroo_zero256(denominators[lane])) {
+                jump_index = (jump_index + 1u) & params.jump_mask;
                 kangaroo_jump_point(table, jump_index, jump_x, jump_y);
                 ModSub256(denominators[lane], xs[lane], jump_x);
-                if (kangaroo_zero256(denominators[lane])) {
-                    jump_index = (jump_index + 1u) & params.jump_mask;
-                    kangaroo_jump_point(table, jump_index, jump_x, jump_y);
-                    ModSub256(denominators[lane], xs[lane], jump_x);
-                }
-                jump_indices[lane] = jump_index;
-                inverted[lane] = (ys[lane][0] & 1ul) != 0ul;
             }
+            jump_indices[lane] =
+                jump_index |
+                (((ys[lane][0] & 1ul) != 0ul)
+                     ? uint(KANGAROO_INV_FLAG)
+                     : 0u) |
+                (used_second ? KANGAROO_SECOND_FLAG : 0u) |
+                (used_escape ? KANGAROO_ESCAPE_FLAG : 0u);
 
             if (lane == 0u) {
                 kangaroo_copy256(prefixes[lane], denominators[lane]);
@@ -235,19 +222,23 @@ static inline void kangaroo_walk_impl(
                 _ModMult(inverse, product_inverse);
                 _ModMult(product_inverse, denominators[lane]);
             }
-            if (!active[lane]) {
-                continue;
-            }
-
-            const device ulong* table = used_escape[lane]
+            const uint jump_metadata = jump_indices[lane];
+            const bool used_escape =
+                (jump_metadata & KANGAROO_ESCAPE_FLAG) != 0u;
+            const bool used_second =
+                (jump_metadata & KANGAROO_SECOND_FLAG) != 0u;
+            const bool inverted =
+                (jump_metadata & uint(KANGAROO_INV_FLAG)) != 0u;
+            const device ulong* table = used_escape
                 ? jumps3
-                : (used_second[lane] ? jumps2 : jumps1);
-            const device ulong* jump = table + ulong(jump_indices[lane]) * 12ul;
+                : (used_second ? jumps2 : jumps1);
+            const uint jump_index = jump_metadata & params.jump_mask;
+            const device ulong* jump = table + ulong(jump_index) * 12ul;
             ulong jump_x[4];
             ulong jump_y[4];
             kangaroo_load256(jump_x, jump);
             kangaroo_load256(jump_y, jump + 4);
-            if (inverted[lane]) {
+            if (inverted) {
                 ModNeg256(jump_y);
                 kangaroo_sub256(distances[lane], jump + 8);
             } else {
@@ -266,11 +257,11 @@ static inline void kangaroo_walk_impl(
             _ModMult(next_y, slope);
             ModSub256(next_y, ys[lane]);
 
-            if (used_second[lane] || used_escape[lane]) {
+            if (used_second || used_escape) {
                 flags[lane] &= ~1u;
             } else {
-                uint current_jump = jump_indices[lane];
-                if (inverted[lane]) {
+                uint current_jump = jump_index;
+                if (inverted) {
                     current_jump |= uint(KANGAROO_INV_FLAG);
                 }
                 uint next_jump = uint(next_x[0]) & params.jump_mask;
@@ -296,9 +287,6 @@ static inline void kangaroo_walk_impl(
     }
 
     for (uint lane = 0u; lane < GroupSize; ++lane) {
-        if (!active[lane]) {
-            continue;
-        }
         const uint index = first + lane;
         device KangarooState& state = states[index];
         for (uint limb = 0u; limb < 4u; ++limb) {
