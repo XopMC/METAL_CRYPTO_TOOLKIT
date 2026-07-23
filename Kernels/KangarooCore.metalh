@@ -8,9 +8,15 @@ using namespace metal;
 
 constant uint KANGAROO_GROUP_SIZE = 16u;
 constant uint KANGAROO_DP_CAPACITY = 256u * 1024u;
+constant uint KANGAROO_COMPACT_DP_SLOTS = 32u;
 constant ushort KANGAROO_INV_FLAG = 0x4000u;
 constant uint KANGAROO_SECOND_FLAG = 0x8000u;
 constant uint KANGAROO_ESCAPE_FLAG = 0x10000u;
+constant ushort KANGAROO_COMPACT_JUMP_MASK = 0x01ffu;
+constant ushort KANGAROO_COMPACT_INV_FLAG = 0x0200u;
+constant ushort KANGAROO_COMPACT_SECOND_FLAG = 0x0400u;
+constant ushort KANGAROO_COMPACT_ESCAPE_FLAG = 0x0800u;
+constant ushort KANGAROO_COMPACT_DP_FLAG = 0x1000u;
 
 struct KangarooState {
     ulong x[4];
@@ -26,6 +32,11 @@ struct KangarooDP {
     ulong distance[4];
     uint type;
     uint reserved;
+};
+
+struct KangarooCompactDpX {
+    ulong x0;
+    ulong x1;
 };
 
 struct KangarooWalkParams {
@@ -47,6 +58,7 @@ struct KangarooInitParams {
 
 static_assert(sizeof(KangarooState) == 104, "KangarooState layout");
 static_assert(sizeof(KangarooDP) == 56, "KangarooDP layout");
+static_assert(sizeof(KangarooCompactDpX) == 16, "KangarooCompactDpX layout");
 static_assert(sizeof(KangarooWalkParams) == 32, "KangarooWalkParams layout");
 static_assert(sizeof(KangarooInitParams) == 16, "KangarooInitParams layout");
 
@@ -94,6 +106,32 @@ static inline void kangaroo_sub256(thread ulong value[4],
     }
 }
 
+static inline void kangaroo_compact_add192(thread ulong value[3],
+                                           const device ulong* addend) {
+    const ulong limb0 = value[0];
+    value[0] += addend[0];
+    const ulong carry0 = ulong(value[0] < limb0);
+    const ulong rhs1 = addend[1] + carry0;
+    const ulong carry1a = ulong(rhs1 < addend[1]);
+    const ulong limb1 = value[1];
+    value[1] += rhs1;
+    const ulong carry1b = ulong(value[1] < limb1);
+    value[2] += addend[2] + (carry1a | carry1b);
+}
+
+static inline void kangaroo_compact_sub192(thread ulong value[3],
+                                           const device ulong* subtrahend) {
+    const ulong limb0 = value[0];
+    value[0] -= subtrahend[0];
+    const ulong borrow0 = ulong(limb0 < subtrahend[0]);
+    const ulong rhs1 = subtrahend[1] + borrow0;
+    const ulong borrow1a = ulong(rhs1 < subtrahend[1]);
+    const ulong limb1 = value[1];
+    value[1] -= rhs1;
+    const ulong borrow1b = ulong(limb1 < rhs1);
+    value[2] -= subtrahend[2] + (borrow1a | borrow1b);
+}
+
 static inline bool kangaroo_is_dp(const thread ulong x[4], uint dp_bits) {
     const ulong mask = ~((1ul << (64u - dp_bits)) - 1ul);
     return (x[3] & mask) == 0ul;
@@ -126,6 +164,265 @@ static inline void kangaroo_jump_point(const device ulong* table,
     const device ulong* point = table + ulong(jump_index) * 12ul;
     kangaroo_load256(x, point);
     kangaroo_load256(y, point + 4);
+}
+
+template <uint GroupSize>
+static inline void kangaroo_walk_compact_impl(
+    device KangarooState* states,
+    const device ulong* jumps1,
+    const device ulong* jumps2,
+    const device ulong* jumps3,
+    device ushort* hop_metadata,
+    device KangarooCompactDpX* dp_x,
+    device uint* dp_counts,
+    device atomic_uint* replay_error,
+    constant KangarooWalkParams& params,
+    uint tid)
+{
+    const uint first = tid * GroupSize;
+    if (first >= params.kangaroo_count) {
+        return;
+    }
+
+    ulong xs[GroupSize][4];
+    ulong ys[GroupSize][4];
+    uint flags[GroupSize];
+    uint local_dp_counts[GroupSize];
+
+    for (uint lane = 0u; lane < GroupSize; ++lane) {
+        const uint index = first + lane;
+        const device KangarooState& state = states[index];
+        for (uint limb = 0u; limb < 4u; ++limb) {
+            xs[lane][limb] = state.x[limb];
+            ys[lane][limb] = state.y[limb];
+        }
+        flags[lane] = state.flags;
+        local_dp_counts[lane] = 0u;
+    }
+
+    for (uint step = 0u; step < params.step_count; ++step) {
+        ulong denominators[GroupSize][4];
+        ulong prefixes[GroupSize][4];
+        ushort jump_metadata[GroupSize];
+
+        for (uint lane = 0u; lane < GroupSize; ++lane) {
+            const uint state_index = first + lane;
+            const ulong global_step =
+                params.launch_index * ulong(params.step_count) + ulong(step);
+            const bool used_escape =
+                ((global_step + ulong(state_index) * 0x9e3779b9ul) &
+                 0x000ffffful) == 0x000ffffful;
+            const bool used_second =
+                !used_escape && ((flags[lane] & 1u) != 0u);
+            const device ulong* table = used_escape
+                ? jumps3
+                : (used_second ? jumps2 : jumps1);
+            uint jump_index = uint(xs[lane][0]) & params.jump_mask;
+            ulong jump_x[4];
+            ulong jump_y[4];
+            kangaroo_jump_point(table, jump_index, jump_x, jump_y);
+            ModSub256(denominators[lane], xs[lane], jump_x);
+            if (kangaroo_zero256(denominators[lane])) {
+                jump_index = (jump_index + 1u) & params.jump_mask;
+                kangaroo_jump_point(table, jump_index, jump_x, jump_y);
+                ModSub256(denominators[lane], xs[lane], jump_x);
+            }
+            jump_metadata[lane] =
+                ushort(jump_index) |
+                (((ys[lane][0] & 1ul) != 0ul)
+                     ? KANGAROO_COMPACT_INV_FLAG
+                     : ushort(0u)) |
+                (used_second ? KANGAROO_COMPACT_SECOND_FLAG : ushort(0u)) |
+                (used_escape ? KANGAROO_COMPACT_ESCAPE_FLAG : ushort(0u));
+
+            if (lane == 0u) {
+                kangaroo_copy256(prefixes[lane], denominators[lane]);
+            } else {
+                kangaroo_copy256(prefixes[lane], prefixes[lane - 1u]);
+                _ModMult(prefixes[lane], denominators[lane]);
+            }
+        }
+
+        ulong product_inverse[5];
+        kangaroo_copy256(product_inverse, prefixes[GroupSize - 1u]);
+        product_inverse[4] = 0ul;
+        _ModInv(product_inverse);
+
+        for (int reverse_lane = int(GroupSize) - 1; reverse_lane >= 0; --reverse_lane) {
+            const uint lane = uint(reverse_lane);
+            ulong inverse[4];
+            if (lane == 0u) {
+                kangaroo_copy256(inverse, product_inverse);
+            } else {
+                kangaroo_copy256(inverse, prefixes[lane - 1u]);
+                _ModMult(inverse, product_inverse);
+                _ModMult(product_inverse, denominators[lane]);
+            }
+            ushort metadata = jump_metadata[lane];
+            const bool used_escape =
+                (metadata & KANGAROO_COMPACT_ESCAPE_FLAG) != 0u;
+            const bool used_second =
+                (metadata & KANGAROO_COMPACT_SECOND_FLAG) != 0u;
+            const bool inverted =
+                (metadata & KANGAROO_COMPACT_INV_FLAG) != 0u;
+            const device ulong* table = used_escape
+                ? jumps3
+                : (used_second ? jumps2 : jumps1);
+            const uint jump_index =
+                uint(metadata & KANGAROO_COMPACT_JUMP_MASK) & params.jump_mask;
+            const device ulong* jump = table + ulong(jump_index) * 12ul;
+            ulong jump_x[4];
+            ulong jump_y[4];
+            kangaroo_load256(jump_x, jump);
+            kangaroo_load256(jump_y, jump + 4);
+            if (inverted) {
+                ModNeg256(jump_y);
+            }
+
+            ulong slope[4];
+            ulong next_x[4];
+            ulong next_y[4];
+            ModSub256(slope, ys[lane], jump_y);
+            _ModMult(slope, inverse);
+            _ModSqr(next_x, slope);
+            ModSub256(next_x, jump_x);
+            ModSub256(next_x, xs[lane]);
+            ModSub256(next_y, xs[lane], next_x);
+            _ModMult(next_y, slope);
+            ModSub256(next_y, ys[lane]);
+
+            if (used_second || used_escape) {
+                flags[lane] &= ~1u;
+            } else {
+                uint current_jump = jump_index;
+                if (inverted) {
+                    current_jump |= uint(KANGAROO_INV_FLAG);
+                }
+                uint next_jump = uint(next_x[0]) & params.jump_mask;
+                if ((next_y[0] & 1ul) == 0ul) {
+                    next_jump |= uint(KANGAROO_INV_FLAG);
+                }
+                if (current_jump == next_jump) {
+                    flags[lane] |= 1u;
+                }
+            }
+
+            kangaroo_copy256(xs[lane], next_x);
+            kangaroo_copy256(ys[lane], next_y);
+            if (kangaroo_is_dp(xs[lane], params.dp_bits)) {
+                metadata |= KANGAROO_COMPACT_DP_FLAG;
+                const uint slot = local_dp_counts[lane]++;
+                if (slot < KANGAROO_COMPACT_DP_SLOTS) {
+                    const ulong output_index =
+                        ulong(first + lane) * ulong(KANGAROO_COMPACT_DP_SLOTS) +
+                        ulong(slot);
+                    dp_x[output_index].x0 = xs[lane][0];
+                    dp_x[output_index].x1 = xs[lane][1];
+                } else {
+                    atomic_fetch_or_explicit(
+                        replay_error, 1u, memory_order_relaxed);
+                }
+            }
+            hop_metadata[
+                ulong(step) * ulong(params.kangaroo_count) +
+                ulong(first + lane)] = metadata;
+        }
+    }
+
+    for (uint lane = 0u; lane < GroupSize; ++lane) {
+        const uint index = first + lane;
+        device KangarooState& state = states[index];
+        for (uint limb = 0u; limb < 4u; ++limb) {
+            state.x[limb] = xs[lane][limb];
+            state.y[limb] = ys[lane][limb];
+        }
+        state.flags = flags[lane];
+        dp_counts[index] = local_dp_counts[lane];
+    }
+}
+
+static inline void kangaroo_replay_compact_impl(
+    device KangarooState* states,
+    const device ulong* jumps1,
+    const device ulong* jumps2,
+    const device ulong* jumps3,
+    const device ushort* hop_metadata,
+    const device KangarooCompactDpX* dp_x,
+    const device uint* dp_counts,
+    device KangarooDP* output,
+    device atomic_uint* output_count,
+    device atomic_uint* replay_error,
+    constant KangarooWalkParams& params,
+    uint state_index)
+{
+    if (state_index >= params.kangaroo_count) {
+        return;
+    }
+
+    device KangarooState& state = states[state_index];
+    ulong distance[3] = {
+        state.distance[0],
+        state.distance[1],
+        state.distance[2]
+    };
+    uint dp_slot = 0u;
+
+    for (uint step = 0u; step < params.step_count; ++step) {
+        const ushort metadata = hop_metadata[
+            ulong(step) * ulong(params.kangaroo_count) + ulong(state_index)];
+        const bool used_escape =
+            (metadata & KANGAROO_COMPACT_ESCAPE_FLAG) != 0u;
+        const bool used_second =
+            (metadata & KANGAROO_COMPACT_SECOND_FLAG) != 0u;
+        const bool inverted =
+            (metadata & KANGAROO_COMPACT_INV_FLAG) != 0u;
+        const device ulong* table = used_escape
+            ? jumps3
+            : (used_second ? jumps2 : jumps1);
+        const uint jump_index =
+            uint(metadata & KANGAROO_COMPACT_JUMP_MASK) & params.jump_mask;
+        const device ulong* jump_distance =
+            table + ulong(jump_index) * 12ul + 8ul;
+        if (inverted) {
+            kangaroo_compact_sub192(distance, jump_distance);
+        } else {
+            kangaroo_compact_add192(distance, jump_distance);
+        }
+
+        if ((metadata & KANGAROO_COMPACT_DP_FLAG) != 0u) {
+            if (dp_slot < KANGAROO_COMPACT_DP_SLOTS) {
+                const KangarooCompactDpX compact = dp_x[
+                    ulong(state_index) * ulong(KANGAROO_COMPACT_DP_SLOTS) +
+                    ulong(dp_slot)];
+                ulong x[4] = {compact.x0, compact.x1, 0ul, 0ul};
+                ulong signed_distance[4] = {
+                    distance[0],
+                    distance[1],
+                    distance[2],
+                    (distance[2] >> 63u) != 0ul ? ~0ul : 0ul
+                };
+                kangaroo_emit_dp(output_count,
+                                 output,
+                                 min(params.dp_capacity,
+                                     KANGAROO_DP_CAPACITY),
+                                 x,
+                                 signed_distance,
+                                 state.type);
+            } else {
+                atomic_fetch_or_explicit(
+                    replay_error, 2u, memory_order_relaxed);
+            }
+            ++dp_slot;
+        }
+    }
+
+    if (dp_slot != dp_counts[state_index]) {
+        atomic_fetch_or_explicit(replay_error, 4u, memory_order_relaxed);
+    }
+    state.distance[0] = distance[0];
+    state.distance[1] = distance[1];
+    state.distance[2] = distance[2];
+    state.distance[3] = (distance[2] >> 63u) != 0ul ? ~0ul : 0ul;
 }
 
 template <uint GroupSize>

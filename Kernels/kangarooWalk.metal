@@ -1,5 +1,8 @@
 #include "KangarooCore.metalh"
 
+static_assert(KANGAROO_GROUP_SIZE == 16u,
+              "legacy kangaroo walk requires the accepted group size");
+
 kernel void kangarooWalk(device KangarooState* states [[buffer(0)]],
                          const device ulong* jumps1 [[buffer(1)]],
                          const device ulong* jumps2 [[buffer(2)]],

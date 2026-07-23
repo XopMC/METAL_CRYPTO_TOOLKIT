@@ -434,6 +434,7 @@ constexpr std::uint32_t kDefaultStepCount = 1000;
 constexpr std::uint32_t kThreadgroupSize = 256;
 constexpr std::uint32_t kKangaroosPerThread = 16;
 constexpr std::uint32_t kDpCapacity = 256u * 1024u;
+constexpr std::uint32_t kCompactDpSlots = 32u;
 constexpr int kMaxDevices = 32;
 
 const cpp_int& curve_order()
@@ -502,6 +503,11 @@ struct alignas(8) KangarooDpHost {
     std::uint32_t reserved = 0;
 };
 
+struct alignas(8) KangarooCompactDpXHost {
+    std::uint64_t x0 = 0;
+    std::uint64_t x1 = 0;
+};
+
 struct alignas(8) KangarooWalkParamsHost {
     std::uint32_t kangaroo_count = 0;
     std::uint32_t step_count = 0;
@@ -521,6 +527,8 @@ struct KangarooInitParamsHost {
 
 static_assert(sizeof(KangarooStateHost) == 104, "KangarooState host layout");
 static_assert(sizeof(KangarooDpHost) == 56, "KangarooDP host layout");
+static_assert(sizeof(KangarooCompactDpXHost) == 16,
+              "KangarooCompactDpX host layout");
 static_assert(sizeof(KangarooWalkParamsHost) == 32, "KangarooWalkParams host layout");
 static_assert(sizeof(KangarooInitParamsHost) == 16, "KangarooInitParams host layout");
 
@@ -1625,6 +1633,12 @@ struct GpuContext {
     secp256k1_ge_storage* precompute = nullptr;
     std::uint64_t* base_a = nullptr;
     std::uint64_t* base_b = nullptr;
+    std::uint16_t* hop_metadata = nullptr;
+    KangarooCompactDpXHost* compact_dp_x = nullptr;
+    std::uint32_t* compact_dp_counts = nullptr;
+    std::uint32_t* compact_replay_error = nullptr;
+    bool compact170 = false;
+    bool compact170_fallback = false;
 
     void release()
     {
@@ -1634,6 +1648,10 @@ struct GpuContext {
         (void)metalFree(base_b);
         (void)metalFree(base_a);
         (void)metalFree(precompute);
+        (void)metalFree(compact_replay_error);
+        (void)metalFree(compact_dp_counts);
+        (void)metalFree(compact_dp_x);
+        (void)metalFree(hop_metadata);
         (void)metalFree(output_count);
         (void)metalFree(output);
         (void)metalFree(jumps3);
@@ -1643,6 +1661,10 @@ struct GpuContext {
         base_b = nullptr;
         base_a = nullptr;
         precompute = nullptr;
+        compact_replay_error = nullptr;
+        compact_dp_counts = nullptr;
+        compact_dp_x = nullptr;
+        hop_metadata = nullptr;
         output_count = nullptr;
         output = nullptr;
         jumps3 = nullptr;
@@ -1704,6 +1726,7 @@ bool copy_to_device(void* destination, const void* source,
 bool prepare_gpu_context(GpuContext& context,
                          int device,
                          int range_bits,
+                         std::uint32_t step_count,
                          bool generation_mode,
                          std::size_t selected_devices,
                          const HostPoint& base_a,
@@ -1726,6 +1749,7 @@ bool prepare_gpu_context(GpuContext& context,
     context.name = properties.name;
     context.kangaroo_count =
         auto_kangaroo_count(properties, range_bits, selected_devices);
+    context.compact170 = range_bits <= 170;
 
     std::vector<KangarooStateHost> initial(context.kangaroo_count);
     const std::uint64_t seed =
@@ -1775,6 +1799,46 @@ bool prepare_gpu_context(GpuContext& context,
         !allocate_device(context.base_b, 8u * sizeof(std::uint64_t),
                          "kangaroo base B", error)) {
         return false;
+    }
+    if (context.compact170) {
+        const std::size_t metadata_bytes =
+            static_cast<std::size_t>(context.kangaroo_count) *
+            static_cast<std::size_t>(step_count) * sizeof(std::uint16_t);
+        const std::size_t compact_dp_bytes =
+            static_cast<std::size_t>(context.kangaroo_count) *
+            static_cast<std::size_t>(kCompactDpSlots) *
+            sizeof(KangarooCompactDpXHost);
+        const std::size_t compact_count_bytes =
+            static_cast<std::size_t>(context.kangaroo_count) *
+            sizeof(std::uint32_t);
+        if (!allocate_device(context.hop_metadata,
+                             metadata_bytes,
+                             "compact170 hop metadata",
+                             error) ||
+            !allocate_device(context.compact_dp_x,
+                             compact_dp_bytes,
+                             "compact170 DP X scratch",
+                             error) ||
+            !allocate_device(context.compact_dp_counts,
+                             compact_count_bytes,
+                             "compact170 DP counts",
+                             error) ||
+            !allocate_device(context.compact_replay_error,
+                             sizeof(std::uint32_t),
+                             "compact170 replay status",
+                             error)) {
+            (void)metalFree(context.compact_replay_error);
+            (void)metalFree(context.compact_dp_counts);
+            (void)metalFree(context.compact_dp_x);
+            (void)metalFree(context.hop_metadata);
+            context.compact_replay_error = nullptr;
+            context.compact_dp_counts = nullptr;
+            context.compact_dp_x = nullptr;
+            context.hop_metadata = nullptr;
+            context.compact170 = false;
+            context.compact170_fallback = true;
+            error.clear();
+        }
     }
     const auto base_a_limbs = point_limbs(base_a);
     const auto base_b_limbs = point_limbs(base_b);
@@ -1921,6 +1985,7 @@ SolveResult solve_point(const Options& options,
                 *context,
                 device,
                 range_bits,
+                options.step_count,
                 generation_mode,
                 options.devices.size(),
                 generation_mode ? half_point : base_a,
@@ -1933,7 +1998,14 @@ SolveResult solve_point(const Options& options,
             return result;
         }
         std::cout << "[!] Metal GPU " << device << ": " << context->name
-                  << ", kangaroos: " << context->kangaroo_count << " [!]\n";
+                  << ", kangaroos: " << context->kangaroo_count
+                  << ", engine: "
+                  << (context->compact170
+                          ? "compact170"
+                          : (context->compact170_fallback
+                                 ? "legacy (compact170 VRAM fallback)"
+                                 : "legacy"))
+                  << " [!]\n";
         contexts.push_back(std::move(context));
     }
     if (contexts.empty()) {
@@ -1977,6 +2049,12 @@ SolveResult solve_point(const Options& options,
                           "clear kangaroo DP count", result.error)) {
                 return result;
             }
+            if (context->compact170 &&
+                !metal_ok(metalMemset(context->compact_replay_error, 0,
+                                     sizeof(std::uint32_t)),
+                          "clear compact170 replay status", result.error)) {
+                return result;
+            }
             const KangarooWalkParamsHost params{
                 context->kangaroo_count,
                 options.step_count,
@@ -1991,17 +2069,59 @@ SolveResult solve_point(const Options& options,
                 kKangaroosPerThread;
             const std::uint32_t blocks =
                 (walk_threads + kThreadgroupSize - 1u) / kThreadgroupSize;
-            if (!metal_ok(
-                    metal_launch("kangarooWalk", blocks, kThreadgroupSize,
-                                 context->states,
-                                 context->jumps1,
-                                 context->jumps2,
-                                 context->jumps3,
-                                 context->output,
-                                 context->output_count,
-                                 params),
-                    "kangarooWalk",
-                    result.error)) {
+            if (context->compact170) {
+                if (!metal_ok(
+                        metal_launch("kangarooWalkCompact",
+                                     blocks,
+                                     kThreadgroupSize,
+                                     context->states,
+                                     context->jumps1,
+                                     context->jumps2,
+                                     context->jumps3,
+                                     context->hop_metadata,
+                                     context->compact_dp_x,
+                                     context->compact_dp_counts,
+                                     context->compact_replay_error,
+                                     params),
+                        "kangarooWalkCompact",
+                        result.error)) {
+                    return result;
+                }
+                const std::uint32_t replay_blocks =
+                    (context->kangaroo_count + kThreadgroupSize - 1u) /
+                    kThreadgroupSize;
+                if (!metal_ok(
+                        metal_launch("kangarooReplayCompact",
+                                     replay_blocks,
+                                     kThreadgroupSize,
+                                     context->states,
+                                     context->jumps1,
+                                     context->jumps2,
+                                     context->jumps3,
+                                     context->hop_metadata,
+                                     context->compact_dp_x,
+                                     context->compact_dp_counts,
+                                     context->output,
+                                     context->output_count,
+                                     context->compact_replay_error,
+                                     params),
+                        "kangarooReplayCompact",
+                        result.error)) {
+                    return result;
+                }
+            } else if (!metal_ok(
+                           metal_launch("kangarooWalk",
+                                        blocks,
+                                        kThreadgroupSize,
+                                        context->states,
+                                        context->jumps1,
+                                        context->jumps2,
+                                        context->jumps3,
+                                        context->output,
+                                        context->output_count,
+                                        params),
+                           "kangarooWalk",
+                           result.error)) {
                 return result;
             }
         }
@@ -2027,6 +2147,41 @@ SolveResult solve_point(const Options& options,
                 return result;
             }
             std::uint32_t output_count = 0;
+            if (context.compact170) {
+                std::uint32_t replay_error = 0;
+                if (!metal_ok(
+                        metalMemcpy(&replay_error,
+                                    context.compact_replay_error,
+                                    sizeof(replay_error),
+                                    metalMemcpyDeviceToHost),
+                        "read compact170 replay status",
+                        result.error)) {
+                    return result;
+                }
+                if (replay_error != 0u) {
+                    std::vector<std::uint32_t> compact_counts(
+                        context.kangaroo_count);
+                    std::uint32_t max_compact_count = 0u;
+                    if (metal_ok(
+                            metalMemcpy(compact_counts.data(),
+                                        context.compact_dp_counts,
+                                        compact_counts.size() *
+                                            sizeof(std::uint32_t),
+                                        metalMemcpyDeviceToHost),
+                            "read compact170 DP counts",
+                            result.error)) {
+                        max_compact_count = *std::max_element(
+                            compact_counts.begin(), compact_counts.end());
+                    }
+                    std::ostringstream message;
+                    message << "compact170 replay overflow/mismatch (status "
+                            << replay_error
+                            << ", max per-walk DP " << max_compact_count
+                            << "); increase -dpbits or reduce -kangsteps";
+                    result.error = message.str();
+                    return result;
+                }
+            }
             if (!metal_ok(
                     metalMemcpy(&output_count,
                                 context.output_count,
