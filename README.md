@@ -62,6 +62,7 @@ The program can:
 - check secp256k1, ed25519, and sr25519 results for Bitcoin, Ethereum, TON, Solana, Polkadot/Substrate, Cardano, Filecoin, IOTA, Aptos, Sui, XRP, ICP, and Tezos;
 - search direct values or large target collections stored in Bloom and XOR filters;
 - examine raw private-key ranges, incomplete hexadecimal templates, Casascius minikeys, and known historical generator families;
+- recover a secp256k1 private key with `-kangaroo` when the complete public key and a bounded scalar interval are known;
 - verify password candidates against supported wallet containers and extracted wallet hashes;
 - transfer found records to the output writer without stopping the compute loop for every disk write.
 
@@ -1249,6 +1250,142 @@ printf '%s\n' \
 
 The result contains the completed private key and the target value that matched.
 
+#### `-kangaroo`
+
+**Use it for:** recovering a secp256k1 private scalar `k` from its complete
+public key `Q = kG` when `k` is known to lie inside a bounded interval.
+
+This is a native Metal implementation of the RCKangaroo collision search. It is
+not a linear private-key scan. Work grows approximately with the square root of
+the interval width, so range width matters far more than the number of
+hexadecimal digits in its endpoints.
+
+The mode requires exactly one 33-byte compressed or 65-byte uncompressed
+secp256k1 public key. An address, HASH160, Ethereum address, x-only public key,
+Bloom filter, or XOR filter is not enough because the algorithm needs the
+complete curve point. Kangaroo writes a verified result directly through `-o`;
+ordinary target-family switches such as `-c`, `-save`, and `-i` do not belong
+to this mode.
+
+**Range formats:**
+
+| Form | Interval searched |
+| --- | --- |
+| `-range 64` | `[2^63, 2^64)` |
+| `-range 65-72` | each complete bit interval from 65 through 72 bits, in order |
+| `-range 64,67,70-72` | the listed complete bit intervals, in order |
+| `-range START:END` | one exact hexadecimal interval `[START, END)` |
+
+`START` is inclusive and `END` is exclusive. An exact `START:END` interval
+cannot be combined with another `-range`. The accepted scalar domain is
+`0 <= START < END <=`
+`FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141`,
+the secp256k1 group order. A 256-bit bit range starts at `2^255` and ends at
+that group order.
+
+**Main arguments:**
+
+| Argument | Meaning |
+| --- | --- |
+| `-target HEX` / `-hash HEX` | one complete compressed or uncompressed secp256k1 public key; the names are aliases |
+| `-range VALUE` | one or more bit ranges, or one exact hexadecimal interval |
+| `-device LIST` | Metal devices such as `0`, `0,1,3`, or `0-3`; all available devices are used when omitted |
+| `-dpbits N` | distinguished-point bits, `14..60`; selected automatically when omitted |
+| `-lim N` | maximum operation factor; selected automatically when omitted |
+| `-jumps N` | power-of-two jump-table size from 8 through 512; default `512` |
+| `-kangsteps N` | steps per Metal launch, `256..8192`; default `1000` |
+| `-exp LIST` | explicit exponent chain, for example `255,192,128` |
+| `-first N -last N [-prob P]` | repeatedly generate a descending random exponent chain; `P` defaults to `0.5` |
+| `-kangaroo-dp-dir DIR` | tame distinguished-point cache directory |
+| `-kangaroo-dp-rebuild` | ignore and rebuild the selected tame cache |
+| `-no-kangaroo-dp-cache` | disable tame-cache loading and saving |
+| `-o FILE` | append verified results; default `result.txt` |
+| `-log` | append range diagnostics to `_local_artifacts/kangaroo.log` |
+
+Start with automatic `-dpbits` and `-lim`, the default jump table, and the
+default automatic Metal grid. Increase `-dpbits` if the program reports DP
+output overflow; higher values make distinguished points rarer. Increasing
+`-kangsteps` reduces host synchronization but makes each launch longer. A very
+small `-lim` can stop a valid search before a collision is found.
+
+**Example 1 — known scalar in an exact interval.**
+
+The public key below belongs to scalar `0x2a`. This example searches the
+exclusive-end interval `[0x1, 0x100)`:
+
+```bash
+./METAL_CRYPTO_TOOLKIT -kangaroo \
+  -target 02fe8d1eb1bcb3432b1db5833ff5f2226d9cb5e65cee430558c18ed3a3c86ce1af \
+  -range 1:100 \
+  -no-kangaroo-dp-cache \
+  -o kangaroo-known-key.txt
+```
+
+The final `priv:` field is:
+
+```text
+000000000000000000000000000000000000000000000000000000000000002a
+```
+
+**Example 2 — a complete 64-bit interval on one GPU.**
+
+```bash
+./METAL_CRYPTO_TOOLKIT -kangaroo \
+  -target YOUR_33_OR_65_BYTE_PUBLIC_KEY_HEX \
+  -range 64 \
+  -device 0 \
+  -o kangaroo-64.txt
+```
+
+This searches `[0x8000000000000000, 0x10000000000000000)`. Replace the
+placeholder with the full public key, not an address derived from it.
+
+**Example 3 — several bit intervals and two Metal devices.**
+
+```bash
+./METAL_CRYPTO_TOOLKIT -kangaroo \
+  -target YOUR_FULL_PUBLIC_KEY_HEX \
+  -range 65-68 \
+  -device 0,1 \
+  -kangaroo-dp-dir ./kangaroo-cache \
+  -o kangaroo-multigpu.txt
+```
+
+The first run builds reusable tame-point caches. A later run with the same
+range, DP settings, and jump count can reuse them. Use
+`-kangaroo-dp-rebuild` after intentionally changing or replacing cache
+material.
+
+**Example 4 — explicit RCKangaroo-style exponent decomposition.**
+
+```bash
+./METAL_CRYPTO_TOOLKIT -kangaroo \
+  -target YOUR_FULL_PUBLIC_KEY_HEX \
+  -range 64 \
+  -exp 255,192,128 \
+  -device 0 \
+  -o kangaroo-exp.txt
+```
+
+The mode subtracts the sum of the selected powers of two from the public point,
+solves the bounded remainder, then verifies the reconstructed full private key.
+Use `-exp` only when that decomposition is intentional. Alternatively,
+`-first 255 -last 128 -prob 0.5` generates descending random chains until a
+solution is found; `-exp` and `-first/-last` are mutually exclusive.
+
+The result block contains `Pub`, `Exps`, `Pub after subtract`, `k_low`, and
+`priv`. `priv` is the final verified private scalar. Cache formats PSWDP2 and
+PSWDP3 remain compatible with CUDA/RCKangaroo through 170-bit distances.
+Wider distances use the PSWDP4 Metal extension with signed 256-bit GPU state.
+This makes genuine 256-bit endpoints representable; it does not make a full
+256-bit-width search practical on present hardware.
+
+Full built-in help:
+
+```bash
+./METAL_CRYPTO_TOOLKIT -kangaroo -help
+```
+
 #### `-minikeys`
 
 **Use it for:** Casascius minikey strings.
@@ -1819,36 +1956,6 @@ The hexadecimal fields decode to 64-byte salts, a 16-byte IV, and a 96-byte mast
 
 Result profile: `android-backup-pbkdf2-sha1-aes-cbc`.
 
-#### `-kangaroo`
-
-`-kangaroo` recovers a secp256k1 private key when its complete public key and a
-bounded private-key interval are known. It is a native Metal adaptation of the
-RCKangaroo collision search, not a linear scan.
-
-```bash
-./METAL_CRYPTO_TOOLKIT -kangaroo \
-  -target 02fe8d1eb1bcb3432b1db5833ff5f2226d9cb5e65cee430558c18ed3a3c86ce1af \
-  -range 1:100 -dpbits 14 -kangsteps 8192
-```
-
-`-target` and `-hash` are aliases and accept one compressed or uncompressed
-secp256k1 public key. `-range` accepts bit values/lists such as `64` or
-`65-72`, or one exact hexadecimal `START:END` interval with an exclusive end.
-The interval may cover the full valid scalar domain. Distances are held as
-signed 256-bit values on the GPU, so this Metal implementation is not limited
-to RCKangaroo's original 170-bit internal distance. This removes a format and
-arithmetic limit; the expected work still grows exponentially with half the
-range width, so a 256-bit search is not practically solvable by present
-hardware.
-
-Useful controls are `-device`, `-dpbits 14..60`, `-lim`, `-jumps 8..512`
-(power of two), and `-kangsteps 256..8192`. `-exp` supplies an explicit
-exponent chain; `-first`, `-last`, and `-prob` generate one. Tame points are
-cached by default under `_local_artifacts/kangaroo_dp`. Use
-`-kangaroo-dp-dir`, `-kangaroo-dp-rebuild`, or `-no-kangaroo-dp-cache` to
-control that behavior. PSWDP2/PSWDP3 caches remain compatible through 170
-bits; wider distances use the Metal PSWDP4 extension.
-
 ### Inventory and catalogs
 
 #### `-walletscan`
@@ -2100,6 +2207,7 @@ A1/B/A2. Каждый диапазон показывает результат �
 - получать и проверять результаты secp256k1, ed25519 и sr25519 для Bitcoin, Ethereum, TON, Solana, Polkadot/Substrate, Cardano, Filecoin, IOTA, Aptos, Sui, XRP, ICP и Tezos;
 - искать одну известную цель напрямую либо проверять большие наборы целей через Bloom- и XOR-фильтры;
 - перебирать диапазоны приватов, восстанавливать неизвестные шестнадцатеричные позиции, проверять мини-ключи Casascius и воспроизводить известные старые генераторы;
+- восстанавливать приват secp256k1 через `-kangaroo`, когда известны полный публичный ключ и ограниченный диапазон скаляра;
 - проверять пароли поддерживаемых файлов кошельков и заранее извлеченных хешей;
 - передавать найденные записи на вывод в фоне, не останавливая вычисления после каждого совпадения.
 
@@ -3294,6 +3402,145 @@ printf '%s\n' \
 
 Seq/random, PRNG, числовые подрежимы priv, `-pb`, `-last`, `-size`, `-sizes` и `-dub` здесь не применяются.
 
+#### `-kangaroo`
+
+**Когда использовать:** когда известен полный публичный ключ secp256k1
+`Q = kG`, а соответствующий приватный скаляр `k` гарантированно находится
+внутри ограниченного интервала.
+
+Это нативная Metal-реализация collision-поиска RCKangaroo, а не линейный
+перебор приватов. Объём работы растёт приблизительно как квадратный корень из
+ширины интервала, поэтому ширина диапазона намного важнее количества
+hex-символов в его границах.
+
+Режиму нужен ровно один полный сжатый публичный ключ длиной 33 байта либо
+несжатый ключ длиной 65 байтов. Адрес, HASH160, Ethereum address, x-only
+public key, Bloom-фильтр или XOR-фильтр недостаточны: алгоритму нужна полная
+точка кривой. Найденный результат после точной проверки записывается через
+`-o`; обычные параметры семейств целей `-c`, `-save` и `-i` к этому режиму
+не относятся.
+
+**Форматы диапазона:**
+
+| Форма | Какой интервал проверяется |
+| --- | --- |
+| `-range 64` | `[2^63, 2^64)` |
+| `-range 65-72` | по очереди все полные битовые интервалы от 65 до 72 бит |
+| `-range 64,67,70-72` | перечисленные полные битовые интервалы по порядку |
+| `-range START:END` | один точный hex-интервал `[START, END)` |
+
+`START` включается, `END` не включается. Точный интервал `START:END` нельзя
+объединять с другим `-range`. Допустимая область:
+`0 <= START < END <=`
+`FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141`,
+то есть до порядка группы secp256k1. Битовый 256-битный диапазон начинается
+с `2^255` и заканчивается на порядке группы.
+
+**Основные параметры:**
+
+| Параметр | Значение |
+| --- | --- |
+| `-target HEX` / `-hash HEX` | один полный compressed или uncompressed публичный ключ secp256k1; имена являются алиасами |
+| `-range VALUE` | один или несколько битовых диапазонов либо один точный hex-интервал |
+| `-device LIST` | устройства Metal: `0`, `0,1,3` или `0-3`; без параметра используются все доступные |
+| `-dpbits N` | число бит distinguished point, `14..60`; без параметра выбирается автоматически |
+| `-lim N` | максимальный коэффициент работы; без параметра выбирается автоматически |
+| `-jumps N` | размер таблицы прыжков — степень двойки от 8 до 512; по умолчанию `512` |
+| `-kangsteps N` | шагов за один запуск Metal, `256..8192`; по умолчанию `1000` |
+| `-exp LIST` | явная цепочка степеней, например `255,192,128` |
+| `-first N -last N [-prob P]` | многократно создавать случайную убывающую цепочку; `P` по умолчанию `0.5` |
+| `-kangaroo-dp-dir DIR` | папка кеша tame distinguished points |
+| `-kangaroo-dp-rebuild` | не использовать старые tame points и перестроить выбранный кеш |
+| `-no-kangaroo-dp-cache` | отключить чтение и сохранение tame-кеша |
+| `-o FILE` | дописывать проверенные результаты; по умолчанию `result.txt` |
+| `-log` | дописывать сведения о диапазонах в `_local_artifacts/kangaroo.log` |
+
+Начинайте с автоматических `-dpbits` и `-lim`, стандартной таблицы прыжков и
+автоматической Metal-сетки. Если программа сообщает переполнение DP output,
+увеличьте `-dpbits`: distinguished points будут встречаться реже. Увеличение
+`-kangsteps` уменьшает число синхронизаций с CPU, но удлиняет каждый запуск
+кернела. Слишком маленький `-lim` может остановить корректный диапазон до
+нахождения collision.
+
+**Пример 1 — известный скаляр в точном интервале.**
+
+Публичный ключ ниже соответствует скаляру `0x2a`. Команда проверяет интервал
+`[0x1, 0x100)`, где правая граница не включается:
+
+```bash
+./METAL_CRYPTO_TOOLKIT -kangaroo \
+  -target 02fe8d1eb1bcb3432b1db5833ff5f2226d9cb5e65cee430558c18ed3a3c86ce1af \
+  -range 1:100 \
+  -no-kangaroo-dp-cache \
+  -o kangaroo-known-key.txt
+```
+
+Последнее поле `priv:` должно содержать:
+
+```text
+000000000000000000000000000000000000000000000000000000000000002a
+```
+
+**Пример 2 — полный 64-битный интервал на одном GPU.**
+
+```bash
+./METAL_CRYPTO_TOOLKIT -kangaroo \
+  -target YOUR_33_OR_65_BYTE_PUBLIC_KEY_HEX \
+  -range 64 \
+  -device 0 \
+  -o kangaroo-64.txt
+```
+
+Команда проверяет `[0x8000000000000000, 0x10000000000000000)`. Вместо
+placeholder требуется полный публичный ключ, а не полученный из него адрес.
+
+**Пример 3 — несколько битовых интервалов и два Metal-устройства.**
+
+```bash
+./METAL_CRYPTO_TOOLKIT -kangaroo \
+  -target YOUR_FULL_PUBLIC_KEY_HEX \
+  -range 65-68 \
+  -device 0,1 \
+  -kangaroo-dp-dir ./kangaroo-cache \
+  -o kangaroo-multigpu.txt
+```
+
+Первый запуск создаёт пригодные для повторного использования tame-кеши.
+Следующий запуск с тем же диапазоном, DP-параметрами и числом прыжков может их
+переиспользовать. После намеренной замены или изменения кеша используйте
+`-kangaroo-dp-rebuild`.
+
+**Пример 4 — явное разложение в стиле RCKangaroo.**
+
+```bash
+./METAL_CRYPTO_TOOLKIT -kangaroo \
+  -target YOUR_FULL_PUBLIC_KEY_HEX \
+  -range 64 \
+  -exp 255,192,128 \
+  -device 0 \
+  -o kangaroo-exp.txt
+```
+
+Режим вычитает из публичной точки сумму выбранных степеней двойки, решает
+ограниченный остаток, затем точно проверяет восстановленный полный приват.
+Используйте `-exp` только для намеренного разложения. Вариант
+`-first 255 -last 128 -prob 0.5` вместо этого создаёт случайные убывающие
+цепочки до нахождения решения; `-exp` нельзя объединять с `-first/-last`.
+
+Результат содержит `Pub`, `Exps`, `Pub after subtract`, `k_low` и `priv`.
+Поле `priv` — итоговый проверенный приватный скаляр. Кеши PSWDP2 и PSWDP3
+сохраняют совместимость с CUDA/RCKangaroo для дистанций до 170 бит. Более
+широкие дистанции используют Metal-расширение PSWDP4 и знаковое 256-битное
+состояние GPU. Поэтому реальные 256-битные границы представимы, но полный
+интервал шириной 256 бит остаётся практически неразрешимым на современном
+железе.
+
+Полная встроенная справка:
+
+```bash
+./METAL_CRYPTO_TOOLKIT -kangaroo -help
+```
+
 #### `-minikeys`
 
 **Когда использовать:** для мини-ключей Casascius.
@@ -3855,36 +4102,6 @@ $ab$<version>*<cipher>*<iterations>*<user_salt>*<ck_salt>*<user_iv>*<masterkey_b
 ```
 
 Профиль результата: `android-backup-pbkdf2-sha1-aes-cbc`.
-
-#### `-kangaroo`
-
-`-kangaroo` восстанавливает приват secp256k1, когда известны полный публичный
-ключ и ограниченный интервал приватных ключей. Это нативная Metal-адаптация
-collision-поиска RCKangaroo, а не линейный перебор.
-
-```bash
-./METAL_CRYPTO_TOOLKIT -kangaroo \
-  -target 02fe8d1eb1bcb3432b1db5833ff5f2226d9cb5e65cee430558c18ed3a3c86ce1af \
-  -range 1:100 -dpbits 14 -kangsteps 8192
-```
-
-`-target` и `-hash` являются алиасами и принимают один compressed либо
-uncompressed публичный ключ secp256k1. `-range` принимает битовые
-значения/списки (`64`, `65-72`) или один точный hex-интервал `START:END`, где
-верхняя граница не включается. Интервал может охватывать всю допустимую
-скалярную область. Дистанция на GPU хранится как знаковое 256-битное число,
-поэтому Metal-версия не ограничена исходным 170-битным внутренним форматом
-RCKangaroo. Это снимает ограничение арифметики и формата, но объём работы всё
-равно экспоненциально растёт с половиной ширины диапазона: полный 256-битный
-поиск на современном железе практически неразрешим.
-
-Основные настройки: `-device`, `-dpbits 14..60`, `-lim`,
-`-jumps 8..512` (степень двойки) и `-kangsteps 256..8192`. `-exp` задаёт
-точную цепочку степеней; `-first`, `-last` и `-prob` создают её. Tame points
-по умолчанию кешируются в `_local_artifacts/kangaroo_dp`; поведение меняют
-`-kangaroo-dp-dir`, `-kangaroo-dp-rebuild` и `-no-kangaroo-dp-cache`.
-PSWDP2/PSWDP3 остаются совместимыми до 170 бит, а более широкие дистанции
-используют Metal-расширение PSWDP4.
 
 ### Инвентаризация и каталоги
 
