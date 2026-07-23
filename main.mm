@@ -14,6 +14,7 @@
 #include "KernelRuntime.h"
 #include "PoetryHost.h"
 #include "SecpPrecompute.h"
+#include "Kangaroo/KangarooMode.h"
 #include "Kernels/ProfanityHost.h"
 #include "Kernels/WalletModesHost.h"
 #include "RecoveryWordlistsEmbedded.h"
@@ -2416,6 +2417,7 @@ static bool xp_android_bitcoin_wallet_profile_from_arg(const std::string& arg);
 static bool xp_bluewallet_isaac_hd_v3_profile_from_arg(const std::string& arg);
 static bool xp_tezosj_java_random_profile_from_arg(const std::string& arg);
 void printSpeed(double speed, int byte_p = 0, uint32_t seed_p = 0, int skip = 0, double valid_speed = -1.0, double wallet_password_speed = -1.0);
+static void printKangarooSpeed(double jump_speed, double equivalent_key_speed);
 
 
 char* __strlwr(char* str);
@@ -2590,6 +2592,10 @@ bool set_block = false;
 bool set_thread = false;
 thread_local uint64_t workSize = 0;
 AtomicCounter64 counterTotal = 0;
+static bool KANGAROO_MODE = false;
+static std::atomic<uint64_t> g_kangaroo_speed_epoch{ 0 };
+static std::atomic<double> g_kangaroo_equivalent_keys_per_jump{ 0.0 };
+static std::atomic<uint32_t> g_kangaroo_founds{ 0 };
 AtomicCounter64 counterNotValid = 0;
 AtomicCounter64 counterMiniValid = 0;
 AtomicCounter64 counterProfanitySeedResolve = 0;
@@ -7187,6 +7193,7 @@ enum class HelpTopic {
     PassThread,
     Priv,
     PrivRecovery,
+    Kangaroo,
     Poetry,
     Minikeys,
     MinikeysSeed,
@@ -9242,6 +9249,7 @@ static HelpTopic detect_help_topic(int argc, char** argv) {
         if (is_help_topic_arg(arg, "-priv")) {
             return has_arg(argc, argv, "-recovery") ? HelpTopic::PrivRecovery : HelpTopic::Priv;
         }
+        if (is_help_topic_arg(arg, "-kangaroo")) return HelpTopic::Kangaroo;
         if (is_help_topic_arg(arg, "-poetry")) return HelpTopic::Poetry;
         if (is_help_topic_arg(arg, "-minikeys")) {
             return has_arg(argc, argv, "-seed") ? HelpTopic::MinikeysSeed : HelpTopic::Minikeys;
@@ -9303,6 +9311,7 @@ static const char* help_topic_command(HelpTopic topic) {
     case HelpTopic::PassThread: return "-pass_thread";
     case HelpTopic::Priv: return "-priv";
     case HelpTopic::PrivRecovery: return "-priv -recovery";
+    case HelpTopic::Kangaroo: return "-kangaroo";
     case HelpTopic::Poetry: return "-poetry";
     case HelpTopic::Minikeys: return "-minikeys";
     case HelpTopic::MinikeysSeed: return "-minikeys -seed";
@@ -9383,6 +9392,7 @@ static void printHelpShort() {
 [!] [!] PRIVATE KEY / HISTORICAL REPLAY MODES [!] [!]
 [!] -priv                         Raw private key search.
 [!] -priv -recovery               Raw private key template recovery.
+[!] -kangaroo                     Bounded secp256k1 private-key recovery.
 [!] -poetry                       Poetry brainwallet phrase recovery.
 [!] -minikeys                     Casascius minikey search.
 [!] -minikeys -seed               Deterministic Casascius minikey seed mode.
@@ -10653,6 +10663,9 @@ static void printHelpModeSection(HelpTopic topic) {
     case HelpTopic::Priv:
         printHelpPrivSection();
         break;
+    case HelpTopic::Kangaroo:
+        kangaroo::print_help();
+        break;
     case HelpTopic::Poetry:
         poetry_print_help();
         break;
@@ -10787,7 +10800,7 @@ int main(int argc, char** argv)
         std::ios_base::sync_with_stdio(false);
         std::cin.tie(nullptr);
     }
-    printf("[!] METAL_CRYPTO_TOOLKIT v14.1.0 by @XopMC for Crypto Community\n");
+    printf("[!] METAL_CRYPTO_TOOLKIT v15.0.0 by @XopMC for Crypto Community\n");
 
     if (argc == 1) {
         printHelpShort();
@@ -10796,6 +10809,50 @@ int main(int argc, char** argv)
     if (has_help_arg(argc, argv)) {
         printHelpTopic(detect_help_topic(argc, argv));
         return 0;
+    }
+    if (kangaroo::requested(argc, argv)) {
+        KANGAROO_MODE = true;
+        counterTotal = 0;
+        Founds = 0;
+        isRun = true;
+        g_kangaroo_equivalent_keys_per_jump.store(0.0, std::memory_order_relaxed);
+        g_kangaroo_speed_epoch.store(0, std::memory_order_relaxed);
+        g_kangaroo_founds.store(0, std::memory_order_relaxed);
+
+        const std::time_t started =
+            std::chrono::system_clock::to_time_t(
+                std::chrono::system_clock::now());
+        std::cout << "[!] Program started at: " << std::ctime(&started);
+
+        std::thread speed_thread(SpeedThreadFunc);
+        const kangaroo::RuntimeHooks hooks{
+            [](std::uint64_t operations) {
+                counterTotal += operations;
+            },
+            [](double equivalent_keys_per_jump) {
+                g_kangaroo_equivalent_keys_per_jump.store(
+                    equivalent_keys_per_jump,
+                    std::memory_order_release);
+                g_kangaroo_speed_epoch.fetch_add(1, std::memory_order_acq_rel);
+            },
+            []() {
+                g_kangaroo_founds.fetch_add(1, std::memory_order_release);
+                ++Founds;
+            }
+        };
+        const int result = kangaroo::run(argc, argv, hooks);
+        isRun = false;
+        if (speed_thread.joinable()) {
+            speed_thread.join();
+        }
+
+        const std::time_t finished =
+            std::chrono::system_clock::to_time_t(
+                std::chrono::system_clock::now());
+        std::cout << "\n[!] Processed " << counterTotal
+                  << " kangaroo operations. Found: " << Founds
+                  << ". Program finished at " << std::ctime(&finished);
+        return result;
     }
     if (!readArgs(argc, argv)) {
         return 2;
@@ -58823,9 +58880,49 @@ void SpeedThreadFunc()
     uint64_t baseWalletPasswordCandidates = 0;
     uint64_t basePausedNs = 0;
     steady_clock::time_point baseTime{};
+    uint64_t kangarooEpoch =
+        g_kangaroo_speed_epoch.load(std::memory_order_acquire);
+    uint64_t kangarooLastOperations = counterTotal.load();
+    steady_clock::time_point kangarooLastTime = steady_clock::now();
 
     while (isRun)
     {
+        if (KANGAROO_MODE)
+        {
+            const auto nowTime = steady_clock::now();
+            const uint64_t epoch =
+                g_kangaroo_speed_epoch.load(std::memory_order_acquire);
+            const uint64_t totalOperations = counterTotal.load();
+            if (epoch != kangarooEpoch)
+            {
+                kangarooEpoch = epoch;
+                kangarooLastOperations = totalOperations;
+                kangarooLastTime = nowTime;
+            }
+            const double elapsed =
+                duration_cast<duration<double>>(nowTime - kangarooLastTime).count();
+            if (elapsed >= 1.0)
+            {
+                const uint64_t completed =
+                    totalOperations >= kangarooLastOperations
+                    ? totalOperations - kangarooLastOperations
+                    : 0ull;
+                if (completed > 0)
+                {
+                    const double jumpSpeed =
+                        static_cast<double>(completed) / elapsed;
+                    const double equivalentSpeed = jumpSpeed *
+                        g_kangaroo_equivalent_keys_per_jump.load(
+                            std::memory_order_acquire);
+                    printKangarooSpeed(jumpSpeed, equivalentSpeed);
+                }
+                kangarooLastOperations = totalOperations;
+                kangarooLastTime = nowTime;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            continue;
+        }
+
         const uint64_t totalKeys = counterTotal.load();
         const uint64_t totalMiniValid = counterMiniValid.load();
         const uint64_t totalWalletDatKdfIterations = counterWalletDatKdfIterations.load();
@@ -58929,6 +59026,24 @@ void SpeedThreadFunc()
             std::this_thread::sleep_for(std::chrono::milliseconds(1));
         }
     }
+}
+
+static void printKangarooSpeed(double jump_speed,
+                               double equivalent_key_speed)
+{
+    const unsigned long long total =
+        static_cast<unsigned long long>(counterTotal.load());
+    const std::string jumpSpeed =
+        formatDouble("%.2f", jump_speed) + " Jump/s";
+    const std::string equivalentSpeed =
+        formatDouble("%.2f", equivalent_key_speed) + " EqKey/s";
+    printf("[!] T:[%llu] | S:[%s] [%s] | F:[%i] [!]           \r",
+           total,
+           jumpSpeed.c_str(),
+           equivalentSpeed.c_str(),
+           static_cast<unsigned int>(
+               g_kangaroo_founds.load(std::memory_order_acquire)));
+    fflush(stdout);
 }
 
 // old_speed_hash_multiplier: calculates Hash/s multiplier for old Electrum modes.

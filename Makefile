@@ -36,6 +36,7 @@ CPP_SRCS := \
 	MacFileSystem.cpp \
 	PoetryHost.cpp \
 	SecpPrecompute.cpp \
+	Kangaroo/KangarooMode.cpp \
 	host_secp/HostSecp256k1.cpp \
 	old_electrum_host.cpp \
 	lib/util.cpp lib/Bech32.cpp lib/V/VBase58.cpp \
@@ -53,6 +54,7 @@ DEPS := $(HOST_OBJS:.o=.d) $(CPP_OBJS:.o=.d) $(C_OBJS:.o=.d)
 
 LOCALIZED_HOST_HEADERS := Makefile KernelRuntime.h MacFileSystem.h Poetry.h PoetryHost.h SecpPrecompute.h \
 	main_priv_recovery_runtime.h xor_filter_core.h \
+	Kangaroo/KangarooMode.h \
 	Prng32ComboAllowlist.generated.h Prng64ComboAllowlist.generated.h \
 	Kernels/ProfanityHost.h Kernels/WalletModesHost.h Kernels/XpReplayHost.h \
 	lib/hash/GPUHash.h lib/hash/sha3_ver3.h

@@ -71,6 +71,13 @@ Recommended precautions:
 - test a complicated command on a small known fixture before starting a long search;
 - do not run two processes with the same output file unless mixed records are acceptable.
 
+### Licensing
+
+The original toolkit sources retain the MIT license notice in `LICENSE`.
+The native Metal `-kangaroo` implementation is adapted from RCKangaroo and is
+covered by GNU GPLv3. Builds that include this mode are therefore distributed
+under GPLv3. See `COPYING.GPLv3.txt` and `THIRD_PARTY_NOTICES.md`.
+
 ### Requirements
 
 #### Ready-to-run v14.1 release
@@ -1803,6 +1810,36 @@ The hexadecimal fields decode to 64-byte salts, a 16-byte IV, and a 96-byte mast
 
 Result profile: `android-backup-pbkdf2-sha1-aes-cbc`.
 
+#### `-kangaroo`
+
+`-kangaroo` recovers a secp256k1 private key when its complete public key and a
+bounded private-key interval are known. It is a native Metal adaptation of the
+RCKangaroo collision search, not a linear scan.
+
+```bash
+./METAL_CRYPTO_TOOLKIT -kangaroo \
+  -target 02fe8d1eb1bcb3432b1db5833ff5f2226d9cb5e65cee430558c18ed3a3c86ce1af \
+  -range 1:100 -dpbits 14 -kangsteps 8192
+```
+
+`-target` and `-hash` are aliases and accept one compressed or uncompressed
+secp256k1 public key. `-range` accepts bit values/lists such as `64` or
+`65-72`, or one exact hexadecimal `START:END` interval with an exclusive end.
+The interval may cover the full valid scalar domain. Distances are held as
+signed 256-bit values on the GPU, so this Metal implementation is not limited
+to RCKangaroo's original 170-bit internal distance. This removes a format and
+arithmetic limit; the expected work still grows exponentially with half the
+range width, so a 256-bit search is not practically solvable by present
+hardware.
+
+Useful controls are `-device`, `-dpbits 14..60`, `-lim`, `-jumps 8..512`
+(power of two), and `-kangsteps 256..8192`. `-exp` supplies an explicit
+exponent chain; `-first`, `-last`, and `-prob` generate one. Tame points are
+cached by default under `_local_artifacts/kangaroo_dp`. Use
+`-kangaroo-dp-dir`, `-kangaroo-dp-rebuild`, or `-no-kangaroo-dp-cache` to
+control that behavior. PSWDP2/PSWDP3 caches remain compatible through 170
+bits; wider distances use the Metal PSWDP4 extension.
+
 ### Inventory and catalogs
 
 #### `-walletscan`
@@ -2062,6 +2099,14 @@ A1/B/A2. Каждый диапазон показывает результат �
 - не отправляйте реальные мнемоники и приваты на сайты и в облачные сервисы;
 - сложную команду сначала проверяйте на маленьком примере с заранее известным ответом;
 - не запускайте два процесса с одним выходным файлом, если перемешивание строк недопустимо.
+
+### Лицензирование
+
+Исходные части тулкита сохраняют лицензию MIT из файла `LICENSE`. Нативная
+Metal-реализация `-kangaroo` адаптирована из RCKangaroo и распространяется по
+GNU GPLv3. Поэтому сборки, включающие этот режим, распространяются по GPLv3.
+Полный текст и атрибуция находятся в `COPYING.GPLv3.txt` и
+`THIRD_PARTY_NOTICES.md`.
 
 ### Системные требования
 
@@ -3792,6 +3837,36 @@ $ab$<version>*<cipher>*<iterations>*<user_salt>*<ck_salt>*<user_iv>*<masterkey_b
 ```
 
 Профиль результата: `android-backup-pbkdf2-sha1-aes-cbc`.
+
+#### `-kangaroo`
+
+`-kangaroo` восстанавливает приват secp256k1, когда известны полный публичный
+ключ и ограниченный интервал приватных ключей. Это нативная Metal-адаптация
+collision-поиска RCKangaroo, а не линейный перебор.
+
+```bash
+./METAL_CRYPTO_TOOLKIT -kangaroo \
+  -target 02fe8d1eb1bcb3432b1db5833ff5f2226d9cb5e65cee430558c18ed3a3c86ce1af \
+  -range 1:100 -dpbits 14 -kangsteps 8192
+```
+
+`-target` и `-hash` являются алиасами и принимают один compressed либо
+uncompressed публичный ключ secp256k1. `-range` принимает битовые
+значения/списки (`64`, `65-72`) или один точный hex-интервал `START:END`, где
+верхняя граница не включается. Интервал может охватывать всю допустимую
+скалярную область. Дистанция на GPU хранится как знаковое 256-битное число,
+поэтому Metal-версия не ограничена исходным 170-битным внутренним форматом
+RCKangaroo. Это снимает ограничение арифметики и формата, но объём работы всё
+равно экспоненциально растёт с половиной ширины диапазона: полный 256-битный
+поиск на современном железе практически неразрешим.
+
+Основные настройки: `-device`, `-dpbits 14..60`, `-lim`,
+`-jumps 8..512` (степень двойки) и `-kangsteps 256..8192`. `-exp` задаёт
+точную цепочку степеней; `-first`, `-last` и `-prob` создают её. Tame points
+по умолчанию кешируются в `_local_artifacts/kangaroo_dp`; поведение меняют
+`-kangaroo-dp-dir`, `-kangaroo-dp-rebuild` и `-no-kangaroo-dp-cache`.
+PSWDP2/PSWDP3 остаются совместимыми до 170 бит, а более широкие дистанции
+используют Metal-расширение PSWDP4.
 
 ### Инвентаризация и каталоги
 
