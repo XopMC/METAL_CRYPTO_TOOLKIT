@@ -425,6 +425,85 @@ static inline void kangaroo_replay_compact_impl(
     state.distance[3] = (distance[2] >> 63u) != 0ul ? ~0ul : 0ul;
 }
 
+static inline void kangaroo_replay_wide_impl(
+    device KangarooState* states,
+    const device ulong* jumps1,
+    const device ulong* jumps2,
+    const device ulong* jumps3,
+    const device ushort* hop_metadata,
+    const device KangarooCompactDpX* dp_x,
+    const device uint* dp_counts,
+    device KangarooDP* output,
+    device atomic_uint* output_count,
+    device atomic_uint* replay_error,
+    constant KangarooWalkParams& params,
+    uint state_index)
+{
+    if (state_index >= params.kangaroo_count) {
+        return;
+    }
+
+    device KangarooState& state = states[state_index];
+    ulong distance[4] = {
+        state.distance[0],
+        state.distance[1],
+        state.distance[2],
+        state.distance[3]
+    };
+    uint dp_slot = 0u;
+
+    for (uint step = 0u; step < params.step_count; ++step) {
+        const ushort metadata = hop_metadata[
+            ulong(step) * ulong(params.kangaroo_count) + ulong(state_index)];
+        const bool used_escape =
+            (metadata & KANGAROO_COMPACT_ESCAPE_FLAG) != 0u;
+        const bool used_second =
+            (metadata & KANGAROO_COMPACT_SECOND_FLAG) != 0u;
+        const bool inverted =
+            (metadata & KANGAROO_COMPACT_INV_FLAG) != 0u;
+        const device ulong* table = used_escape
+            ? jumps3
+            : (used_second ? jumps2 : jumps1);
+        const uint jump_index =
+            uint(metadata & KANGAROO_COMPACT_JUMP_MASK) & params.jump_mask;
+        const device ulong* jump_distance =
+            table + ulong(jump_index) * 12ul + 8ul;
+        if (inverted) {
+            kangaroo_sub256(distance, jump_distance);
+        } else {
+            kangaroo_add256(distance, jump_distance);
+        }
+
+        if ((metadata & KANGAROO_COMPACT_DP_FLAG) != 0u) {
+            if (dp_slot < KANGAROO_COMPACT_DP_SLOTS) {
+                const KangarooCompactDpX compact = dp_x[
+                    ulong(state_index) * ulong(KANGAROO_COMPACT_DP_SLOTS) +
+                    ulong(dp_slot)];
+                ulong x[4] = {compact.x0, compact.x1, 0ul, 0ul};
+                kangaroo_emit_dp(output_count,
+                                 output,
+                                 min(params.dp_capacity,
+                                     KANGAROO_DP_CAPACITY),
+                                 x,
+                                 distance,
+                                 state.type);
+            } else {
+                atomic_fetch_or_explicit(
+                    replay_error, 2u, memory_order_relaxed);
+            }
+            ++dp_slot;
+        }
+    }
+
+    if (dp_slot != dp_counts[state_index]) {
+        atomic_fetch_or_explicit(replay_error, 4u, memory_order_relaxed);
+    }
+    state.distance[0] = distance[0];
+    state.distance[1] = distance[1];
+    state.distance[2] = distance[2];
+    state.distance[3] = distance[3];
+}
+
 template <uint GroupSize>
 static inline void kangaroo_walk_impl(
     device KangarooState* states,

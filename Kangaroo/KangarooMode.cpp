@@ -1638,7 +1638,9 @@ struct GpuContext {
     std::uint32_t* compact_dp_counts = nullptr;
     std::uint32_t* compact_replay_error = nullptr;
     bool compact170 = false;
+    bool wide256 = false;
     bool compact170_fallback = false;
+    bool wide256_fallback = false;
 
     void release()
     {
@@ -1750,6 +1752,7 @@ bool prepare_gpu_context(GpuContext& context,
     context.kangaroo_count =
         auto_kangaroo_count(properties, range_bits, selected_devices);
     context.compact170 = range_bits <= 170;
+    context.wide256 = range_bits > 170;
 
     std::vector<KangarooStateHost> initial(context.kangaroo_count);
     const std::uint64_t seed =
@@ -1800,7 +1803,7 @@ bool prepare_gpu_context(GpuContext& context,
                          "kangaroo base B", error)) {
         return false;
     }
-    if (context.compact170) {
+    if (context.compact170 || context.wide256) {
         const std::size_t metadata_bytes =
             static_cast<std::size_t>(context.kangaroo_count) *
             static_cast<std::size_t>(step_count) * sizeof(std::uint16_t);
@@ -1835,8 +1838,11 @@ bool prepare_gpu_context(GpuContext& context,
             context.compact_dp_counts = nullptr;
             context.compact_dp_x = nullptr;
             context.hop_metadata = nullptr;
+            const bool was_compact170 = context.compact170;
             context.compact170 = false;
-            context.compact170_fallback = true;
+            context.wide256 = false;
+            context.compact170_fallback = was_compact170;
+            context.wide256_fallback = !was_compact170;
             error.clear();
         }
     }
@@ -2002,9 +2008,13 @@ SolveResult solve_point(const Options& options,
                   << ", engine: "
                   << (context->compact170
                           ? "compact170"
-                          : (context->compact170_fallback
+                          : (context->wide256
+                                 ? "wide256"
+                                 : (context->compact170_fallback
                                  ? "legacy (compact170 VRAM fallback)"
-                                 : "legacy"))
+                                 : (context->wide256_fallback
+                                        ? "legacy (wide256 VRAM fallback)"
+                                        : "legacy"))))
                   << " [!]\n";
         contexts.push_back(std::move(context));
     }
@@ -2049,7 +2059,7 @@ SolveResult solve_point(const Options& options,
                           "clear kangaroo DP count", result.error)) {
                 return result;
             }
-            if (context->compact170 &&
+            if ((context->compact170 || context->wide256) &&
                 !metal_ok(metalMemset(context->compact_replay_error, 0,
                                      sizeof(std::uint32_t)),
                           "clear compact170 replay status", result.error)) {
@@ -2069,7 +2079,7 @@ SolveResult solve_point(const Options& options,
                 kKangaroosPerThread;
             const std::uint32_t blocks =
                 (walk_threads + kThreadgroupSize - 1u) / kThreadgroupSize;
-            if (context->compact170) {
+            if (context->compact170 || context->wide256) {
                 if (!metal_ok(
                         metal_launch("kangarooWalkCompact",
                                      blocks,
@@ -2090,8 +2100,11 @@ SolveResult solve_point(const Options& options,
                 const std::uint32_t replay_blocks =
                     (context->kangaroo_count + kThreadgroupSize - 1u) /
                     kThreadgroupSize;
+                const char* replay_kernel = context->compact170
+                    ? "kangarooReplayCompact"
+                    : "kangarooReplayWide";
                 if (!metal_ok(
-                        metal_launch("kangarooReplayCompact",
+                        metal_launch(replay_kernel,
                                      replay_blocks,
                                      kThreadgroupSize,
                                      context->states,
@@ -2105,7 +2118,7 @@ SolveResult solve_point(const Options& options,
                                      context->output_count,
                                      context->compact_replay_error,
                                      params),
-                        "kangarooReplayCompact",
+                        replay_kernel,
                         result.error)) {
                     return result;
                 }
@@ -2147,7 +2160,7 @@ SolveResult solve_point(const Options& options,
                 return result;
             }
             std::uint32_t output_count = 0;
-            if (context.compact170) {
+            if (context.compact170 || context.wide256) {
                 std::uint32_t replay_error = 0;
                 if (!metal_ok(
                         metalMemcpy(&replay_error,
@@ -2174,7 +2187,9 @@ SolveResult solve_point(const Options& options,
                             compact_counts.begin(), compact_counts.end());
                     }
                     std::ostringstream message;
-                    message << "compact170 replay overflow/mismatch (status "
+                    message
+                            << (context.compact170 ? "compact170" : "wide256")
+                            << " replay overflow/mismatch (status "
                             << replay_error
                             << ", max per-walk DP " << max_compact_count
                             << "); increase -dpbits or reduce -kangsteps";
