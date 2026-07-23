@@ -9,7 +9,7 @@
   <img alt="Platform" src="https://img.shields.io/badge/platform-macOS%2015%2B-111827?style=for-the-badge">
   <img alt="Architecture" src="https://img.shields.io/badge/architecture-Apple%20Silicon-0f766e?style=for-the-badge">
   <img alt="GPU API" src="https://img.shields.io/badge/GPU-Metal%203-2563eb?style=for-the-badge">
-  <img alt="Version" src="https://img.shields.io/badge/version-v14.1-b45309?style=for-the-badge">
+  <img alt="Version" src="https://img.shields.io/badge/version-v15-b45309?style=for-the-badge">
   <a href="#support-the-project"><img alt="Sponsor" src="https://img.shields.io/badge/Sponsor-Support%20development-EA4AAA?style=for-the-badge&amp;logo=githubsponsors&amp;logoColor=white"></a>
 </p>
 
@@ -20,6 +20,15 @@ Author: Mikhail Khoroshavin, also known as **XopMC**
 ## English
 
 ### Changelog
+
+#### v15
+
+The following `kangaroo` performance gains were verified on Apple M4 Max with
+the default automatic grid, `METAL_VANITY_GROUP_SIZE=1024`, and paired A1/B/A2
+median measurements:
+
+- the true 256-bit-range walk path is **30.654–30.753% faster**;
+- the 128-bit-range control is **31.091–31.231% faster**.
 
 #### v14.1
 
@@ -80,7 +89,7 @@ under GPLv3. See `COPYING.GPLv3.txt` and `THIRD_PARTY_NOTICES.md`.
 
 ### Requirements
 
-#### Ready-to-run v14.1 release
+#### Ready-to-run v15 release
 
 - Apple Silicon Mac (`arm64`);
 - macOS 15.0 or newer;
@@ -99,23 +108,23 @@ The release contains one executable. The Metal library is embedded in its Mach-O
 
 ### Download, verify, and run
 
-Download these two files from the [v14.1 release](https://github.com/XopMC/METAL_CRYPTO_TOOLKIT/releases/tag/v14.1):
+Download these two files from the [v15 release](https://github.com/XopMC/METAL_CRYPTO_TOOLKIT/releases/tag/v15):
 
-- `METAL_CRYPTO_TOOLKIT-v14.1-macos-arm64.tar.gz`
-- `METAL_CRYPTO_TOOLKIT-v14.1-macos-arm64.tar.gz.sha256`
+- `METAL_CRYPTO_TOOLKIT-v15-macos-arm64.tar.gz`
+- `METAL_CRYPTO_TOOLKIT-v15-macos-arm64.tar.gz.sha256`
 
 The same release also contains the optional address-conversion package:
 
-- `METAL_CRYPTO_TOOLKIT-tools-v14.1-macos-arm64.tar.gz`
-- `METAL_CRYPTO_TOOLKIT-tools-v14.1-macos-arm64.tar.gz.sha256`
+- `METAL_CRYPTO_TOOLKIT-tools-v15-macos-arm64.tar.gz`
+- `METAL_CRYPTO_TOOLKIT-tools-v15-macos-arm64.tar.gz.sha256`
 
 It is needed only when printable cryptocurrency addresses must be converted into the homogeneous hexadecimal lists accepted by filter builders. It does not contain or replace the main Toolkit executable.
 
 Then run:
 
 ```bash
-shasum -a 256 -c METAL_CRYPTO_TOOLKIT-v14.1-macos-arm64.tar.gz.sha256
-tar -xzf METAL_CRYPTO_TOOLKIT-v14.1-macos-arm64.tar.gz
+shasum -a 256 -c METAL_CRYPTO_TOOLKIT-v15-macos-arm64.tar.gz.sha256
+tar -xzf METAL_CRYPTO_TOOLKIT-v15-macos-arm64.tar.gz
 chmod +x METAL_CRYPTO_TOOLKIT
 ./METAL_CRYPTO_TOOLKIT -help
 ```
@@ -123,8 +132,8 @@ chmod +x METAL_CRYPTO_TOOLKIT
 To install the optional converter package:
 
 ```bash
-shasum -a 256 -c METAL_CRYPTO_TOOLKIT-tools-v14.1-macos-arm64.tar.gz.sha256
-tar -xzf METAL_CRYPTO_TOOLKIT-tools-v14.1-macos-arm64.tar.gz
+shasum -a 256 -c METAL_CRYPTO_TOOLKIT-tools-v15-macos-arm64.tar.gz.sha256
+tar -xzf METAL_CRYPTO_TOOLKIT-tools-v15-macos-arm64.tar.gz
 chmod +x tools/*
 tools/cardano_address_to_hex -h
 ```
@@ -2050,6 +2059,15 @@ xattr -d com.apple.quarantine METAL_CRYPTO_TOOLKIT
 
 ### Изменения
 
+#### v15
+
+Ниже перечислены только подтвержденные ускорения режима `kangaroo` на Apple M4
+Max со штатной автоматической сеткой, `METAL_VANITY_GROUP_SIZE=1024` и парными
+замерами медиан A1/B/A2:
+
+- путь обхода реального 256-битного диапазона стал **на 30,654–30,753% быстрее**;
+- контрольный 128-битный диапазон стал **на 31,091–31,231% быстрее**.
+
 #### v14.1
 
 Ниже перечислены только подтвержденные ускорения на Apple M4 Max со штатной
@@ -2110,7 +2128,7 @@ GNU GPLv3. Поэтому сборки, включающие этот режим
 
 ### Системные требования
 
-#### Готовый выпуск v14.1
+#### Готовый выпуск v15
 
 - Mac на Apple Silicon (`arm64`);
 - macOS 15.0 или новее;
@@ -2129,23 +2147,23 @@ GNU GPLv3. Поэтому сборки, включающие этот режим
 
 ### Загрузка, проверка и первый запуск
 
-На странице [выпуска v14.1](https://github.com/XopMC/METAL_CRYPTO_TOOLKIT/releases/tag/v14.1) загрузите:
+На странице [выпуска v15](https://github.com/XopMC/METAL_CRYPTO_TOOLKIT/releases/tag/v15) загрузите:
 
-- `METAL_CRYPTO_TOOLKIT-v14.1-macos-arm64.tar.gz`;
-- `METAL_CRYPTO_TOOLKIT-v14.1-macos-arm64.tar.gz.sha256`.
+- `METAL_CRYPTO_TOOLKIT-v15-macos-arm64.tar.gz`;
+- `METAL_CRYPTO_TOOLKIT-v15-macos-arm64.tar.gz.sha256`.
 
 Там же находится необязательный набор программ для преобразования адресов:
 
-- `METAL_CRYPTO_TOOLKIT-tools-v14.1-macos-arm64.tar.gz`;
-- `METAL_CRYPTO_TOOLKIT-tools-v14.1-macos-arm64.tar.gz.sha256`.
+- `METAL_CRYPTO_TOOLKIT-tools-v15-macos-arm64.tar.gz`;
+- `METAL_CRYPTO_TOOLKIT-tools-v15-macos-arm64.tar.gz.sha256`.
 
 Он нужен только тогда, когда обычные адреса криптовалют требуется превратить в однородные списки hex для последующего создания фильтров. Основной исполняемый файл Toolkit в этот архив не входит.
 
 Положите оба файла в одну папку и выполните:
 
 ```bash
-shasum -a 256 -c METAL_CRYPTO_TOOLKIT-v14.1-macos-arm64.tar.gz.sha256
-tar -xzf METAL_CRYPTO_TOOLKIT-v14.1-macos-arm64.tar.gz
+shasum -a 256 -c METAL_CRYPTO_TOOLKIT-v15-macos-arm64.tar.gz.sha256
+tar -xzf METAL_CRYPTO_TOOLKIT-v15-macos-arm64.tar.gz
 chmod +x METAL_CRYPTO_TOOLKIT
 ./METAL_CRYPTO_TOOLKIT -help
 ```
