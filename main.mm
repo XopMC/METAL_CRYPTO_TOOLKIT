@@ -15,6 +15,7 @@
 #include "PoetryHost.h"
 #include "SecpPrecompute.h"
 #include "Kangaroo/KangarooMode.h"
+#include "Bsgs/BsgsMode.h"
 #include "Kernels/ProfanityHost.h"
 #include "Kernels/WalletModesHost.h"
 #include "RecoveryWordlistsEmbedded.h"
@@ -2418,6 +2419,8 @@ static bool xp_bluewallet_isaac_hd_v3_profile_from_arg(const std::string& arg);
 static bool xp_tezosj_java_random_profile_from_arg(const std::string& arg);
 void printSpeed(double speed, int byte_p = 0, uint32_t seed_p = 0, int skip = 0, double valid_speed = -1.0, double wallet_password_speed = -1.0);
 static void printKangarooSpeed(double jump_speed, double equivalent_key_speed);
+static void printBsgsSpeed(double operation_speed,
+                           double covered_scalar_speed);
 
 
 char* __strlwr(char* str);
@@ -2596,6 +2599,14 @@ static bool KANGAROO_MODE = false;
 static std::atomic<uint64_t> g_kangaroo_speed_epoch{ 0 };
 static std::atomic<double> g_kangaroo_equivalent_keys_per_jump{ 0.0 };
 static std::atomic<uint32_t> g_kangaroo_founds{ 0 };
+static bool BSGS_MODE = false;
+static std::atomic<uint64_t> g_bsgs_speed_epoch{ 0 };
+static std::atomic<uint32_t> g_bsgs_speed_phase{ 0 };
+static std::atomic<uint64_t> g_bsgs_phase_total{ 0 };
+static std::atomic<uint64_t> g_bsgs_phase_start_operations{ 0 };
+static std::atomic<double> g_bsgs_covered_scalars_per_operation{ 0.0 };
+static std::atomic<uint32_t> g_bsgs_active_targets{ 0 };
+static std::atomic<uint32_t> g_bsgs_founds{ 0 };
 AtomicCounter64 counterNotValid = 0;
 AtomicCounter64 counterMiniValid = 0;
 AtomicCounter64 counterProfanitySeedResolve = 0;
@@ -7194,6 +7205,7 @@ enum class HelpTopic {
     Priv,
     PrivRecovery,
     Kangaroo,
+    Bsgs,
     Poetry,
     Minikeys,
     MinikeysSeed,
@@ -9250,6 +9262,7 @@ static HelpTopic detect_help_topic(int argc, char** argv) {
             return has_arg(argc, argv, "-recovery") ? HelpTopic::PrivRecovery : HelpTopic::Priv;
         }
         if (is_help_topic_arg(arg, "-kangaroo")) return HelpTopic::Kangaroo;
+        if (is_help_topic_arg(arg, "-bsgs")) return HelpTopic::Bsgs;
         if (is_help_topic_arg(arg, "-poetry")) return HelpTopic::Poetry;
         if (is_help_topic_arg(arg, "-minikeys")) {
             return has_arg(argc, argv, "-seed") ? HelpTopic::MinikeysSeed : HelpTopic::Minikeys;
@@ -9312,6 +9325,7 @@ static const char* help_topic_command(HelpTopic topic) {
     case HelpTopic::Priv: return "-priv";
     case HelpTopic::PrivRecovery: return "-priv -recovery";
     case HelpTopic::Kangaroo: return "-kangaroo";
+    case HelpTopic::Bsgs: return "-bsgs";
     case HelpTopic::Poetry: return "-poetry";
     case HelpTopic::Minikeys: return "-minikeys";
     case HelpTopic::MinikeysSeed: return "-minikeys -seed";
@@ -9393,6 +9407,7 @@ static void printHelpShort() {
 [!] -priv                         Raw private key search.
 [!] -priv -recovery               Raw private key template recovery.
 [!] -kangaroo                     Bounded secp256k1 private-key recovery.
+[!] -bsgs                         Deterministic multi-target secp256k1 BSGS.
 [!] -poetry                       Poetry brainwallet phrase recovery.
 [!] -minikeys                     Casascius minikey search.
 [!] -minikeys -seed               Deterministic Casascius minikey seed mode.
@@ -10666,6 +10681,9 @@ static void printHelpModeSection(HelpTopic topic) {
     case HelpTopic::Kangaroo:
         kangaroo::print_help();
         break;
+    case HelpTopic::Bsgs:
+        bsgs::print_help();
+        break;
     case HelpTopic::Poetry:
         poetry_print_help();
         break;
@@ -10809,6 +10827,70 @@ int main(int argc, char** argv)
     if (has_help_arg(argc, argv)) {
         printHelpTopic(detect_help_topic(argc, argv));
         return 0;
+    }
+    if (bsgs::requested(argc, argv)) {
+        BSGS_MODE = true;
+        counterTotal = 0;
+        Founds = 0;
+        isRun = true;
+        g_bsgs_speed_epoch.store(0, std::memory_order_relaxed);
+        g_bsgs_speed_phase.store(
+            static_cast<uint32_t>(bsgs::SpeedPhase::Idle),
+            std::memory_order_relaxed);
+        g_bsgs_phase_total.store(0, std::memory_order_relaxed);
+        g_bsgs_phase_start_operations.store(0, std::memory_order_relaxed);
+        g_bsgs_covered_scalars_per_operation.store(
+            0.0, std::memory_order_relaxed);
+        g_bsgs_active_targets.store(0, std::memory_order_relaxed);
+        g_bsgs_founds.store(0, std::memory_order_relaxed);
+
+        const std::time_t started =
+            std::chrono::system_clock::to_time_t(
+                std::chrono::system_clock::now());
+        std::cout << "[!] Program started at: " << std::ctime(&started);
+
+        std::thread speed_thread(SpeedThreadFunc);
+        const bsgs::RuntimeHooks hooks{
+            [](std::uint64_t operations) {
+                counterTotal += operations;
+            },
+            [](bsgs::SpeedPhase phase,
+               std::uint64_t phase_total,
+               double covered_scalars_per_operation,
+               std::uint32_t active_targets) {
+                g_bsgs_phase_start_operations.store(
+                    counterTotal.load(), std::memory_order_release);
+                g_bsgs_speed_phase.store(
+                    static_cast<uint32_t>(phase),
+                    std::memory_order_release);
+                g_bsgs_phase_total.store(
+                    phase_total, std::memory_order_release);
+                g_bsgs_covered_scalars_per_operation.store(
+                    covered_scalars_per_operation,
+                    std::memory_order_release);
+                g_bsgs_active_targets.store(
+                    active_targets, std::memory_order_release);
+                g_bsgs_speed_epoch.fetch_add(
+                    1, std::memory_order_acq_rel);
+            },
+            []() {
+                g_bsgs_founds.fetch_add(1, std::memory_order_release);
+                ++Founds;
+            }
+        };
+        const int result = bsgs::run(argc, argv, hooks);
+        isRun = false;
+        if (speed_thread.joinable()) {
+            speed_thread.join();
+        }
+
+        const std::time_t finished =
+            std::chrono::system_clock::to_time_t(
+                std::chrono::system_clock::now());
+        std::cout << "\n[!] Processed " << counterTotal
+                  << " BSGS point operations. Found: " << Founds
+                  << ". Program finished at " << std::ctime(&finished);
+        return result;
     }
     if (kangaroo::requested(argc, argv)) {
         KANGAROO_MODE = true;
@@ -58884,9 +58966,49 @@ void SpeedThreadFunc()
         g_kangaroo_speed_epoch.load(std::memory_order_acquire);
     uint64_t kangarooLastOperations = counterTotal.load();
     steady_clock::time_point kangarooLastTime = steady_clock::now();
+    uint64_t bsgsEpoch =
+        g_bsgs_speed_epoch.load(std::memory_order_acquire);
+    uint64_t bsgsLastOperations = counterTotal.load();
+    steady_clock::time_point bsgsLastTime = steady_clock::now();
 
     while (isRun)
     {
+        if (BSGS_MODE)
+        {
+            const auto nowTime = steady_clock::now();
+            const uint64_t epoch =
+                g_bsgs_speed_epoch.load(std::memory_order_acquire);
+            const uint64_t totalOperations = counterTotal.load();
+            if (epoch != bsgsEpoch)
+            {
+                bsgsEpoch = epoch;
+                bsgsLastOperations = totalOperations;
+                bsgsLastTime = nowTime;
+            }
+            const double elapsed =
+                duration_cast<duration<double>>(
+                    nowTime - bsgsLastTime).count();
+            if (elapsed >= 1.0)
+            {
+                const uint64_t completed =
+                    totalOperations >= bsgsLastOperations
+                    ? totalOperations - bsgsLastOperations
+                    : 0ull;
+                if (completed > 0)
+                {
+                    const double operationSpeed =
+                        static_cast<double>(completed) / elapsed;
+                    const double coveredSpeed = operationSpeed *
+                        g_bsgs_covered_scalars_per_operation.load(
+                            std::memory_order_acquire);
+                    printBsgsSpeed(operationSpeed, coveredSpeed);
+                }
+                bsgsLastOperations = totalOperations;
+                bsgsLastTime = nowTime;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            continue;
+        }
         if (KANGAROO_MODE)
         {
             const auto nowTime = steady_clock::now();
@@ -59043,6 +59165,42 @@ static void printKangarooSpeed(double jump_speed,
            equivalentSpeed.c_str(),
            static_cast<unsigned int>(
                g_kangaroo_founds.load(std::memory_order_acquire)));
+    fflush(stdout);
+}
+
+static void printBsgsSpeed(double operation_speed,
+                           double covered_scalar_speed)
+{
+    const uint32_t phase =
+        g_bsgs_speed_phase.load(std::memory_order_acquire);
+    const char* phaseName = phase ==
+        static_cast<uint32_t>(bsgs::SpeedPhase::TableBuild)
+        ? "TABLE"
+        : (phase == static_cast<uint32_t>(bsgs::SpeedPhase::CacheLoad)
+            ? "CACHE" : "SEARCH");
+    const char* operationUnit = phase ==
+        static_cast<uint32_t>(bsgs::SpeedPhase::Search)
+        ? " Giant/s" : " Point/s";
+    const std::string operationSpeed =
+        formatDouble("%.2f", operation_speed) + operationUnit;
+    const std::string coveredSpeed =
+        formatDouble("%.2f", covered_scalar_speed) + " Scalar/s";
+    const uint64_t absoluteTotal = counterTotal.load();
+    const uint64_t phaseStart =
+        g_bsgs_phase_start_operations.load(std::memory_order_acquire);
+    const unsigned long long total = static_cast<unsigned long long>(
+        absoluteTotal >= phaseStart ? absoluteTotal - phaseStart : 0ull);
+    const unsigned long long phaseTotal =
+        static_cast<unsigned long long>(
+            g_bsgs_phase_total.load(std::memory_order_acquire));
+    printf("[!] BSGS:%s T:[%llu/%llu] | S:[%s] [%s] | A:[%u] F:[%u] [!]     \r",
+           phaseName,
+           total,
+           phaseTotal,
+           operationSpeed.c_str(),
+           coveredSpeed.c_str(),
+           g_bsgs_active_targets.load(std::memory_order_acquire),
+           g_bsgs_founds.load(std::memory_order_acquire));
     fflush(stdout);
 }
 

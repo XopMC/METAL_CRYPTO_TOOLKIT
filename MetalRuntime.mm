@@ -442,8 +442,14 @@ Status Runtime::initialize(int deviceIndex, const std::string& metallibPath) {
     if ([device_ respondsToSelector:@selector(recommendedMaxWorkingSetSize)]) {
         info_.recommendedMaxWorkingSetSize = [device_ recommendedMaxWorkingSetSize];
     }
+    if ([device_ respondsToSelector:@selector(currentAllocatedSize)]) {
+        info_.currentAllocatedSize = [device_ currentAllocatedSize];
+    }
     if ([device_ respondsToSelector:@selector(maxBufferLength)]) {
         info_.maxBufferLength = [device_ maxBufferLength];
+    }
+    if ([device_ respondsToSelector:@selector(hasUnifiedMemory)]) {
+        info_.hasUnifiedMemory = [device_ hasUnifiedMemory];
     }
     info_.maxThreadsPerThreadgroup = 1024;
 

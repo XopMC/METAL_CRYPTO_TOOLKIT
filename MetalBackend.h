@@ -92,6 +92,10 @@ struct metalDeviceProp {
     char name[256] = {};
     int multiProcessorCount = 1;
     int maxThreadsPerBlock = 1024;
+    uint64_t recommendedMaxWorkingSetSize = 0;
+    uint64_t currentAllocatedSize = 0;
+    uint64_t maxBufferLength = 0;
+    int hasUnifiedMemory = 0;
 };
 
 struct MetalRandomState {

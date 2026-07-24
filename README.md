@@ -1412,6 +1412,128 @@ Full built-in help:
 ./METAL_CRYPTO_TOOLKIT -kangaroo -help
 ```
 
+#### `-bsgs`
+
+**Use it for:** deterministic recovery of one or many secp256k1 private
+scalars when every complete public key and the bounded scalar interval are
+known.
+
+BSGS builds a reusable baby-step table, then searches giant steps for all
+still-active targets. Unlike Kangaroo, its table can deliberately consume a
+large memory budget to reduce search time. Choose BSGS when the interval is
+small enough for a useful table, several targets share the same ranges, or a
+cached table will be reused. Choose Kangaroo when memory is limited or a
+single wider interval makes a large BSGS table unattractive.
+
+`-target` is repeatable. Its value may be a compressed 33-byte key, an
+uncompressed 65-byte key, or a file path. Target files use the first token on
+each line; blank lines and lines beginning with `#` are ignored. Compressed
+and uncompressed forms of the same point are deduplicated for computation,
+while every original target number and source is retained in the result.
+
+The `-range` grammar and exclusive upper bound are identical to Kangaroo:
+
+| Form | Interval searched |
+| --- | --- |
+| `-range 48` | `[2^47, 2^48)` |
+| `-range 48-52` | every complete bit interval from 48 through 52 |
+| `-range 40,48-52` | the listed bit intervals, in order |
+| `-range START:END` | one exact hexadecimal interval `[START, END)` |
+
+An exact interval cannot be mixed with another `-range`. Solved targets are
+removed before the next range.
+
+**Memory, table, and cache arguments:**
+
+| Argument | Meaning |
+| --- | --- |
+| `-bsgs-mem auto` | at most 50% of the currently free recommended Metal working set |
+| `-bsgs-mem all` | all remaining recommended working set except a 512 MiB runtime reserve |
+| `-bsgs-mem NN%` | a percentage of the currently free recommended working set |
+| `-bsgs-mem SIZE` | hard byte budget; a bare number is MiB, or use `MiB`/`GiB` |
+| `-bsgs-table N` | exact baby-step count in decimal, `0xHEX`, or `2^EXP` form |
+| `-bsgs-table-cache` | opt in to `_local_artifacts/bsgs_tables` |
+| `-bsgs-table-dir DIR` | opt in to a cache at `DIR` |
+| `-bsgs-table-rebuild` | rebuild the enabled cache |
+| `-device LIST` | one or more Metal devices, for example `0` or `0,1` |
+| `-o FILE` | append fully verified results; default `result.txt` |
+
+Automatic table sizing balances construction cost against the total remaining
+`target × range` giant work using the measured relative throughput of the
+baby-build and giant-search pipelines. The model is refined after a complete
+range. A compatible ready cache participates with zero table-construction
+cost. An explicit `-bsgs-table` is a hard request: the command fails clearly
+if it cannot fit inside `-bsgs-mem`. Tables are sharded below the device
+`maxBufferLength`, checksummed, and written atomically. Cache use is opt-in; a
+corrupt or incompatible shard is never accepted silently.
+
+The production backend stores every compact `fingerprint64 + j` candidate,
+sorts it once, and adds an adaptive exact bucket index. Fingerprint collisions
+can add verification work but cannot hide a match: every candidate is resolved
+on the GPU and checked against the complete public point on the CPU. Hit-buffer
+overflow is retried by narrowing the giant batch and paging a single collision
+chain, without silently dropping hits.
+
+Apple Silicon uses unified memory. CPU table storage, Metal buffers, and every
+multi-GPU replica therefore count against the same working set. All selected
+devices use the largest common table size that safely fits, and giant groups
+are dynamically claimed without overlap, so faster devices naturally take a
+larger share. Live table/search rates and covered-scalars/s are reported only
+by the toolkit's standard `SpeedThreadFunc`.
+
+**Example 1 — automatic memory and one key.**
+
+```bash
+./METAL_CRYPTO_TOOLKIT -bsgs \
+  -target 02fe8d1eb1bcb3432b1db5833ff5f2226d9cb5e65cee430558c18ed3a3c86ce1af \
+  -range 1:100 \
+  -bsgs-mem auto \
+  -o bsgs-known-key.txt
+```
+
+**Example 2 — repeated targets and a target file.**
+
+```bash
+./METAL_CRYPTO_TOOLKIT -bsgs \
+  -target targets.txt \
+  -target YOUR_OTHER_FULL_PUBLIC_KEY_HEX \
+  -range 40,48-52 \
+  -bsgs-mem 16GiB \
+  -device 0
+```
+
+**Example 3 — an exact expert table with opt-in cache.**
+
+```bash
+./METAL_CRYPTO_TOOLKIT -bsgs \
+  -target targets.txt \
+  -range 1000:2000 \
+  -bsgs-table 2^12 \
+  -bsgs-mem 4GiB \
+  -bsgs-table-cache
+```
+
+**Example 4 — maximum safe working-set use and a custom cache.**
+
+```bash
+./METAL_CRYPTO_TOOLKIT -bsgs \
+  -target YOUR_FULL_PUBLIC_KEY_HEX \
+  -range 64 \
+  -bsgs-mem all \
+  -bsgs-table-dir /Volumes/Fast/bsgs
+```
+
+Every candidate is checked against the complete target point before it is
+printed. Full 256-bit counters and endpoints prevent truncation, but they do
+not make an exhaustive 256-bit discrete-log search practical on current
+hardware.
+
+Full built-in help:
+
+```bash
+./METAL_CRYPTO_TOOLKIT -bsgs -help
+```
+
 #### `-minikeys`
 
 **Use it for:** Casascius minikey strings.
@@ -3593,6 +3715,130 @@ placeholder требуется полный публичный ключ, а не
 
 ```bash
 ./METAL_CRYPTO_TOOLKIT -kangaroo -help
+```
+
+#### `-bsgs`
+
+**Когда использовать:** для детерминированного восстановления одного или
+нескольких приватных скаляров secp256k1, когда известны полные публичные ключи
+и ограниченный интервал каждого скаляра.
+
+BSGS строит переиспользуемую таблицу baby steps, после чего проверяет giant
+steps сразу для всех ещё не найденных целей. В отличие от Kangaroo, здесь
+можно намеренно занять большой объём памяти и сократить время поиска. BSGS
+обычно выгоднее на достаточно узком интервале, при нескольких целях с общими
+диапазонами либо при повторном использовании кеша. Kangaroo лучше подходит
+для одного более широкого диапазона или при жёстком ограничении памяти.
+
+Параметр `-target` можно повторять. Его значением может быть сжатый ключ
+длиной 33 байта, несжатый ключ длиной 65 байтов или путь к файлу. В файле
+читается первый токен каждой строки; пустые строки и строки с `#` пропускаются.
+Compressed и uncompressed формы одной точки вычисляются один раз, но в
+результате сохраняются все исходные номера и источники.
+
+Грамматика `-range` и исключённая правая граница полностью совпадают с
+Kangaroo:
+
+| Форма | Какой интервал проверяется |
+| --- | --- |
+| `-range 48` | `[2^47, 2^48)` |
+| `-range 48-52` | все полные битовые интервалы от 48 до 52 |
+| `-range 40,48-52` | перечисленные битовые интервалы по порядку |
+| `-range START:END` | один точный hex-интервал `[START, END)` |
+
+Точный интервал нельзя объединять с другим `-range`. Уже найденные цели
+исключаются перед переходом к следующему диапазону.
+
+**Память, таблица и кеш:**
+
+| Параметр | Значение |
+| --- | --- |
+| `-bsgs-mem auto` | не более 50% свободного recommended Metal working set |
+| `-bsgs-mem all` | весь остаток recommended working set, кроме резерва 512 MiB |
+| `-bsgs-mem NN%` | процент текущего свободного recommended working set |
+| `-bsgs-mem SIZE` | жёсткий бюджет; число без суффикса означает MiB, доступны `MiB` и `GiB` |
+| `-bsgs-table N` | точное число baby steps: decimal, `0xHEX` либо `2^EXP` |
+| `-bsgs-table-cache` | включить кеш `_local_artifacts/bsgs_tables` |
+| `-bsgs-table-dir DIR` | включить кеш в папке `DIR` |
+| `-bsgs-table-rebuild` | перестроить включённый кеш |
+| `-device LIST` | одно или несколько Metal-устройств, например `0` или `0,1` |
+| `-o FILE` | дописать полностью проверенные результаты; по умолчанию `result.txt` |
+
+Автовыбор размера таблицы учитывает стоимость построения и суммарную
+оставшуюся работу `цель × диапазон` с учётом измеренного соотношения скоростей
+построения baby-таблицы и giant-поиска. После полного диапазона модель
+уточняется; совместимый готовый кеш участвует с нулевой стоимостью построения.
+Явный `-bsgs-table` является жёстким требованием: если таблица не входит в
+`-bsgs-mem`, команда завершается с понятной ошибкой. Таблица делится на шарды
+меньше `maxBufferLength`, снабжается контрольными суммами и записывается
+атомарно. Кеш по умолчанию выключен; повреждённый или несовместимый шард молча
+не принимается.
+
+Production backend сохраняет все компактные кандидаты `fingerprint64 + j`,
+один раз сортирует их и строит адаптивный точный bucket-индекс. Коллизии
+fingerprint могут добавить проверок, но не скрывают совпадение: каждый кандидат
+восстанавливается на GPU и полностью сверяется с публичной точкой на CPU.
+Переполнение hit-буфера обрабатывается сужением giant batch и постраничным
+чтением одной цепочки коллизий — без тихой потери hits.
+
+В Apple Silicon используется unified memory: CPU-копия таблицы, Metal-буферы
+и все реплики для нескольких GPU расходуют единый working set. На всех
+выбранных устройствах применяется общий безопасный размер таблицы, а giant
+groups динамически забираются без пересечений, поэтому более быстрые устройства
+естественно выполняют большую долю работы. Текущая скорость
+построения/поиска и covered-scalars/s печатается только стандартным
+`SpeedThreadFunc` тулкита.
+
+**Пример 1 — автоматический бюджет и один ключ.**
+
+```bash
+./METAL_CRYPTO_TOOLKIT -bsgs \
+  -target 02fe8d1eb1bcb3432b1db5833ff5f2226d9cb5e65cee430558c18ed3a3c86ce1af \
+  -range 1:100 \
+  -bsgs-mem auto \
+  -o bsgs-known-key.txt
+```
+
+**Пример 2 — повторяемые цели и файл целей.**
+
+```bash
+./METAL_CRYPTO_TOOLKIT -bsgs \
+  -target targets.txt \
+  -target YOUR_OTHER_FULL_PUBLIC_KEY_HEX \
+  -range 40,48-52 \
+  -bsgs-mem 16GiB \
+  -device 0
+```
+
+**Пример 3 — точная экспертная таблица и opt-in кеш.**
+
+```bash
+./METAL_CRYPTO_TOOLKIT -bsgs \
+  -target targets.txt \
+  -range 1000:2000 \
+  -bsgs-table 2^12 \
+  -bsgs-mem 4GiB \
+  -bsgs-table-cache
+```
+
+**Пример 4 — весь безопасный working set и отдельный кеш.**
+
+```bash
+./METAL_CRYPTO_TOOLKIT -bsgs \
+  -target YOUR_FULL_PUBLIC_KEY_HEX \
+  -range 64 \
+  -bsgs-mem all \
+  -bsgs-table-dir /Volumes/Fast/bsgs
+```
+
+Каждый кандидат полностью сверяется с исходной точкой до вывода. 256-битные
+счётчики и границы исключают усечение, но не делают полный 256-битный
+дискретный логарифм практически выполнимым на современном железе.
+
+Полная встроенная справка:
+
+```bash
+./METAL_CRYPTO_TOOLKIT -bsgs -help
 ```
 
 #### `-minikeys`

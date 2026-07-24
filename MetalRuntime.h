@@ -28,7 +28,9 @@ struct DeviceInfo {
     std::string name;
     uint32_t gpuCoreCount = 0;
     uint64_t recommendedMaxWorkingSetSize = 0;
+    uint64_t currentAllocatedSize = 0;
     uint64_t maxBufferLength = 0;
+    bool hasUnifiedMemory = false;
     NSUInteger maxThreadsPerThreadgroup = 1;
 };
 

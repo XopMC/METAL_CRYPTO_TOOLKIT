@@ -2734,6 +2734,16 @@ metalError_t metalGetDeviceProperties(metalDeviceProp* prop, int device) {
         ? static_cast<int>(info.gpuCoreCount)
         : 1;
     prop->maxThreadsPerBlock = static_cast<int>(std::max<NSUInteger>(1, info.maxThreadsPerThreadgroup));
+    prop->recommendedMaxWorkingSetSize = info.recommendedMaxWorkingSetSize;
+    prop->currentAllocatedSize = info.currentAllocatedSize;
+    prop->maxBufferLength = info.maxBufferLength;
+    prop->hasUnifiedMemory = info.hasUnifiedMemory ? 1 : 0;
+    {
+        std::lock_guard<std::mutex> lock(g_alloc_mutex);
+        prop->currentAllocatedSize = std::max<uint64_t>(
+            prop->currentAllocatedSize,
+            static_cast<uint64_t>(state.allocatedBytes));
+    }
     return remember(metalSuccess);
 }
 
