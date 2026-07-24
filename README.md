@@ -23,9 +23,35 @@ Author: Mikhail Khoroshavin, also known as **XopMC**
 
 #### v15
 
-The following `kangaroo` performance gains were verified on Apple M4 Max with
-the default automatic grid, `METAL_VANITY_GROUP_SIZE=1024`, and paired A1/B/A2
-median measurements:
+The July 24 `-kangaroo` update adds two independently optimized Metal engines:
+
+- `compact170` is selected automatically for effective interval widths from 32
+  through 170 bits. It uses an affine point-only hot walk, a 16-bit hop
+  metadata ring, three-limb signed distance replay, and the full SOTA+
+  `P+J`/`P-J` selection with eight kangaroos per Metal thread.
+- `wide256` is selected for widths from 171 through 256 bits. It keeps the
+  split point-walk/replay pipeline while preserving complete signed-256
+  distance arithmetic and uses 16 kangaroos per Metal thread.
+- Allocation failures select the explicit legacy fallback. The command-line
+  syntax, result format, multi-GPU routing, tame cache, and PSWDP2/3/4 readers
+  remain compatible.
+
+The following additional gains over the original v15 build were verified on
+Apple M4 Max with the default automatic grid,
+`METAL_VANITY_GROUP_SIZE=1024`, two warm-ups, and symmetric A1/B/A2 phases
+containing 11 measured runs each:
+
+- puzzle-135-shaped `[2^134, 2^135)` with DP44:
+  **11.024–11.101% faster** at **380.368 million jumps/s**;
+- the full 256-bit control with DP60:
+  **4.064–4.065% faster** at **356.467 million jumps/s**.
+
+All primary coefficients of variation remained below 0.3%. A known small
+private key was recovered exactly by `compact170`, while `wide256` completed
+1,966,080,000 full-range transitions without a replay overflow or mismatch.
+
+The initial v15 release had already verified these gains over its preceding
+Kangaroo implementation:
 
 - the true 256-bit-range walk path is **30.654–30.753% faster**;
 - the 128-bit-range control is **31.091–31.231% faster**.
@@ -2168,9 +2194,37 @@ xattr -d com.apple.quarantine METAL_CRYPTO_TOOLKIT
 
 #### v15
 
-Ниже перечислены только подтвержденные ускорения режима `kangaroo` на Apple M4
-Max со штатной автоматической сеткой, `METAL_VANITY_GROUP_SIZE=1024` и парными
-замерами медиан A1/B/A2:
+Обновление `-kangaroo` от 24 июля добавляет два независимо
+оптимизированных Metal-движка:
+
+- `compact170` автоматически выбирается для эффективной ширины диапазона от 32
+  до 170 бит. В нём горячий affine point walk отделён от восстановления
+  расстояния, прыжки сохраняются в 16-битное кольцо метаданных, расстояние
+  обрабатывается тремя знаковыми limb, а полный SOTA+ `P+J`/`P-J` выполняет по
+  восемь кенгуру на Metal-поток.
+- `wide256` автоматически выбирается для ширины от 171 до 256 бит. Он использует
+  тот же разделённый point-walk/replay-конвейер, полную знаковую 256-битную
+  арифметику расстояния без усечения и по 16 кенгуру на Metal-поток.
+- При ошибке выделения памяти явно включается legacy fallback. Синтаксис команд,
+  формат результата, multi-GPU, tame cache и чтение PSWDP2/3/4 не изменились.
+
+Следующие дополнительные ускорения относительно первоначальной сборки v15
+подтверждены на Apple M4 Max со штатной автоматической сеткой,
+`METAL_VANITY_GROUP_SIZE=1024`, двумя прогревами и симметричными фазами A1/B/A2
+по 11 замеров:
+
+- диапазон формы puzzle 135 `[2^134, 2^135)` с DP44:
+  **на 11,024–11,101% быстрее**, **380,368 млн прыжков/с**;
+- полный 256-битный контроль с DP60:
+  **на 4,064–4,065% быстрее**, **356,467 млн прыжков/с**.
+
+Во всех основных сериях коэффициент вариации остался ниже 0,3%.
+`compact170` точно восстановил известный небольшой приватный ключ, а `wide256`
+выполнил 1 966 080 000 переходов полного диапазона без переполнения или
+расхождения replay.
+
+В первоначальном выпуске v15 уже были подтверждены следующие ускорения
+относительно предшествующей реализации Kangaroo:
 
 - путь обхода реального 256-битного диапазона стал **на 30,654–30,753% быстрее**;
 - контрольный 128-битный диапазон стал **на 31,091–31,231% быстрее**.
