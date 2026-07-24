@@ -77,9 +77,13 @@ kernel void kangarooInit(device KangarooState* states [[buffer(0)]],
                          int(params.windows),
                          params.window_bits);
 
-    if (params.generation_mode == 0u && state.type != 0u) {
-        const secp256k1_ge base =
-            kangaroo_ge_from_limbs(state.type == 1u ? base_a : base_b);
+    const uint herd_type = kangaroo_herd_type(state.type);
+    const uint target_index = kangaroo_target_index(state.type);
+    if (params.generation_mode == 0u && herd_type != 0u) {
+        const ulong base_offset = ulong(target_index) * 8ul;
+        const secp256k1_ge base = herd_type == 1u
+            ? kangaroo_ge_from_limbs(base_a + base_offset)
+            : kangaroo_ge_from_limbs(base_b + base_offset);
         secp256k1_gej sum;
         secp256k1_gej_add_ge_var(&sum, &point, &base, nullptr);
         point = sum;
@@ -102,4 +106,112 @@ kernel void kangarooInit(device KangarooState* states [[buffer(0)]],
         state.y[limb] = y[limb];
     }
     state.flags = 0u;
+}
+
+kernel void kangarooWalkCompactMulti(
+    device KangarooState* states [[buffer(0)]],
+    const device ulong* jumps1 [[buffer(1)]],
+    const device ulong* jumps2 [[buffer(2)]],
+    const device ulong* jumps3 [[buffer(3)]],
+    device ushort* hop_metadata [[buffer(4)]],
+    device KangarooCompactDpX* dp_x [[buffer(5)]],
+    device uint* dp_counts [[buffer(6)]],
+    device atomic_uint* replay_error [[buffer(7)]],
+    constant KangarooWalkParams& params [[buffer(8)]],
+    uint tid [[thread_position_in_grid]])
+{
+    kangaroo_walk_compact_impl<KANGAROO_GROUP_SIZE, false, true>(
+        states,
+        jumps1,
+        jumps2,
+        jumps3,
+        hop_metadata,
+        dp_x,
+        dp_counts,
+        replay_error,
+        params,
+        tid);
+}
+
+kernel void kangarooWalkCompact8Multi(
+    device KangarooState* states [[buffer(0)]],
+    const device ulong* jumps1 [[buffer(1)]],
+    const device ulong* jumps2 [[buffer(2)]],
+    const device ulong* jumps3 [[buffer(3)]],
+    device ushort* hop_metadata [[buffer(4)]],
+    device KangarooCompactDpX* dp_x [[buffer(5)]],
+    device uint* dp_counts [[buffer(6)]],
+    device atomic_uint* replay_error [[buffer(7)]],
+    constant KangarooWalkParams& params [[buffer(8)]],
+    uint tid [[thread_position_in_grid]])
+{
+    kangaroo_walk_compact_impl<8u, true, true>(
+        states,
+        jumps1,
+        jumps2,
+        jumps3,
+        hop_metadata,
+        dp_x,
+        dp_counts,
+        replay_error,
+        params,
+        tid);
+}
+
+kernel void kangarooReplayCompactMulti(
+    device KangarooState* states [[buffer(0)]],
+    const device ulong* jumps1 [[buffer(1)]],
+    const device ulong* jumps2 [[buffer(2)]],
+    const device ulong* jumps3 [[buffer(3)]],
+    const device ushort* hop_metadata [[buffer(4)]],
+    const device KangarooCompactDpX* dp_x [[buffer(5)]],
+    const device uint* dp_counts [[buffer(6)]],
+    device KangarooDP* output [[buffer(7)]],
+    device atomic_uint* output_count [[buffer(8)]],
+    device atomic_uint* replay_error [[buffer(9)]],
+    constant KangarooWalkParams& params [[buffer(10)]],
+    uint state_index [[thread_position_in_grid]])
+{
+    kangaroo_replay_compact_impl<true>(
+        states,
+        jumps1,
+        jumps2,
+        jumps3,
+        hop_metadata,
+        dp_x,
+        dp_counts,
+        output,
+        output_count,
+        replay_error,
+        params,
+        state_index);
+}
+
+kernel void kangarooReplayWideMulti(
+    device KangarooState* states [[buffer(0)]],
+    const device ulong* jumps1 [[buffer(1)]],
+    const device ulong* jumps2 [[buffer(2)]],
+    const device ulong* jumps3 [[buffer(3)]],
+    const device ushort* hop_metadata [[buffer(4)]],
+    const device KangarooCompactDpX* dp_x [[buffer(5)]],
+    const device uint* dp_counts [[buffer(6)]],
+    device KangarooDP* output [[buffer(7)]],
+    device atomic_uint* output_count [[buffer(8)]],
+    device atomic_uint* replay_error [[buffer(9)]],
+    constant KangarooWalkParams& params [[buffer(10)]],
+    uint state_index [[thread_position_in_grid]])
+{
+    kangaroo_replay_wide_impl<true>(
+        states,
+        jumps1,
+        jumps2,
+        jumps3,
+        hop_metadata,
+        dp_x,
+        dp_counts,
+        output,
+        output_count,
+        replay_error,
+        params,
+        state_index);
 }

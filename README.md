@@ -1309,12 +1309,22 @@ not a linear private-key scan. Work grows approximately with the square root of
 the interval width, so range width matters far more than the number of
 hexadecimal digits in its endpoints.
 
-The mode requires exactly one 33-byte compressed or 65-byte uncompressed
-secp256k1 public key. An address, HASH160, Ethereum address, x-only public key,
-Bloom filter, or XOR filter is not enough because the algorithm needs the
-complete curve point. Kangaroo writes a verified result directly through `-o`;
-ordinary target-family switches such as `-c`, `-save`, and `-i` do not belong
-to this mode.
+Every target must be a complete 33-byte compressed or 65-byte uncompressed
+secp256k1 public key. `-target` can be repeated and can also name a text file
+containing one key per line; blank lines and `#` comments are ignored, and text
+after the first token is allowed. Duplicate curve points are computed once.
+An address, HASH160, Ethereum address, x-only public key, Bloom filter, or XOR
+filter is not enough because the algorithm needs the complete curve point.
+Kangaroo writes verified results directly through `-o`; ordinary target-family
+switches such as `-c`, `-save`, and `-i` do not belong to this mode.
+
+One unique target keeps the independently tuned single-target contour. Two or
+more unique targets automatically select the real multi-target contour: all
+targets share one tame herd and receive target-indexed positive and negative
+wild herds. This avoids rebuilding or repeating the tame third for every
+target. The walker pool grows with the number of targets and uses additional
+VRAM only up to an automatic budget derived from the free recommended Metal
+working set. No extra switch is needed.
 
 **Range formats:**
 
@@ -1336,7 +1346,7 @@ that group order.
 
 | Argument | Meaning |
 | --- | --- |
-| `-target HEX` / `-hash HEX` | one complete compressed or uncompressed secp256k1 public key; the names are aliases |
+| `-target HEX\|FILE` / `-hash HEX` | repeat a complete public key, or load a target file; two or more unique points enable the multi-target contour |
 | `-range VALUE` | one or more bit ranges, or one exact hexadecimal interval |
 | `-device LIST` | Metal devices such as `0`, `0,1,3`, or `0-3`; all available devices are used when omitted |
 | `-dpbits N` | distinguished-point bits, `14..60`; selected automatically when omitted |
@@ -1421,6 +1431,23 @@ solves the bounded remainder, then verifies the reconstructed full private key.
 Use `-exp` only when that decomposition is intentional. Alternatively,
 `-first 255 -last 128 -prob 0.5` generates descending random chains until a
 solution is found; `-exp` and `-first/-last` are mutually exclusive.
+
+**Example 5 — shared-tame multi-target search.**
+
+```bash
+./METAL_CRYPTO_TOOLKIT -kangaroo \
+  -target 02FIRST_COMPLETE_PUBLIC_KEY \
+  -target 03SECOND_COMPLETE_PUBLIC_KEY \
+  -target ./kangaroo-targets.txt \
+  -range 64 \
+  -device 0 \
+  -o kangaroo-multi.txt
+```
+
+The file may contain more targets and labels after each key. All unique points
+share the same ranges and tame DP cache. The status line explicitly reports
+`multi-target shared-tame`, its active-target count, walker count, and the
+automatic VRAM budget.
 
 The result block contains `Pub`, `Exps`, `Pub after subtract`, `k_low`, and
 `priv`. `priv` is the final verified private scalar. Cache formats PSWDP2 and
@@ -3661,12 +3688,22 @@ Seq/random, PRNG, числовые подрежимы priv, `-pb`, `-last`, `-si
 ширины интервала, поэтому ширина диапазона намного важнее количества
 hex-символов в его границах.
 
-Режиму нужен ровно один полный сжатый публичный ключ длиной 33 байта либо
-несжатый ключ длиной 65 байтов. Адрес, HASH160, Ethereum address, x-only
-public key, Bloom-фильтр или XOR-фильтр недостаточны: алгоритму нужна полная
-точка кривой. Найденный результат после точной проверки записывается через
-`-o`; обычные параметры семейств целей `-c`, `-save` и `-i` к этому режиму
-не относятся.
+Каждая цель должна быть полным сжатым публичным ключом длиной 33 байта либо
+несжатым ключом длиной 65 байтов. `-target` можно повторять; вместо ключа
+можно указать текстовый файл с одним ключом на строку. Пустые строки и
+`#`-комментарии игнорируются, после первого токена допустима подпись.
+Дубликаты одной точки вычисляются один раз. Адрес, HASH160, Ethereum address,
+x-only public key, Bloom-фильтр или XOR-фильтр недостаточны: алгоритму нужна
+полная точка кривой. Проверенные результаты записываются через `-o`; обычные
+параметры семейств целей `-c`, `-save` и `-i` к этому режиму не относятся.
+
+Одна уникальная цель использует отдельно настроенный однотаргетный контур.
+При двух и более уникальных целях автоматически включается настоящий
+мультитаргетный контур: у всех целей общее tame-стадо и отдельные
+индексированные положительные и отрицательные wild-стада. Поэтому tame-треть
+не строится и не проходит заново для каждой цели. Число walkers растёт вместе
+с числом целей и занимает дополнительную VRAM только в пределах
+автоматического бюджета из свободного recommended Metal working set.
 
 **Форматы диапазона:**
 
@@ -3688,7 +3725,7 @@ public key, Bloom-фильтр или XOR-фильтр недостаточны:
 
 | Параметр | Значение |
 | --- | --- |
-| `-target HEX` / `-hash HEX` | один полный compressed или uncompressed публичный ключ secp256k1; имена являются алиасами |
+| `-target HEX\|FILE` / `-hash HEX` | повторяемый полный публичный ключ либо файл целей; две и более уникальные точки включают мультитаргетный контур |
 | `-range VALUE` | один или несколько битовых диапазонов либо один точный hex-интервал |
 | `-device LIST` | устройства Metal: `0`, `0,1,3` или `0-3`; без параметра используются все доступные |
 | `-dpbits N` | число бит distinguished point, `14..60`; без параметра выбирается автоматически |
@@ -3774,6 +3811,23 @@ placeholder требуется полный публичный ключ, а не
 Используйте `-exp` только для намеренного разложения. Вариант
 `-first 255 -last 128 -prob 0.5` вместо этого создаёт случайные убывающие
 цепочки до нахождения решения; `-exp` нельзя объединять с `-first/-last`.
+
+**Пример 5 — мультитаргетный поиск с общим tame-стадом.**
+
+```bash
+./METAL_CRYPTO_TOOLKIT -kangaroo \
+  -target 02FIRST_COMPLETE_PUBLIC_KEY \
+  -target 03SECOND_COMPLETE_PUBLIC_KEY \
+  -target ./kangaroo-targets.txt \
+  -range 64 \
+  -device 0 \
+  -o kangaroo-multi.txt
+```
+
+Файл может содержать дополнительные цели и подписи после каждого ключа. Все
+уникальные точки используют общие диапазоны и tame DP cache. Строка
+статистики явно показывает `multi-target shared-tame`, число активных целей,
+walkers и автоматический бюджет VRAM.
 
 Результат содержит `Pub`, `Exps`, `Pub after subtract`, `k_low` и `priv`.
 Поле `priv` — итоговый проверенный приватный скаляр. Кеши PSWDP2 и PSWDP3
