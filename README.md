@@ -23,6 +23,29 @@ Author: Mikhail Khoroshavin, also known as **XopMC**
 
 #### v15
 
+The July 24 `-bsgs` update adds a native deterministic Metal BSGS mode:
+
+- one or many compressed/uncompressed secp256k1 public-key targets are accepted
+  directly or from files, with the same exact/list/bit-range grammar as
+  Kangaroo;
+- the negation-map engine combines shared-inversion `P+J`/`P-J` point
+  generation, compact exact `fingerprint64 + j` buckets, GPU lookup/resolve,
+  full public-point verification, target batching, and overlap-free dynamic
+  multi-GPU work claiming;
+- `-bsgs-mem` and `-bsgs-table` control unified-memory use and the exact baby
+  table size, while versioned checksummed table caching remains explicitly
+  opt-in;
+- all live statistics are emitted through the standard `SpeedThreadFunc`.
+  Search uses the CUDA-compatible names `GStep/s` and `EqKey/s`; the Metal
+  negation-map walk reports effective unique coverage as
+  `EqKey/s = GStep/s × 2M`.
+
+On Apple M4 Max, the accepted final exact pipeline reduced the width-44,
+16-target, `M=2^22` median wall time from 1.100 s to 0.370 s versus the
+internal textbook baseline (**66.37% less wall time**, 2.019% CV). A width-56,
+one-target control sustained a median **1.130 billion GStep/s** and
+**9.476 quadrillion EqKey/s** with no reporting-path throughput regression.
+
 The July 24 `-kangaroo` update adds two independently optimized Metal engines:
 
 - `compact170` is selected automatically for effective interval widths from 32
@@ -2319,6 +2342,30 @@ xattr -d com.apple.quarantine METAL_CRYPTO_TOOLKIT
 ### Изменения
 
 #### v15
+
+Обновление `-bsgs` от 24 июля добавляет нативный детерминированный режим BSGS
+для Metal:
+
+- одна или несколько compressed/uncompressed целей secp256k1 принимаются
+  напрямую или из файлов; грамматика точных, списочных и битовых диапазонов
+  совпадает с Kangaroo;
+- negation-map движок объединяет shared-inversion генерацию точек
+  `P+J`/`P-J`, компактные точные buckets `fingerprint64 + j`, GPU lookup и
+  resolve, полную проверку публичной точки, пакетную обработку целей и
+  динамическое multi-GPU распределение без пропусков и пересечений;
+- `-bsgs-mem` и `-bsgs-table` управляют unified memory и точным размером baby
+  table, а версионированный кеш с контрольными суммами включается только явно;
+- вся текущая статистика печатается стандартным `SpeedThreadFunc`. В поиске
+  используются совместимые с CUDA названия `GStep/s` и `EqKey/s`; Metal
+  negation-map walk выводит эффективное уникальное покрытие по формуле
+  `EqKey/s = GStep/s × 2M`.
+
+На Apple M4 Max итоговый точный pipeline сократил медианное время профиля
+width-44, 16 целей, `M=2^22` с 1,100 до 0,370 с относительно внутреннего
+textbook baseline (**на 66,37% меньше wall time**, CV 2,019%). На контрольном
+профиле width-56 с одной целью получены медианные **1,130 млрд GStep/s** и
+**9,476 квадриллиона EqKey/s** без регрессии производительности из-за нового
+формата статистики.
 
 Обновление `-kangaroo` от 24 июля добавляет два независимо
 оптимизированных Metal-движка:
