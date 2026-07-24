@@ -1478,6 +1478,8 @@ removed before the next range.
 | `-bsgs-table-cache` | opt in to `_local_artifacts/bsgs_tables` |
 | `-bsgs-table-dir DIR` | opt in to a cache at `DIR` |
 | `-bsgs-table-rebuild` | rebuild the enabled cache |
+| `-random` | visit every giant group once in pseudorandom order |
+| `-bsgs-random-seed N` | reproducible 64-bit decimal or hexadecimal seed; also enables `-random` |
 | `-device LIST` | one or more Metal devices, for example `0` or `0,1` |
 | `-o FILE` | append fully verified results; default `result.txt` |
 
@@ -1489,6 +1491,14 @@ cost. An explicit `-bsgs-table` is a hard request: the command fails clearly
 if it cannot fit inside `-bsgs-mem`. Tables are sharded below the device
 `maxBufferLength`, checksummed, and written atomically. Cache use is opt-in; a
 corrupt or incompatible shard is never accepted silently.
+
+Random mode does not repeatedly sample arbitrary points and therefore does not
+lose exhaustive-search correctness. It applies an O(1)-memory bijective
+permutation to the giant-group index. Each round walks 1024 consecutive giant
+centers from a pseudorandomly selected group; the next round moves to another
+group, and every group is visited exactly once before the range finishes.
+All GPUs claim the same logical permutation without overlaps. The selected
+seed is printed at startup; use `-bsgs-random-seed` to reproduce an order.
 
 The production backend stores every compact `fingerprint64 + j` candidate,
 sorts it once, and adds an adaptive exact bucket index. Fingerprint collisions
@@ -1548,6 +1558,17 @@ reports `EqKey/s = GStep/s × 2M`.
   -range 64 \
   -bsgs-mem all \
   -bsgs-table-dir /Volumes/Fast/bsgs
+```
+
+**Example 5 — complete search in randomized rounds.**
+
+```bash
+./METAL_CRYPTO_TOOLKIT -bsgs \
+  -target targets.txt \
+  -range 56 \
+  -random \
+  -bsgs-random-seed 0x1234 \
+  -bsgs-mem 16GiB
 ```
 
 Every candidate is checked against the complete target point before it is
@@ -3812,6 +3833,8 @@ Kangaroo:
 | `-bsgs-table-cache` | включить кеш `_local_artifacts/bsgs_tables` |
 | `-bsgs-table-dir DIR` | включить кеш в папке `DIR` |
 | `-bsgs-table-rebuild` | перестроить включённый кеш |
+| `-random` | посетить каждую giant-группу один раз в псевдослучайном порядке |
+| `-bsgs-random-seed N` | воспроизводимый 64-битный decimal/hex seed; также включает `-random` |
 | `-device LIST` | одно или несколько Metal-устройств, например `0` или `0,1` |
 | `-o FILE` | дописать полностью проверенные результаты; по умолчанию `result.txt` |
 
@@ -3824,6 +3847,14 @@ Kangaroo:
 меньше `maxBufferLength`, снабжается контрольными суммами и записывается
 атомарно. Кеш по умолчанию выключен; повреждённый или несовместимый шард молча
 не принимается.
+
+`-random` не выполняет бесконечные случайные выборки и не нарушает полноту
+поиска. Режим строит не требующую дополнительной памяти биективную перестановку
+индексов giant-групп. За один раунд последовательно проверяются 1024 giant
+centers из псевдослучайно выбранной группы, затем выбирается другая группа.
+До завершения диапазона каждая группа посещается ровно один раз. Все GPU
+забирают работу из одной логической перестановки без пропусков и пересечений.
+Seed печатается при запуске; `-bsgs-random-seed` воспроизводит тот же порядок.
 
 Production backend сохраняет все компактные кандидаты `fingerprint64 + j`,
 один раз сортирует их и строит адаптивный точный bucket-индекс. Коллизии
@@ -3883,6 +3914,17 @@ walker с шагом `2M` выводит `EqKey/s = GStep/s × 2M`.
   -range 64 \
   -bsgs-mem all \
   -bsgs-table-dir /Volumes/Fast/bsgs
+```
+
+**Пример 5 — полный поиск псевдослучайными раундами.**
+
+```bash
+./METAL_CRYPTO_TOOLKIT -bsgs \
+  -target targets.txt \
+  -range 56 \
+  -random \
+  -bsgs-random-seed 0x1234 \
+  -bsgs-mem 16GiB
 ```
 
 Каждый кандидат полностью сверяется с исходной точкой до вывода. 256-битные

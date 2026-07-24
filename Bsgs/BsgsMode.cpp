@@ -23,6 +23,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <random>
 #include <set>
 #include <sstream>
 #include <string>
@@ -373,6 +374,9 @@ struct Options {
     std::uint64_t table_size = 0u;
     bool cache_enabled = false;
     bool cache_rebuild = false;
+    bool random_search = false;
+    bool random_seed_explicit = false;
+    std::uint64_t random_seed = 0u;
     std::uint64_t auto_table_cap =
         std::numeric_limits<std::uint64_t>::max();
     long double baby_to_giant_cost = 64.0L;
@@ -652,6 +656,20 @@ bool parse_options(int argc, char** argv, Options& options, std::string& error) 
             options.cache_rebuild = true;
             continue;
         }
+        if (arg == "-random") {
+            options.random_search = true;
+            continue;
+        }
+        if (arg == "-bsgs-random-seed") {
+            std::string value;
+            if (!require_value(value) ||
+                !parse_u64_value(value, options.random_seed, error)) {
+                return false;
+            }
+            options.random_search = true;
+            options.random_seed_explicit = true;
+            continue;
+        }
         if (arg == "-o") {
             std::string value;
             if (!require_value(value)) return false;
@@ -672,6 +690,17 @@ bool parse_options(int argc, char** argv, Options& options, std::string& error) 
     if (options.cache_rebuild && !options.cache_enabled) {
         error = "-bsgs-table-rebuild requires -bsgs-table-cache or -bsgs-table-dir";
         return false;
+    }
+    if (options.random_search && !options.random_seed_explicit) {
+        std::random_device entropy;
+        const std::uint64_t clock =
+            static_cast<std::uint64_t>(
+                std::chrono::high_resolution_clock::now()
+                    .time_since_epoch()
+                    .count());
+        options.random_seed =
+            (static_cast<std::uint64_t>(entropy()) << 32u) ^
+            static_cast<std::uint64_t>(entropy()) ^ clock;
     }
     return true;
 }
@@ -793,12 +822,6 @@ HostPoint add_points(const HostPoint& left, const HostPoint& right) {
     return out;
 }
 
-HostPoint subtract_scalar(const HostPoint& point,
-                          const BigUInt& scalar,
-                          const HostPrecompute& precompute) {
-    return add_points(point, negate_point(multiply_g(scalar, precompute)));
-}
-
 std::array<std::uint8_t, 64> point_bytes(const HostPoint& point) {
     std::array<std::uint8_t, 64> out{};
     if (point.infinity) return out;
@@ -912,6 +935,31 @@ bool load_targets(const Options& options,
                   std::vector<Target>& targets,
                   std::string& error) {
     std::unordered_map<std::string, std::size_t> unique;
+    std::uintmax_t reserve_hint = options.target_values.size();
+    for (const std::string& value : options.target_values) {
+        std::error_code size_error;
+        const std::filesystem::path path = value;
+        if (std::filesystem::is_regular_file(path, size_error) &&
+            !size_error) {
+            const std::uintmax_t bytes =
+                std::filesystem::file_size(path, size_error);
+            if (!size_error) {
+                const std::uintmax_t addition = bytes / 67u + 1u;
+                const std::uintmax_t maximum =
+                    std::numeric_limits<std::uint32_t>::max();
+                reserve_hint = reserve_hint >= maximum - std::min(addition, maximum)
+                    ? maximum
+                    : reserve_hint + addition;
+            }
+        }
+    }
+    const std::size_t reserve_count = static_cast<std::size_t>(
+        std::min<std::uintmax_t>(
+            reserve_hint,
+            static_cast<std::uintmax_t>(
+                std::numeric_limits<std::uint32_t>::max())));
+    targets.reserve(reserve_count);
+    unique.reserve(reserve_count);
     std::size_t ordinal = 0u;
     for (std::size_t argument = 0u;
          argument < options.target_values.size();
@@ -962,6 +1010,12 @@ bool load_targets(const Options& options,
     }
     if (targets.empty()) {
         error = "no public keys were loaded from -target";
+        return false;
+    }
+    if (targets.size() >
+        static_cast<std::size_t>(
+            std::numeric_limits<std::uint32_t>::max())) {
+        error = "more than 4294967295 unique BSGS targets are not supported";
         return false;
     }
     return true;
@@ -1391,6 +1445,7 @@ struct MemoryPlan {
 
 bool make_memory_plan(const Options& options,
                       const BigUInt& width,
+                      std::size_t target_slots,
                       std::size_t active_targets,
                       MemoryPlan& plan,
                       std::string& error) {
@@ -1461,9 +1516,15 @@ bool make_memory_plan(const Options& options,
     const std::uint64_t mandatory_replicas = plan.unified
         ? static_cast<std::uint64_t>(options.devices.size())
         : 1u;
+    const unsigned __int128 target_bytes =
+        static_cast<unsigned __int128>(target_slots) *
+        8u * sizeof(std::uint64_t);
+    const unsigned __int128 per_device_mandatory =
+        static_cast<unsigned __int128>(32ull << 20u) + target_bytes;
     const unsigned __int128 mandatory =
-        static_cast<unsigned __int128>(32ull << 20u) *
-        std::max<std::uint64_t>(1u, mandatory_replicas);
+        per_device_mandatory *
+            std::max<std::uint64_t>(1u, mandatory_replicas) +
+        (plan.unified ? target_bytes : 0u);
     if (mandatory >= plan.budget) {
         error = "-bsgs-mem is too small for the mandatory BSGS buffers";
         return false;
@@ -1974,6 +2035,11 @@ bool prepare_device(DeviceContext& context,
         error = "Metal maxBufferLength cannot hold the BSGS bucket index";
         return false;
     }
+    if (context.properties.maxBufferLength != 0u &&
+        targets_bytes > context.properties.maxBufferLength) {
+        error = "Metal maxBufferLength cannot hold the BSGS target table";
+        return false;
+    }
     if (!allocate_device(context.targets,
                          std::max<std::size_t>(targets_bytes, 8u),
                          "allocate BSGS targets",
@@ -2084,14 +2150,118 @@ struct RunShared {
     const RuntimeHooks* hooks = nullptr;
     BigUInt width;
     BigUInt giant_count;
+    BigUInt group_count;
+    BigUInt random_group_offset;
     std::uint64_t m = 0u;
+    std::uint64_t random_group_stride = 0u;
     std::mutex result_mutex;
     std::mutex work_mutex;
     std::mutex error_mutex;
     BigUInt next_group;
+    std::atomic<std::uint64_t> remaining_targets{0u};
     std::atomic<bool> failed{false};
     std::string error;
 };
+
+std::uint64_t splitmix64(std::uint64_t& state) {
+    state += 0x9e3779b97f4a7c15ull;
+    std::uint64_t value = state;
+    value = (value ^ (value >> 30u)) * 0xbf58476d1ce4e5b9ull;
+    value = (value ^ (value >> 27u)) * 0x94d049bb133111ebull;
+    return value ^ (value >> 31u);
+}
+
+std::uint64_t gcd_with_big(const BigUInt& value, std::uint64_t candidate) {
+    if (candidate == 0u) return value.is_zero() ? 0u : value.low64();
+    std::uint64_t left = candidate;
+    std::uint64_t right = value % candidate;
+    while (right != 0u) {
+        const std::uint64_t next = left % right;
+        left = right;
+        right = next;
+    }
+    return left;
+}
+
+BigUInt random_below(std::uint64_t& state, const BigUInt& limit) {
+    if (limit.is_zero()) return {};
+    BigUInt value;
+    for (std::size_t limb = 0u; limb < 4u; ++limb) {
+        value <<= 64u;
+        value += BigUInt(splitmix64(state));
+    }
+    value %= limit;
+    return value;
+}
+
+void configure_random_groups(RunShared& shared) {
+    if (!shared.options->random_search ||
+        shared.group_count.is_zero()) {
+        return;
+    }
+    std::uint64_t state = shared.options->random_seed;
+    for (std::size_t limb = 0u; limb < 4u; ++limb) {
+        state ^= shared.range->start.limb(limb) +
+            0x9e3779b97f4a7c15ull + (state << 6u) + (state >> 2u);
+        state ^= shared.range->end.limb(limb) +
+            0x9e3779b97f4a7c15ull + (state << 6u) + (state >> 2u);
+    }
+    state ^= shared.m + 0x9e3779b97f4a7c15ull +
+        (state << 6u) + (state >> 2u);
+    shared.random_group_offset =
+        random_below(state, shared.group_count);
+    if (shared.group_count.bit_length() == 1) {
+        shared.random_group_stride = 0u;
+        return;
+    }
+    std::uint64_t stride = splitmix64(state) | 1u;
+    if (shared.group_count.bit_length() <= 64) {
+        const std::uint64_t count = shared.group_count.low64();
+        stride %= count;
+        if (stride == 0u) stride = 1u;
+    }
+    while (gcd_with_big(shared.group_count, stride) != 1u) {
+        if (stride > std::numeric_limits<std::uint64_t>::max() - 2u) {
+            stride = 1u;
+            break;
+        }
+        stride += 2u;
+        if (shared.group_count.bit_length() <= 64 &&
+            stride >= shared.group_count.low64()) {
+            stride %= shared.group_count.low64();
+            if (stride == 0u) stride = 1u;
+        }
+    }
+    shared.random_group_stride = stride;
+}
+
+BigUInt first_actual_group(const RunShared& shared,
+                           const BigUInt& logical_group) {
+    if (!shared.options->random_search ||
+        shared.random_group_stride == 0u) {
+        return shared.options->random_search
+            ? shared.random_group_offset
+            : logical_group;
+    }
+    BigUInt actual =
+        logical_group * shared.random_group_stride;
+    actual += shared.random_group_offset;
+    actual %= shared.group_count;
+    return actual;
+}
+
+void advance_actual_group(const RunShared& shared,
+                          BigUInt& actual_group) {
+    if (!shared.options->random_search) {
+        actual_group += BigUInt(1u);
+        return;
+    }
+    if (shared.random_group_stride == 0u) return;
+    actual_group += BigUInt(shared.random_group_stride);
+    if (actual_group >= shared.group_count) {
+        actual_group -= shared.group_count;
+    }
+}
 
 void set_failure(RunShared& shared, const std::string& error) {
     std::lock_guard<std::mutex> lock(shared.error_mutex);
@@ -2147,6 +2317,7 @@ bool write_result(RunShared& shared,
         set_failure(shared, "failed while writing BSGS output");
         return false;
     }
+    shared.remaining_targets.fetch_sub(1u, std::memory_order_acq_rel);
     if (shared.hooks->increment_found) {
         shared.hooks->increment_found();
     }
@@ -2391,7 +2562,6 @@ void search_device(DeviceContext& context,
         set_failure(shared, error);
         return;
     }
-    const BigUInt group_count = ceil_div(shared.giant_count, kWalkSize);
     std::size_t active_targets = 0u;
     for (const Target& target : *shared.targets) {
         active_targets += static_cast<std::size_t>(
@@ -2401,26 +2571,46 @@ void search_device(DeviceContext& context,
         std::max<std::size_t>(
             1u,
             std::min<std::size_t>(
-                256u, active_targets));
+                16384u, active_targets));
     const std::uint64_t groups_per_batch =
-        kWorkCapacity / static_cast<std::uint64_t>(target_batch);
+        std::max<std::uint64_t>(
+            1u,
+            kWorkCapacity / static_cast<std::uint64_t>(target_batch));
     for (;;) {
         if (shared.failed.load(std::memory_order_acquire)) return;
-        bool any_unsolved = false;
-        for (const Target& target : *shared.targets) {
-            any_unsolved = any_unsolved ||
-                !target.solved.load(std::memory_order_acquire);
-        }
-        if (!any_unsolved) return;
+        const std::uint64_t remaining =
+            shared.remaining_targets.load(std::memory_order_acquire);
+        if (remaining == 0u) return;
         BigUInt group_index;
         {
             std::lock_guard<std::mutex> lock(shared.work_mutex);
-            if (shared.next_group >= group_count) return;
+            if (shared.next_group >= shared.group_count) return;
             group_index = shared.next_group;
             shared.next_group += BigUInt(groups_per_batch);
         }
         const std::uint64_t groups =
-            min_u64(group_count - group_index, groups_per_batch);
+            min_u64(shared.group_count - group_index, groups_per_batch);
+        std::vector<WorkItem> group_templates;
+        group_templates.reserve(static_cast<std::size_t>(groups));
+        BigUInt actual_group =
+            first_actual_group(shared, group_index);
+        for (std::uint64_t group = 0u; group < groups; ++group) {
+            const BigUInt giant_base = actual_group * kWalkSize;
+            BigUInt center_index =
+                giant_base + BigUInt(kWalkSize / 2u);
+            BigUInt center_scalar =
+                ((center_index << 1u) + BigUInt(1u)) * shared.m;
+            center_scalar %= curve_order();
+            WorkItem item{};
+            const auto center_limbs = scalar_limbs(center_scalar);
+            const auto base_limbs = scalar_limbs(giant_base);
+            std::copy_n(center_limbs.data(),
+                        4u,
+                        item.center_scalar);
+            std::copy_n(base_limbs.data(), 4u, item.giant_base);
+            group_templates.push_back(item);
+            advance_actual_group(shared, actual_group);
+        }
         for (std::size_t first_target = 0u;
              first_target < shared.targets->size();
              first_target += target_batch) {
@@ -2437,22 +2627,8 @@ void search_device(DeviceContext& context,
                         std::memory_order_acquire)) {
                     continue;
                 }
-                for (std::uint64_t group = 0u; group < groups; ++group) {
-                    const BigUInt actual_group =
-                        group_index + BigUInt(group);
-                    const BigUInt giant_base = actual_group * kWalkSize;
-                    BigUInt center_index =
-                        giant_base + BigUInt(kWalkSize / 2u);
-                    BigUInt center_scalar =
-                        ((center_index << 1u) + BigUInt(1u)) * shared.m;
-                    center_scalar %= curve_order();
-                    WorkItem item{};
-                    const auto center_limbs = scalar_limbs(center_scalar);
-                    const auto base_limbs = scalar_limbs(giant_base);
-                    std::copy_n(center_limbs.data(),
-                                4u,
-                                item.center_scalar);
-                    std::copy_n(base_limbs.data(), 4u, item.giant_base);
+                for (const WorkItem& group_template : group_templates) {
+                    WorkItem item = group_template;
                     item.target_index =
                         static_cast<std::uint32_t>(target_index);
                     items.push_back(item);
@@ -2490,6 +2666,7 @@ bool search_range(Options& options,
     MemoryPlan memory;
     if (!make_memory_plan(options,
                           width,
+                          targets.size(),
                           unsolved_count(targets),
                           memory,
                           error)) {
@@ -2548,12 +2725,16 @@ bool search_range(Options& options,
         tables.emplace(memory.m, table);
     }
 
-    std::vector<HostPoint> shifted_targets(targets.size());
+    const HostPoint range_shift =
+        negate_point(multiply_g(range.start, precompute));
     std::vector<std::uint64_t> target_limbs(targets.size() * 8u);
     for (std::size_t i = 0u; i < targets.size(); ++i) {
-        shifted_targets[i] =
-            subtract_scalar(targets[i].point, range.start, precompute);
-        if (shifted_targets[i].infinity) {
+        if (targets[i].solved.load(std::memory_order_acquire)) {
+            continue;
+        }
+        const HostPoint shifted_target =
+            add_points(targets[i].point, range_shift);
+        if (shifted_target.infinity) {
             RunShared immediate;
             immediate.options = &options;
             immediate.range = &range;
@@ -2561,12 +2742,14 @@ bool search_range(Options& options,
             immediate.targets = &targets;
             immediate.hooks = &hooks;
             immediate.width = width;
+            immediate.remaining_targets.store(
+                1u, std::memory_order_release);
             if (!write_result(immediate, i, BigUInt(0u))) {
                 error = immediate.error;
                 return false;
             }
         }
-        const auto limbs = point_limbs(shifted_targets[i]);
+        const auto limbs = point_limbs(shifted_target);
         std::copy(limbs.begin(),
                   limbs.end(),
                   target_limbs.begin() + i * 8u);
@@ -2607,17 +2790,35 @@ bool search_range(Options& options,
     shared.width = width;
     shared.m = memory.m;
     shared.giant_count = ceil_div(width, memory.m * 2u);
-    const BigUInt total_ops =
-        shared.giant_count *
-        static_cast<std::uint64_t>(unsolved_count(targets));
+    shared.group_count = ceil_div(shared.giant_count, kWalkSize);
     const std::size_t active_targets_before_search =
         unsolved_count(targets);
+    shared.remaining_targets.store(
+        static_cast<std::uint64_t>(active_targets_before_search),
+        std::memory_order_release);
+    configure_random_groups(shared);
+    if (options.random_search) {
+        std::cout << "[!] BSGS random order: seed="
+                  << options.random_seed
+                  << ", giant groups=" << scalar_hex(shared.group_count)
+                  << ", offset="
+                  << scalar_hex(shared.random_group_offset)
+                  << ", stride=" << shared.random_group_stride
+                  << ", round=" << kWalkSize
+                  << " giant centers [!]\n";
+    }
+    const BigUInt total_ops =
+        shared.giant_count *
+        static_cast<std::uint64_t>(active_targets_before_search);
     if (hooks.set_speed_context) {
         hooks.set_speed_context(
             SpeedPhase::Search,
             saturating_u64(total_ops),
             static_cast<double>(memory.m) * 2.0,
-            static_cast<std::uint32_t>(unsolved_count(targets)));
+            static_cast<std::uint32_t>(
+                std::min<std::size_t>(
+                    active_targets_before_search,
+                    std::numeric_limits<std::uint32_t>::max())));
     }
     const auto started = std::chrono::steady_clock::now();
     std::vector<std::thread> workers;
@@ -2680,6 +2881,8 @@ void print_help() {
 [!] -bsgs-table-cache               Enable _local_artifacts/bsgs_tables.
 [!] -bsgs-table-dir DIR             Enable cache in DIR.
 [!] -bsgs-table-rebuild             Rebuild the enabled table cache.
+[!] -random                         Visit every giant group once in randomized order.
+[!] -bsgs-random-seed N             Reproducible 64-bit seed; also enables -random.
 [!] -device LIST                    Metal devices: 0, 0,1,3 or 0-3.
 [!] -o FILE                         Verified results, default result.txt.
 [!]
@@ -2702,6 +2905,9 @@ void print_help() {
 [!] All selected devices use the same M and replicated exact table. Giant
 [!] groups are dynamically claimed without overlaps. Live TABLE/SEARCH stats
 [!] are printed only by the toolkit SpeedThreadFunc.
+[!] Random mode applies one bijective permutation to 1024-center giant groups.
+[!] It starts each round at another pseudorandom group while preserving complete
+[!] coverage: no group is skipped or repeated before the range is exhausted.
 [!] SEARCH uses CUDA-compatible names: GStep/s is completed giant-center
 [!] probes/s and EqKey/s is effective unique scalar coverage/s. This Metal
 [!] negation map advances by 2M, so EqKey/s = GStep/s * 2 * table M.
@@ -2710,6 +2916,7 @@ void print_help() {
 [!] ./METAL_CRYPTO_TOOLKIT -bsgs -target 02... -range 48 -bsgs-mem auto
 [!] ./METAL_CRYPTO_TOOLKIT -bsgs -target a.txt -target 03... -range 40,48-52 -bsgs-mem 16GiB -device 0
 [!] ./METAL_CRYPTO_TOOLKIT -bsgs -target targets.txt -range 0x1000:0x2000 -bsgs-table 2^12 -bsgs-table-cache
+[!] ./METAL_CRYPTO_TOOLKIT -bsgs -target targets.txt -range 56 -random -bsgs-random-seed 0x1234 -bsgs-mem 16GiB
 [!] ./METAL_CRYPTO_TOOLKIT -bsgs -target 02... -range 64 -bsgs-mem all -bsgs-table-dir /Volumes/Fast/bsgs
 [!]
 [!] Full 256-bit arithmetic prevents truncation; it does not make an exhaustive
