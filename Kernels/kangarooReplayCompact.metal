@@ -12,7 +12,32 @@ kernel void kangarooWalkCompact(
     constant KangarooWalkParams& params [[buffer(8)]],
     uint tid [[thread_position_in_grid]])
 {
-    kangaroo_walk_compact_impl<KANGAROO_GROUP_SIZE>(
+    kangaroo_walk_compact_impl<KANGAROO_GROUP_SIZE, false>(
+        states,
+        jumps1,
+        jumps2,
+        jumps3,
+        hop_metadata,
+        dp_x,
+        dp_counts,
+        replay_error,
+        params,
+        tid);
+}
+
+kernel void kangarooWalkCompact8(
+    device KangarooState* states [[buffer(0)]],
+    const device ulong* jumps1 [[buffer(1)]],
+    const device ulong* jumps2 [[buffer(2)]],
+    const device ulong* jumps3 [[buffer(3)]],
+    device ushort* hop_metadata [[buffer(4)]],
+    device KangarooCompactDpX* dp_x [[buffer(5)]],
+    device uint* dp_counts [[buffer(6)]],
+    device atomic_uint* replay_error [[buffer(7)]],
+    constant KangarooWalkParams& params [[buffer(8)]],
+    uint tid [[thread_position_in_grid]])
+{
+    kangaroo_walk_compact_impl<8u, true>(
         states,
         jumps1,
         jumps2,

@@ -433,6 +433,7 @@ constexpr std::uint32_t kMaxStepCount = 8192;
 constexpr std::uint32_t kDefaultStepCount = 1000;
 constexpr std::uint32_t kThreadgroupSize = 256;
 constexpr std::uint32_t kKangaroosPerThread = 16;
+constexpr std::uint32_t kCompactSotaKangaroosPerThread = 8;
 constexpr std::uint32_t kDpCapacity = 256u * 1024u;
 constexpr std::uint32_t kCompactDpSlots = 32u;
 constexpr int kMaxDevices = 32;
@@ -2012,9 +2013,10 @@ SolveResult solve_point(const Options& options,
                                  ? "wide256"
                                  : (context->compact170_fallback
                                  ? "legacy (compact170 VRAM fallback)"
-                                 : (context->wide256_fallback
+                                  : (context->wide256_fallback
                                         ? "legacy (wide256 VRAM fallback)"
                                         : "legacy"))))
+                  << (context->compact170 ? ", walk: SOTA+ group8" : "")
                   << " [!]\n";
         contexts.push_back(std::move(context));
     }
@@ -2074,14 +2076,20 @@ SolveResult solve_point(const Options& options,
                 kDpCapacity,
                 launch_index
             };
+            const std::uint32_t walk_group_size = context->compact170
+                ? kCompactSotaKangaroosPerThread
+                : kKangaroosPerThread;
             const std::uint32_t walk_threads =
-                (context->kangaroo_count + kKangaroosPerThread - 1u) /
-                kKangaroosPerThread;
+                (context->kangaroo_count + walk_group_size - 1u) /
+                walk_group_size;
             const std::uint32_t blocks =
                 (walk_threads + kThreadgroupSize - 1u) / kThreadgroupSize;
             if (context->compact170 || context->wide256) {
+                const char* walk_kernel = context->compact170
+                    ? "kangarooWalkCompact8"
+                    : "kangarooWalkCompact";
                 if (!metal_ok(
-                        metal_launch("kangarooWalkCompact",
+                        metal_launch(walk_kernel,
                                      blocks,
                                      kThreadgroupSize,
                                      context->states,
@@ -2093,7 +2101,7 @@ SolveResult solve_point(const Options& options,
                                      context->compact_dp_counts,
                                      context->compact_replay_error,
                                      params),
-                        "kangarooWalkCompact",
+                        walk_kernel,
                         result.error)) {
                     return result;
                 }

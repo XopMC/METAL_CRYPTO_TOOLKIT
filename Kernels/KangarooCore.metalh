@@ -166,7 +166,7 @@ static inline void kangaroo_jump_point(const device ulong* table,
     kangaroo_load256(y, point + 4);
 }
 
-template <uint GroupSize>
+template <uint GroupSize, bool SotaPlus>
 static inline void kangaroo_walk_compact_impl(
     device KangarooState* states,
     const device ulong* jumps1,
@@ -287,6 +287,25 @@ static inline void kangaroo_walk_compact_impl(
             _ModSqr(next_x, slope);
             ModSub256(next_x, jump_x);
             ModSub256(next_x, xs[lane]);
+
+            if (SotaPlus) {
+                ulong opposite_y[4];
+                ulong opposite_slope[4];
+                ulong opposite_x[4];
+                kangaroo_copy256(opposite_y, jump_y);
+                ModNeg256(opposite_y);
+                ModSub256(opposite_slope, ys[lane], opposite_y);
+                _ModMult(opposite_slope, inverse);
+                _ModSqr(opposite_x, opposite_slope);
+                ModSub256(opposite_x, jump_x);
+                ModSub256(opposite_x, xs[lane]);
+                if ((opposite_x[0] & 3ul) < (next_x[0] & 3ul)) {
+                    kangaroo_copy256(slope, opposite_slope);
+                    kangaroo_copy256(next_x, opposite_x);
+                    metadata ^= KANGAROO_COMPACT_INV_FLAG;
+                }
+            }
+
             ModSub256(next_y, xs[lane], next_x);
             _ModMult(next_y, slope);
             ModSub256(next_y, ys[lane]);
@@ -295,7 +314,7 @@ static inline void kangaroo_walk_compact_impl(
                 flags[lane] &= ~1u;
             } else {
                 uint current_jump = jump_index;
-                if (inverted) {
+                if ((metadata & KANGAROO_COMPACT_INV_FLAG) != 0u) {
                     current_jump |= uint(KANGAROO_INV_FLAG);
                 }
                 uint next_jump = uint(next_x[0]) & params.jump_mask;
