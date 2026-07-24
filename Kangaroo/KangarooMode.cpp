@@ -1915,9 +1915,47 @@ std::uint32_t multi_kangaroo_count(const metalDeviceProp& properties,
     const std::uint64_t desired_aligned = std::min<std::uint64_t>(
         maximum_aligned,
         ((desired_bounded + alignment - 1u) / alignment) * alignment);
-    const std::uint64_t count = std::max<std::uint64_t>(
-        base,
-        std::min(desired_aligned, budget_aligned));
+    const long double expected_operations =
+        1.15L * std::exp2(range_bits / 2.0L);
+    const long double target_work_factor =
+        1.0L + (2.0L / 3.0L) *
+            static_cast<long double>(target_count - 1u);
+    // Four rounds are the solver minimum.  Do not spend VRAM on more
+    // simultaneous walks than the interval can use in those rounds.
+    const long double useful_limit =
+        expected_operations * target_work_factor /
+        (4.0L * static_cast<long double>(std::max(1u, step_count)));
+    const std::uint64_t useful_walkers =
+        useful_limit >= static_cast<long double>(maximum_aligned)
+            ? maximum_aligned
+            : static_cast<std::uint64_t>(
+                  std::max<long double>(
+                      static_cast<long double>(base), useful_limit));
+    const unsigned __int128 target_floor =
+        static_cast<unsigned __int128>(tame_count) +
+        static_cast<unsigned __int128>(target_count) * 2u;
+    const std::uint64_t target_floor_bounded = static_cast<std::uint64_t>(
+        std::min<unsigned __int128>(target_floor, maximum_aligned));
+    const std::uint64_t target_floor_aligned = std::min<std::uint64_t>(
+        maximum_aligned,
+        ((target_floor_bounded + alignment - 1u) / alignment) * alignment);
+    const std::uint64_t useful_aligned = std::max<std::uint64_t>(
+        target_floor_aligned,
+        std::max<std::uint64_t>(
+            base, (useful_walkers / alignment) * alignment));
+    const std::uint64_t count = std::min<std::uint64_t>(
+        maximum_aligned,
+        std::min(budget_aligned, useful_aligned));
+    if (count > desired_aligned) {
+        // Preserve SOTA v2's one shared tame share plus two wild shares per
+        // target when otherwise-idle working-set budget raises occupancy.
+        const unsigned __int128 herd_ratio =
+            1u + static_cast<unsigned __int128>(target_count) * 2u;
+        tame_count = static_cast<std::uint32_t>(
+            std::max<unsigned __int128>(
+                1u,
+                static_cast<unsigned __int128>(count) / herd_ratio));
+    }
     return static_cast<std::uint32_t>(count);
 }
 
@@ -1979,6 +2017,15 @@ bool prepare_gpu_context(GpuContext& context,
         generation_mode ? 1u : base_a.size(),
         context.tame_count,
         context.walker_budget);
+    if (!generation_mode && base_a.size() > 1u &&
+        static_cast<unsigned __int128>(
+            context.kangaroo_count - context.tame_count) <
+            static_cast<unsigned __int128>(base_a.size()) * 2u) {
+        error =
+            "selected Metal working-set budget cannot provide both wild "
+            "herds for every kangaroo target";
+        return false;
+    }
     context.compact170 = range_bits <= 170;
     context.wide256 = range_bits > 170;
 
