@@ -2702,6 +2702,9 @@ void print_help() {
 [!] All selected devices use the same M and replicated exact table. Giant
 [!] groups are dynamically claimed without overlaps. Live TABLE/SEARCH stats
 [!] are printed only by the toolkit SpeedThreadFunc.
+[!] SEARCH uses CUDA-compatible names: GStep/s is completed giant-center
+[!] probes/s and EqKey/s is effective unique scalar coverage/s. This Metal
+[!] negation map advances by 2M, so EqKey/s = GStep/s * 2 * table M.
 [!]
 [!] Examples:
 [!] ./METAL_CRYPTO_TOOLKIT -bsgs -target 02... -range 48 -bsgs-mem auto

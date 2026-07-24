@@ -1478,8 +1478,12 @@ Apple Silicon uses unified memory. CPU table storage, Metal buffers, and every
 multi-GPU replica therefore count against the same working set. All selected
 devices use the largest common table size that safely fits, and giant groups
 are dynamically claimed without overlap, so faster devices naturally take a
-larger share. Live table/search rates and covered-scalars/s are reported only
-by the toolkit's standard `SpeedThreadFunc`.
+larger share. Live rates are reported only by the toolkit's standard
+`SpeedThreadFunc`. Search uses the same names as CUDA BSGS: `GStep/s` is the
+number of completed giant-center probes per second and `EqKey/s` is effective
+unique scalar coverage per second. CUDA's current M-spaced walker reports
+`EqKey/s = GStep/s × M`; this Metal negation-map walker advances by `2M`, so it
+reports `EqKey/s = GStep/s × 2M`.
 
 **Example 1 — automatic memory and one key.**
 
@@ -3785,9 +3789,12 @@ fingerprint могут добавить проверок, но не скрыва
 и все реплики для нескольких GPU расходуют единый working set. На всех
 выбранных устройствах применяется общий безопасный размер таблицы, а giant
 groups динамически забираются без пересечений, поэтому более быстрые устройства
-естественно выполняют большую долю работы. Текущая скорость
-построения/поиска и covered-scalars/s печатается только стандартным
-`SpeedThreadFunc` тулкита.
+естественно выполняют большую долю работы. Текущая скорость печатается только
+стандартным `SpeedThreadFunc` тулкита. Поиск использует те же названия, что и
+CUDA BSGS: `GStep/s` — число завершённых giant-center probes в секунду, а
+`EqKey/s` — эффективное уникальное покрытие скаляров в секунду. Текущий
+M-разнесённый CUDA walker выводит `EqKey/s = GStep/s × M`; Metal negation-map
+walker с шагом `2M` выводит `EqKey/s = GStep/s × 2M`.
 
 **Пример 1 — автоматический бюджет и один ключ.**
 

@@ -2607,6 +2607,7 @@ static std::atomic<uint64_t> g_bsgs_phase_start_operations{ 0 };
 static std::atomic<double> g_bsgs_covered_scalars_per_operation{ 0.0 };
 static std::atomic<uint32_t> g_bsgs_active_targets{ 0 };
 static std::atomic<uint32_t> g_bsgs_founds{ 0 };
+static std::atomic<uint32_t> g_bsgs_total_targets{ 0 };
 AtomicCounter64 counterNotValid = 0;
 AtomicCounter64 counterMiniValid = 0;
 AtomicCounter64 counterProfanitySeedResolve = 0;
@@ -10843,6 +10844,7 @@ int main(int argc, char** argv)
             0.0, std::memory_order_relaxed);
         g_bsgs_active_targets.store(0, std::memory_order_relaxed);
         g_bsgs_founds.store(0, std::memory_order_relaxed);
+        g_bsgs_total_targets.store(0, std::memory_order_relaxed);
 
         const std::time_t started =
             std::chrono::system_clock::to_time_t(
@@ -10870,6 +10872,25 @@ int main(int argc, char** argv)
                     std::memory_order_release);
                 g_bsgs_active_targets.store(
                     active_targets, std::memory_order_release);
+                if (phase == bsgs::SpeedPhase::Search) {
+                    const std::uint64_t target_total =
+                        static_cast<std::uint64_t>(active_targets) +
+                        g_bsgs_founds.load(std::memory_order_acquire);
+                    const std::uint32_t bounded_total =
+                        static_cast<std::uint32_t>(
+                            std::min<std::uint64_t>(
+                                target_total,
+                                std::numeric_limits<std::uint32_t>::max()));
+                    std::uint32_t observed =
+                        g_bsgs_total_targets.load(std::memory_order_relaxed);
+                    while (observed < bounded_total &&
+                           !g_bsgs_total_targets.compare_exchange_weak(
+                               observed,
+                               bounded_total,
+                               std::memory_order_release,
+                               std::memory_order_relaxed)) {
+                    }
+                }
                 g_bsgs_speed_epoch.fetch_add(
                     1, std::memory_order_acq_rel);
             },
@@ -59173,18 +59194,19 @@ static void printBsgsSpeed(double operation_speed,
 {
     const uint32_t phase =
         g_bsgs_speed_phase.load(std::memory_order_acquire);
+    const bool searchPhase = phase ==
+        static_cast<uint32_t>(bsgs::SpeedPhase::Search);
     const char* phaseName = phase ==
         static_cast<uint32_t>(bsgs::SpeedPhase::TableBuild)
         ? "TABLE"
         : (phase == static_cast<uint32_t>(bsgs::SpeedPhase::CacheLoad)
             ? "CACHE" : "SEARCH");
-    const char* operationUnit = phase ==
-        static_cast<uint32_t>(bsgs::SpeedPhase::Search)
-        ? " Giant/s" : " Point/s";
+    const char* operationUnit = searchPhase ? " GStep/s" : " Point/s";
+    const char* equivalentUnit = searchPhase ? " EqKey/s" : " Scalar/s";
     const std::string operationSpeed =
         formatDouble("%.2f", operation_speed) + operationUnit;
     const std::string coveredSpeed =
-        formatDouble("%.2f", covered_scalar_speed) + " Scalar/s";
+        formatDouble("%.2f", covered_scalar_speed) + equivalentUnit;
     const uint64_t absoluteTotal = counterTotal.load();
     const uint64_t phaseStart =
         g_bsgs_phase_start_operations.load(std::memory_order_acquire);
@@ -59193,6 +59215,18 @@ static void printBsgsSpeed(double operation_speed,
     const unsigned long long phaseTotal =
         static_cast<unsigned long long>(
             g_bsgs_phase_total.load(std::memory_order_acquire));
+    if (searchPhase) {
+        printf("[!] BSGS:%s T:[%llu/%llu] | S:[%s] [%s] | F:[%u/%u] [!]     \r",
+               phaseName,
+               total,
+               phaseTotal,
+               operationSpeed.c_str(),
+               coveredSpeed.c_str(),
+               g_bsgs_founds.load(std::memory_order_acquire),
+               g_bsgs_total_targets.load(std::memory_order_acquire));
+        fflush(stdout);
+        return;
+    }
     printf("[!] BSGS:%s T:[%llu/%llu] | S:[%s] [%s] | A:[%u] F:[%u] [!]     \r",
            phaseName,
            total,
