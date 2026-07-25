@@ -58985,12 +58985,16 @@ void SpeedThreadFunc()
     steady_clock::time_point baseTime{};
     uint64_t kangarooEpoch =
         g_kangaroo_speed_epoch.load(std::memory_order_acquire);
-    uint64_t kangarooLastOperations = counterTotal.load();
-    steady_clock::time_point kangarooLastTime = steady_clock::now();
+    uint64_t kangarooBaseOperations = counterTotal.load();
+    uint64_t kangarooLastPrintedOperations = kangarooBaseOperations;
+    steady_clock::time_point kangarooBaseTime = steady_clock::now();
+    steady_clock::time_point kangarooLastPrintTime = kangarooBaseTime;
     uint64_t bsgsEpoch =
         g_bsgs_speed_epoch.load(std::memory_order_acquire);
-    uint64_t bsgsLastOperations = counterTotal.load();
-    steady_clock::time_point bsgsLastTime = steady_clock::now();
+    uint64_t bsgsBaseOperations = counterTotal.load();
+    uint64_t bsgsLastPrintedOperations = bsgsBaseOperations;
+    steady_clock::time_point bsgsBaseTime = steady_clock::now();
+    steady_clock::time_point bsgsLastPrintTime = bsgsBaseTime;
 
     while (isRun)
     {
@@ -59003,17 +59007,23 @@ void SpeedThreadFunc()
             if (epoch != bsgsEpoch)
             {
                 bsgsEpoch = epoch;
-                bsgsLastOperations = totalOperations;
-                bsgsLastTime = nowTime;
+                bsgsBaseOperations = totalOperations;
+                bsgsLastPrintedOperations = totalOperations;
+                bsgsBaseTime = nowTime;
+                bsgsLastPrintTime = nowTime;
             }
             const double elapsed =
                 duration_cast<duration<double>>(
-                    nowTime - bsgsLastTime).count();
-            if (elapsed >= 1.0)
+                    nowTime - bsgsBaseTime).count();
+            const double printElapsed =
+                duration_cast<duration<double>>(
+                    nowTime - bsgsLastPrintTime).count();
+            if (printElapsed >= 1.0 &&
+                totalOperations != bsgsLastPrintedOperations)
             {
                 const uint64_t completed =
-                    totalOperations >= bsgsLastOperations
-                    ? totalOperations - bsgsLastOperations
+                    totalOperations >= bsgsBaseOperations
+                    ? totalOperations - bsgsBaseOperations
                     : 0ull;
                 if (completed > 0)
                 {
@@ -59023,9 +59033,9 @@ void SpeedThreadFunc()
                         g_bsgs_covered_scalars_per_operation.load(
                             std::memory_order_acquire);
                     printBsgsSpeed(operationSpeed, coveredSpeed);
+                    bsgsLastPrintedOperations = totalOperations;
+                    bsgsLastPrintTime = nowTime;
                 }
-                bsgsLastOperations = totalOperations;
-                bsgsLastTime = nowTime;
             }
             std::this_thread::sleep_for(std::chrono::milliseconds(10));
             continue;
@@ -59039,16 +59049,22 @@ void SpeedThreadFunc()
             if (epoch != kangarooEpoch)
             {
                 kangarooEpoch = epoch;
-                kangarooLastOperations = totalOperations;
-                kangarooLastTime = nowTime;
+                kangarooBaseOperations = totalOperations;
+                kangarooLastPrintedOperations = totalOperations;
+                kangarooBaseTime = nowTime;
+                kangarooLastPrintTime = nowTime;
             }
             const double elapsed =
-                duration_cast<duration<double>>(nowTime - kangarooLastTime).count();
-            if (elapsed >= 1.0)
+                duration_cast<duration<double>>(nowTime - kangarooBaseTime).count();
+            const double printElapsed =
+                duration_cast<duration<double>>(
+                    nowTime - kangarooLastPrintTime).count();
+            if (printElapsed >= 1.0 &&
+                totalOperations != kangarooLastPrintedOperations)
             {
                 const uint64_t completed =
-                    totalOperations >= kangarooLastOperations
-                    ? totalOperations - kangarooLastOperations
+                    totalOperations >= kangarooBaseOperations
+                    ? totalOperations - kangarooBaseOperations
                     : 0ull;
                 if (completed > 0)
                 {
@@ -59058,9 +59074,9 @@ void SpeedThreadFunc()
                         g_kangaroo_equivalent_keys_per_jump.load(
                             std::memory_order_acquire);
                     printKangarooSpeed(jumpSpeed, equivalentSpeed);
+                    kangarooLastPrintedOperations = totalOperations;
+                    kangarooLastPrintTime = nowTime;
                 }
-                kangarooLastOperations = totalOperations;
-                kangarooLastTime = nowTime;
             }
             std::this_thread::sleep_for(std::chrono::milliseconds(10));
             continue;

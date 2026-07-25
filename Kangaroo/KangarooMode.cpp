@@ -2528,10 +2528,6 @@ SolveResult solve_points(const Options& options,
         } else {
             result.operations += operations_per_launch;
         }
-        if (g_hooks.add_operations) {
-            g_hooks.add_operations(operations_per_launch);
-        }
-
         for (std::size_t context_index = 0;
              context_index < contexts.size();
              ++context_index) {
@@ -2541,6 +2537,11 @@ SolveResult solve_points(const Options& options,
                 !metal_ok(metalDeviceSynchronize(),
                           "kangarooWalk synchronize", result.error)) {
                 return result;
+            }
+            if (g_hooks.add_operations) {
+                g_hooks.add_operations(
+                    static_cast<std::uint64_t>(context.kangaroo_count) *
+                    options.step_count);
             }
             std::uint32_t output_count = 0;
             if (context.compact170 || context.wide256) {
