@@ -2664,13 +2664,19 @@ SolveResult solve_points(const Options& options,
                          double requested_max_factor,
                          bool generation_mode,
                          DpDatabase& database,
-                         const HostPrecompute& precompute)
+                         const HostPrecompute& precompute,
+                         std::size_t required_solutions = 0u)
 {
     SolveResult result;
     if (targets.empty()) {
         result.error = "kangaroo target list is empty";
         return result;
     }
+    const std::size_t solution_goal = generation_mode
+        ? targets.size()
+        : (required_solutions == 0u
+               ? targets.size()
+               : std::min(required_solutions, targets.size()));
     result.offsets.resize(targets.size());
     result.solved_targets.assign(targets.size(), false);
     std::mt19937_64 jump_random(0);
@@ -3012,7 +3018,7 @@ SolveResult solve_points(const Options& options,
                             if (targets.size() == 1u) {
                                 result.offset = offset;
                             }
-                            if (solved_count == targets.size()) {
+                            if (solved_count >= solution_goal) {
                                 result.solved = true;
                                 return result;
                             }
@@ -3530,7 +3536,8 @@ int run_multi_target(Options& options,
                     base_max_factor,
                     false,
                     *database,
-                    precompute);
+                    precompute,
+                    stop_after_first ? 1u : 0u);
                 if (!solved.error.empty()) {
                     std::cerr
                         << "[!] Kangaroo multi-target solver error: "

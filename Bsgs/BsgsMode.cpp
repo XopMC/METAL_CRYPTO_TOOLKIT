@@ -29,7 +29,6 @@
 #include <string>
 #include <thread>
 #include <unordered_map>
-#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -397,6 +396,28 @@ struct Options {
     std::filesystem::path output_file = "result.txt";
 };
 
+double shifted_unique_coverage_ratio(const Options& options,
+                                     const BigUInt& width) {
+    if (!options.shifts.enabled ||
+        options.shifts.count <= 1u) {
+        return 1.0;
+    }
+    const std::uint64_t gaps = options.shifts.count - 1u;
+    const BigUInt covered_gap =
+        options.shifts.step < width ? options.shifts.step : width;
+    const BigUInt shift_span = options.shifts.step * gaps;
+    const BigUInt wrap_gap = curve_order() - shift_span;
+    const BigUInt covered_wrap =
+        wrap_gap < width ? wrap_gap : width;
+    const BigUInt unique_coverage =
+        covered_gap * gaps + covered_wrap;
+    const long double ratio = std::exp2(
+        log2_value(unique_coverage) -
+        log2_value(width) -
+        std::log2(static_cast<long double>(options.shifts.count)));
+    return static_cast<double>(std::clamp(ratio, 0.0L, 1.0L));
+}
+
 bool parse_int(const std::string& text, int minimum, int maximum, int& out) {
     try {
         std::size_t used = 0u;
@@ -623,11 +644,14 @@ bool parse_shifts(const std::string& text,
         error = "-bsgs-shifts STEP must be a non-zero scalar";
         return false;
     }
-    const BigUInt last =
-        parsed.start + parsed.step * (parsed.count - 1u);
-    if (last >= curve_order()) {
-        error = "-bsgs-shifts sequence reaches or wraps the curve order";
-        return false;
+    if (parsed.count > 1u) {
+        const std::uint64_t gaps = parsed.count - 1u;
+        const BigUInt maximum_span =
+            (curve_order() - BigUInt(1u) - parsed.start) / gaps;
+        if (parsed.step > maximum_span) {
+            error = "-bsgs-shifts sequence reaches or wraps the curve order";
+            return false;
+        }
     }
     out = parsed;
     return true;
@@ -2274,7 +2298,6 @@ struct RunShared {
     const SearchRange* range = nullptr;
     const HostPrecompute* precompute = nullptr;
     std::vector<Target>* targets = nullptr;
-    std::unordered_set<std::uint64_t>* shifted_solved = nullptr;
     const std::vector<std::vector<std::uint64_t>>*
         shifted_singular_matches = nullptr;
     const RuntimeHooks* hooks = nullptr;
@@ -2413,9 +2436,7 @@ bool write_result(RunShared& shared,
     if (target_slot >= shared.targets->size()) return true;
     Target& target =
         (*shared.targets)[static_cast<std::size_t>(target_slot)];
-    if ((!shifted &&
-         target.solved.load(std::memory_order_acquire)) ||
-        (shifted && shared.shifted_solved->count(target_id) != 0u)) {
+    if (target.solved.load(std::memory_order_acquire)) {
         return true;
     }
     const BigUInt private_key = shared.range->start + distance;
@@ -2448,22 +2469,16 @@ bool write_result(RunShared& shared,
                           target.point)) {
             return true;
         }
-        shared.shifted_solved->insert(target_id);
-    } else {
-        bool expected = false;
-        if (!target.solved.compare_exchange_strong(
-                expected, true, std::memory_order_acq_rel)) {
-            return true;
-        }
+    }
+    bool expected = false;
+    if (!target.solved.compare_exchange_strong(
+            expected, true, std::memory_order_acq_rel)) {
+        return true;
     }
     std::ofstream output(shared.options->output_file,
                          std::ios::app);
     if (!output) {
-        if (shifted) {
-            shared.shifted_solved->erase(target_id);
-        } else {
-            target.solved.store(false, std::memory_order_release);
-        }
+        target.solved.store(false, std::memory_order_release);
         set_failure(shared,
                     "cannot append output file '" +
                         shared.options->output_file.string() + "'");
@@ -2564,6 +2579,10 @@ bool process_shifted_singular_marker(RunShared& shared,
                                   candidate)) {
                     return false;
                 }
+                if (shared.remaining_targets.load(
+                        std::memory_order_acquire) == 0u) {
+                    return true;
+                }
             }
             if (j != 0u) {
                 const BigUInt candidate = center + baby;
@@ -2572,6 +2591,10 @@ bool process_shifted_singular_marker(RunShared& shared,
                                   target_id,
                                   candidate)) {
                     return false;
+                }
+                if (shared.remaining_targets.load(
+                        std::memory_order_acquire) == 0u) {
+                    return true;
                 }
             }
         }
@@ -2605,6 +2628,9 @@ bool execute_work(DeviceContext& context,
                       static_cast<std::uint32_t>(kWalkSize),
                   std::uint64_t match_skip = 0u) {
     if (items.empty()) return true;
+    if (shared.remaining_targets.load(std::memory_order_acquire) == 0u) {
+        return true;
+    }
     if (items.size() > kWorkCapacity) {
         const std::size_t middle = items.size() / 2u;
         const std::vector<WorkItem> left(items.begin(), items.begin() + middle);
@@ -2819,15 +2845,27 @@ bool execute_work(DeviceContext& context,
                               from_limbs(candidate.distance))) {
                 return false;
             }
+            if (shared.remaining_targets.load(
+                    std::memory_order_acquire) == 0u) {
+                break;
+            }
         }
-        for (const Hit& hit : host_hits) {
-            if (is_shifted_singular_marker(hit) &&
-                !process_shifted_singular_marker(shared, hit)) {
-                return false;
+        if (shared.remaining_targets.load(
+                std::memory_order_acquire) != 0u) {
+            for (const Hit& hit : host_hits) {
+                if (is_shifted_singular_marker(hit) &&
+                    !process_shifted_singular_marker(shared, hit)) {
+                    return false;
+                }
+                if (shared.remaining_targets.load(
+                        std::memory_order_acquire) == 0u) {
+                    break;
+                }
             }
         }
     }
-    if (continue_collision_page) {
+    if (continue_collision_page &&
+        shared.remaining_targets.load(std::memory_order_acquire) != 0u) {
         return execute_work(context,
                             items,
                             shared,
@@ -2931,7 +2969,12 @@ void search_device_shifted(DeviceContext& context,
         if (items.empty()) return true;
         const bool ok = execute_work(context, items, shared);
         items.clear();
-        return ok;
+        if (!ok ||
+            shared.remaining_targets.load(
+                std::memory_order_acquire) == 0u) {
+            return false;
+        }
+        return true;
     };
     for (;;) {
         if (shared.failed.load(std::memory_order_acquire) ||
@@ -2960,6 +3003,10 @@ void search_device_shifted(DeviceContext& context,
             for (std::uint64_t target_slot = 0u;
                  target_slot < shared.targets->size();
                  ++target_slot) {
+                if ((*shared.targets)[static_cast<std::size_t>(target_slot)]
+                        .solved.load(std::memory_order_acquire)) {
+                    continue;
+                }
                 const std::uint64_t target_id_base =
                     target_slot * shifts_per_base;
                 for (std::uint64_t shift_base = 0u;
@@ -2996,9 +3043,8 @@ void search_device_shifted(DeviceContext& context,
                     item.target_id =
                         target_id_base + shift_base;
                     items.push_back(item);
-                    if (items.size() == kWorkCapacity &&
-                        !flush()) {
-                        return;
+                    if (items.size() == kWorkCapacity) {
+                        if (!flush()) return;
                     }
                 }
             }
@@ -3031,25 +3077,67 @@ std::size_t unsolved_count(const std::vector<Target>& targets) {
         }));
 }
 
-std::uint64_t logical_unsolved_count(
-    const Options& options,
-    const std::vector<Target>& targets,
-    const std::unordered_set<std::uint64_t>& shifted_solved,
-    std::uint64_t target_count) {
-    if (options.shifts.enabled) {
-        return target_count -
-            std::min<std::uint64_t>(
-                target_count,
-                static_cast<std::uint64_t>(shifted_solved.size()));
-    }
+std::uint64_t recoverable_unsolved_count(
+    const std::vector<Target>& targets) {
     return static_cast<std::uint64_t>(unsolved_count(targets));
+}
+
+std::uint64_t active_probe_target_count(
+    const Options& options,
+    const std::vector<Target>& targets) {
+    const std::uint64_t bases = recoverable_unsolved_count(targets);
+    return options.shifts.enabled
+        ? bases * options.shifts.count
+        : bases;
+}
+
+bool dense_shift_union(const Options& options,
+                       std::vector<SearchRange>& ranges) {
+    if (!options.shifts.enabled) return false;
+    const BigUInt last_shift =
+        options.shifts.start +
+        options.shifts.step * (options.shifts.count - 1u);
+    ranges.clear();
+    ranges.reserve(options.ranges.size());
+    for (const SearchRange& range : options.ranges) {
+        const BigUInt width = range.end - range.start;
+        if (width.is_zero() ||
+            (options.shifts.count > 1u &&
+             options.shifts.step > width) ||
+            last_shift > curve_order() - range.end) {
+            ranges.clear();
+            return false;
+        }
+        SearchRange expanded;
+        expanded.start = range.start + options.shifts.start;
+        expanded.end = range.end + last_shift;
+        ranges.push_back(std::move(expanded));
+    }
+    std::sort(
+        ranges.begin(),
+        ranges.end(),
+        [](const SearchRange& left, const SearchRange& right) {
+            return left.start < right.start;
+        });
+    std::vector<SearchRange> merged;
+    for (const SearchRange& range : ranges) {
+        if (!merged.empty() &&
+            !(merged.back().end < range.start)) {
+            if (range.end > merged.back().end) {
+                merged.back().end = range.end;
+            }
+        } else {
+            merged.push_back(range);
+        }
+    }
+    ranges = std::move(merged);
+    return true;
 }
 
 bool search_range(Options& options,
                   const SearchRange& range,
                   const HostPrecompute& precompute,
                   std::vector<Target>& targets,
-                  std::unordered_set<std::uint64_t>& shifted_solved,
                   std::uint64_t target_count,
                   const RuntimeHooks& hooks,
                   std::map<std::uint64_t, std::shared_ptr<Table>>& tables,
@@ -3058,10 +3146,7 @@ bool search_range(Options& options,
     const BigUInt width = range.end - range.start;
     MemoryPlan memory;
     const std::uint64_t active_target_count =
-        logical_unsolved_count(options,
-                               targets,
-                               shifted_solved,
-                               target_count);
+        active_probe_target_count(options, targets);
     if (!make_memory_plan(options,
                           width,
                           targets.size(),
@@ -3161,7 +3246,6 @@ bool search_range(Options& options,
             immediate.range = &range;
             immediate.precompute = &precompute;
             immediate.targets = &targets;
-            immediate.shifted_solved = &shifted_solved;
             immediate.hooks = &hooks;
             immediate.target_count = target_count;
             immediate.width = width;
@@ -3177,10 +3261,7 @@ bool search_range(Options& options,
                   limbs.end(),
                   target_limbs.begin() + i * 8u);
     }
-    if (logical_unsolved_count(options,
-                               targets,
-                               shifted_solved,
-                               target_count) == 0u) {
+    if (recoverable_unsolved_count(targets) == 0u) {
         return true;
     }
 
@@ -3217,7 +3298,6 @@ bool search_range(Options& options,
     shared.range = &range;
     shared.precompute = &precompute;
     shared.targets = &targets;
-    shared.shifted_solved = &shifted_solved;
     shared.shifted_singular_matches =
         options.shifts.enabled
         ? &shifted_singular_matches
@@ -3228,13 +3308,12 @@ bool search_range(Options& options,
     shared.target_count = target_count;
     shared.giant_count = ceil_div(width, memory.m * 2u);
     shared.group_count = ceil_div(shared.giant_count, kWalkSize);
+    const std::uint64_t active_bases_before_search =
+        recoverable_unsolved_count(targets);
     const std::uint64_t active_targets_before_search =
-        logical_unsolved_count(options,
-                               targets,
-                               shifted_solved,
-                               target_count);
+        active_probe_target_count(options, targets);
     shared.remaining_targets.store(
-        active_targets_before_search,
+        active_bases_before_search,
         std::memory_order_release);
     configure_random_groups(shared);
     if (options.random_search) {
@@ -3250,11 +3329,26 @@ bool search_range(Options& options,
     const BigUInt total_ops =
         shared.giant_count *
         active_targets_before_search;
+    const double unique_coverage_ratio =
+        shifted_unique_coverage_ratio(options, width);
+    if (options.shifts.enabled) {
+        std::cout << "[!] BSGS shifted coverage: "
+                  << active_targets_before_search
+                  << " active logical probes, unique/logical="
+                  << std::fixed << std::setprecision(9)
+                  << unique_coverage_ratio
+                  << ", overlap=" << std::setprecision(3)
+                  << (unique_coverage_ratio > 0.0
+                          ? 1.0 / unique_coverage_ratio
+                          : std::numeric_limits<double>::infinity())
+                  << "x; first verified shift completes its base target [!]\n";
+    }
     if (hooks.set_speed_context) {
         hooks.set_speed_context(
             SpeedPhase::Search,
             saturating_u64(total_ops),
-            static_cast<double>(memory.m) * 2.0,
+            static_cast<double>(memory.m) * 2.0 *
+                unique_coverage_ratio,
             static_cast<std::uint32_t>(
                 std::min<std::uint64_t>(
                     active_targets_before_search,
@@ -3278,11 +3372,8 @@ bool search_range(Options& options,
     if (!table->from_cache &&
         table->build_seconds > 0.0 &&
         search_seconds > 0.0 &&
-        logical_unsolved_count(options,
-                               targets,
-                               shifted_solved,
-                               target_count) ==
-            active_targets_before_search &&
+        recoverable_unsolved_count(targets) ==
+            active_bases_before_search &&
         !total_ops.is_zero()) {
         const long double baby_rate =
             static_cast<long double>(memory.m) /
@@ -3296,11 +3387,8 @@ bool search_range(Options& options,
     }
     std::cout << "\n[!] BSGS table source: "
               << (table->from_cache ? "cache" : "built")
-              << "; range complete, remaining targets="
-              << logical_unsolved_count(options,
-                                        targets,
-                                        shifted_solved,
-                                        target_count)
+              << "; range complete, remaining base targets="
+              << recoverable_unsolved_count(targets)
               << " [!]\n";
     return true;
 }
@@ -3345,6 +3433,8 @@ void print_help() {
 [!] Shift mode keeps only each base Q resident and carries a 64-bit logical
 [!] target id through the GPU pipeline. Hundreds of millions of arithmetic
 [!] shifts therefore do not allocate hundreds of millions of public keys.
+[!] The first verified shifted hit completes that base target and stops its
+[!] remaining probes. Dense overlaps are collapsed into one exact union search.
 [!] A shifted hit prints both its private key and the verified base private key.
 [!]
 [!] Memory:
@@ -3364,7 +3454,8 @@ void print_help() {
 [!] coverage: no group is skipped or repeated before the range is exhausted.
 [!] SEARCH uses CUDA-compatible names: GStep/s is completed giant-center
 [!] probes/s and EqKey/s is effective unique scalar coverage/s. This Metal
-[!] negation map advances by 2M, so EqKey/s = GStep/s * 2 * table M.
+[!] negation map advances by 2M. Normal search uses EqKey/s=GStep/s*2M;
+[!] sparse shifted search additionally removes measured interval overlap.
 [!]
 [!] Examples:
 [!] ./METAL_CRYPTO_TOOLKIT -bsgs -target 02... -range 48 -bsgs-mem auto
@@ -3429,6 +3520,27 @@ int run(int argc, char** argv, const RuntimeHooks& hooks) {
                   << ", step=" << scalar_hex(options.shifts.step);
     }
     std::cout << " [!]\n";
+    if (options.shifts.enabled) {
+        std::vector<SearchRange> collapsed_ranges;
+        if (dense_shift_union(options, collapsed_ranges)) {
+            std::cout
+                << "[!] BSGS compact shifts: "
+                << target_count
+                << " overlapping logical targets collapsed into "
+                << collapsed_ranges.size()
+                << " exact union range(s); unique coverage is searched once "
+                   "and the first verified hit recovers the base key [!]\n";
+            options.ranges = std::move(collapsed_ranges);
+            options.shifts.enabled = false;
+            target_count =
+                static_cast<std::uint64_t>(targets.size());
+        } else {
+            std::cout
+                << "[!] BSGS compact shifts: sparse/non-collapsible source; "
+                   "overlap-aware EqKey/s and per-base first-hit termination "
+                   "enabled [!]\n";
+        }
+    }
 
     HostPrecompute precompute;
     if (!build_host_precompute(precompute, error)) {
@@ -3436,12 +3548,8 @@ int run(int argc, char** argv, const RuntimeHooks& hooks) {
         return 1;
     }
     std::map<std::uint64_t, std::shared_ptr<Table>> tables;
-    std::unordered_set<std::uint64_t> shifted_solved;
     for (const SearchRange& range : options.ranges) {
-        if (logical_unsolved_count(options,
-                                   targets,
-                                   shifted_solved,
-                                   target_count) == 0u) {
+        if (recoverable_unsolved_count(targets) == 0u) {
             break;
         }
         for (;;) {
@@ -3450,7 +3558,6 @@ int run(int argc, char** argv, const RuntimeHooks& hooks) {
                              range,
                              precompute,
                              targets,
-                             shifted_solved,
                              target_count,
                              hooks,
                              tables,
@@ -3482,14 +3589,11 @@ int run(int argc, char** argv, const RuntimeHooks& hooks) {
         hooks.set_speed_context(SpeedPhase::Idle, 0u, 0.0, 0u);
     }
     const std::uint64_t remaining =
-        logical_unsolved_count(options,
-                               targets,
-                               shifted_solved,
-                               target_count);
+        recoverable_unsolved_count(targets);
     std::cout << "\n[!] BSGS completed: "
-              << (target_count - remaining)
-              << "/" << target_count
-              << " unique logical targets solved [!]\n";
+              << (targets.size() - remaining)
+              << "/" << targets.size()
+              << " base private keys recovered [!]\n";
     return 0;
 }
 
