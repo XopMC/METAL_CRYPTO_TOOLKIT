@@ -438,6 +438,9 @@ constexpr std::uint32_t kDpCapacity = 256u * 1024u;
 constexpr std::uint32_t kCompactDpSlots = 32u;
 constexpr std::uint32_t kHerdMask = 3u;
 constexpr std::uint32_t kTargetShift = 2u;
+constexpr std::uint32_t kMaxTargetWindow = 65536u;
+constexpr std::uint64_t kRuntimeReserve = 512ull << 20u;
+constexpr std::uint64_t kWalkerFixedReserve = 64ull << 20u;
 constexpr int kMaxDevices = 32;
 
 std::uint32_t encode_wild_type(std::uint32_t herd_type,
@@ -459,6 +462,25 @@ struct SearchRange {
     int source_bits = 0;
 };
 
+enum class MemoryKind {
+    Auto,
+    All,
+    Percent,
+    Bytes,
+};
+
+struct MemorySpec {
+    MemoryKind kind = MemoryKind::Auto;
+    std::uint64_t value = 0u;
+};
+
+struct ShiftSpec {
+    bool enabled = false;
+    cpp_int start = 0;
+    cpp_int step = 1;
+    std::uint64_t count = 0u;
+};
+
 struct Options {
     std::string public_key_hex;
     std::vector<std::string> target_values;
@@ -472,6 +494,8 @@ struct Options {
     double max_factor = 0.0;
     std::uint32_t jump_count = kDefaultJumpCount;
     std::uint32_t step_count = kDefaultStepCount;
+    MemorySpec memory;
+    ShiftSpec shifts;
     bool cache_enabled = true;
     bool cache_rebuild = false;
     std::filesystem::path cache_dir =
@@ -489,6 +513,12 @@ struct TargetInput {
     std::string public_key_hex;
     std::string source;
     HostPoint original;
+    bool shifted = false;
+    std::uint64_t logical_index = 0u;
+    cpp_int shift = 0;
+    std::string base_public_key_hex;
+    std::string base_source;
+    HostPoint base_original;
     bool solved = false;
 };
 
@@ -657,6 +687,137 @@ bool parse_double(const std::string& text,
     catch (...) {
         return false;
     }
+}
+
+bool parse_u64_value(const std::string& text,
+                     std::uint64_t& result,
+                     std::string& error)
+{
+    try {
+        if (text.rfind("2^", 0u) == 0u) {
+            int exponent = 0;
+            if (!parse_int(text.substr(2u), 0, 63, exponent)) {
+                error = "2^EXP requires EXP in 0..63";
+                return false;
+            }
+            result = 1ull << static_cast<unsigned>(exponent);
+            return true;
+        }
+        std::size_t used = 0u;
+        const int base =
+            text.size() > 2u && text[0] == '0' &&
+            (text[1] == 'x' || text[1] == 'X') ? 16 : 10;
+        result = std::stoull(text, &used, base);
+        if (used != text.size()) {
+            error = "invalid integer '" + text + "'";
+            return false;
+        }
+        return true;
+    }
+    catch (...) {
+        error = "integer does not fit in 64 bits";
+        return false;
+    }
+}
+
+bool parse_memory(std::string text, MemorySpec& result, std::string& error)
+{
+    const std::string lower = lower_hex(std::move(text));
+    if (lower == "auto") {
+        result = {MemoryKind::Auto, 0u};
+        return true;
+    }
+    if (lower == "all") {
+        result = {MemoryKind::All, 0u};
+        return true;
+    }
+    if (!lower.empty() && lower.back() == '%') {
+        std::uint64_t percent = 0u;
+        if (!parse_u64_value(
+                lower.substr(0u, lower.size() - 1u),
+                percent,
+                error) ||
+            percent == 0u || percent > 100u) {
+            if (error.empty()) {
+                error = "percentage must be 1..100%";
+            }
+            return false;
+        }
+        result = {MemoryKind::Percent, percent};
+        return true;
+    }
+
+    std::uint64_t multiplier = 1ull << 20u;
+    std::string number = lower;
+    if (lower.size() > 3u &&
+        lower.substr(lower.size() - 3u) == "mib") {
+        number.resize(number.size() - 3u);
+    } else if (lower.size() > 3u &&
+               lower.substr(lower.size() - 3u) == "gib") {
+        number.resize(number.size() - 3u);
+        multiplier = 1ull << 30u;
+    }
+    std::uint64_t amount = 0u;
+    if (!parse_u64_value(number, amount, error) ||
+        amount == 0u ||
+        amount > std::numeric_limits<std::uint64_t>::max() / multiplier) {
+        if (error.empty()) {
+            error = "memory size is invalid or overflows";
+        }
+        return false;
+    }
+    result = {MemoryKind::Bytes, amount * multiplier};
+    return true;
+}
+
+bool parse_shifts(const std::string& text,
+                  ShiftSpec& result,
+                  std::string& error)
+{
+    std::vector<std::string> fields;
+    std::stringstream stream(text);
+    std::string field;
+    while (std::getline(stream, field, ':')) {
+        fields.push_back(field);
+    }
+    if (fields.size() < 2u || fields.size() > 3u ||
+        fields[0].empty() || fields[1].empty() ||
+        (fields.size() == 3u && fields[2].empty())) {
+        error = "-kangaroo-shifts expects HEX_START:COUNT[:HEX_STEP]";
+        return false;
+    }
+
+    ShiftSpec parsed;
+    parsed.enabled = true;
+    if (!parse_scalar(fields[0], parsed.start) ||
+        parsed.start >= curve_order()) {
+        error =
+            "-kangaroo-shifts START must be a scalar below the curve order";
+        return false;
+    }
+    if (!parse_u64_value(fields[1], parsed.count, error) ||
+        parsed.count == 0u) {
+        if (error.empty()) {
+            error =
+                "-kangaroo-shifts COUNT must be in 1..18446744073709551615";
+        }
+        return false;
+    }
+    if (fields.size() == 3u &&
+        (!parse_scalar(fields[2], parsed.step) ||
+         parsed.step == 0)) {
+        error = "-kangaroo-shifts STEP must be a non-zero scalar";
+        return false;
+    }
+    const cpp_int last =
+        parsed.start + parsed.step * (parsed.count - 1u);
+    if (last >= curve_order()) {
+        error =
+            "-kangaroo-shifts sequence reaches or wraps the curve order";
+        return false;
+    }
+    result = std::move(parsed);
+    return true;
 }
 
 bool append_number_list(const std::string& text,
@@ -1007,6 +1168,33 @@ bool load_targets(const Options& options,
     return true;
 }
 
+bool logical_target_count(const Options& options,
+                          const std::vector<TargetInput>& targets,
+                          std::uint64_t& result,
+                          std::string& error)
+{
+    if (targets.size() >
+        static_cast<std::size_t>(
+            std::numeric_limits<std::uint64_t>::max())) {
+        error = "kangaroo base target count does not fit in 64 bits";
+        return false;
+    }
+    const std::uint64_t bases =
+        static_cast<std::uint64_t>(targets.size());
+    const std::uint64_t multiplier =
+        options.shifts.enabled ? options.shifts.count : 1u;
+    if (bases != 0u &&
+        multiplier >
+            std::numeric_limits<std::uint64_t>::max() / bases) {
+        error =
+            "base targets multiplied by -kangaroo-shifts COUNT exceed "
+            "the 64-bit logical target space";
+        return false;
+    }
+    result = bases * multiplier;
+    return true;
+}
+
 std::array<std::uint64_t, 8> point_limbs(const HostPoint& point)
 {
     std::array<std::uint64_t, 8> result{};
@@ -1232,6 +1420,27 @@ bool parse_options(int argc, char** argv, Options& options, std::string& error)
                 return false;
             }
             options.target_values.push_back(value);
+            continue;
+        }
+        if (arg == "-kangaroo-shifts") {
+            std::string value;
+            if (!require_value(value) ||
+                options.shifts.enabled ||
+                !parse_shifts(value, options.shifts, error)) {
+                if (error.empty()) {
+                    error =
+                        "-kangaroo-shifts may be specified only once";
+                }
+                return false;
+            }
+            continue;
+        }
+        if (arg == "-kangaroo-mem") {
+            std::string value;
+            if (!require_value(value) ||
+                !parse_memory(value, options.memory, error)) {
+                return false;
+            }
             continue;
         }
         if (arg == "-range") {
@@ -1483,6 +1692,27 @@ public:
     {
         records_.clear();
         collision_records_.clear();
+    }
+
+    void retain_tame()
+    {
+        std::vector<DpRecord> tame;
+        tame.reserve(size());
+        for (const auto& item : records_) {
+            if (item.second.herd_type() == 0u) {
+                tame.push_back(item.second);
+            }
+        }
+        for (const auto& item : collision_records_) {
+            if (item.second.herd_type() == 0u) {
+                tame.push_back(item.second);
+            }
+        }
+        clear();
+        std::vector<DpRecord> collisions;
+        for (const DpRecord& record : tame) {
+            collisions_and_add(record, collisions);
+        }
     }
 
     bool load(const std::filesystem::path& path,
@@ -1771,6 +2001,8 @@ struct GpuContext {
     std::uint32_t target_count = 1;
     std::uint32_t dp_slots = kCompactDpSlots;
     std::uint64_t walker_budget = 0;
+    std::uint64_t free_working_set = 0;
+    std::uint64_t allocated_working_set = 0;
     KangarooStateHost* states = nullptr;
     std::uint64_t* jumps1 = nullptr;
     std::uint64_t* jumps2 = nullptr;
@@ -1856,20 +2088,90 @@ std::uint32_t auto_kangaroo_count(const metalDeviceProp& properties,
         count, std::numeric_limits<std::uint32_t>::max()));
 }
 
+bool resolve_walker_budget(const MemorySpec& memory,
+                           const metalDeviceProp& properties,
+                           std::size_t selected_devices,
+                           std::uint64_t& budget,
+                           std::uint64_t& free_working_set,
+                           std::string& error)
+{
+    const std::uint64_t total =
+        properties.recommendedMaxWorkingSetSize != 0u
+            ? properties.recommendedMaxWorkingSetSize
+            : properties.maxBufferLength;
+    free_working_set =
+        total > properties.currentAllocatedSize
+            ? total - properties.currentAllocatedSize
+            : 0u;
+    if (free_working_set <= kRuntimeReserve) {
+        error =
+            "not enough recommended Metal working set for kangaroo runtime";
+        return false;
+    }
+
+    switch (memory.kind) {
+    case MemoryKind::Auto:
+        budget = free_working_set / 4u;
+        break;
+    case MemoryKind::All:
+        budget = free_working_set - kRuntimeReserve;
+        break;
+    case MemoryKind::Percent:
+        budget = static_cast<std::uint64_t>(
+            (static_cast<unsigned __int128>(free_working_set) *
+             memory.value) / 100u);
+        break;
+    case MemoryKind::Bytes:
+        if (memory.value > free_working_set - kRuntimeReserve) {
+            error =
+                "requested -kangaroo-mem exceeds the remaining "
+                "recommended Metal working set";
+            return false;
+        }
+        budget = memory.value;
+        break;
+    }
+
+    // Apple GPUs share one physical working set. Treat -kangaroo-mem as a
+    // total budget there rather than promising the same bytes to every
+    // selected logical device.
+    if (properties.hasUnifiedMemory != 0 && selected_devices > 1u) {
+        budget /= static_cast<std::uint64_t>(selected_devices);
+    }
+    if (budget <= kWalkerFixedReserve) {
+        error =
+            "-kangaroo-mem leaves less than the mandatory 64 MiB "
+            "walker/runtime reserve per selected device";
+        return false;
+    }
+    return true;
+}
+
 std::uint32_t multi_kangaroo_count(const metalDeviceProp& properties,
+                                   const MemorySpec& memory,
                                    int range_bits,
                                    std::uint32_t step_count,
                                    std::uint32_t dp_slots,
                                    std::size_t selected_devices,
                                    std::size_t target_count,
                                    std::uint32_t& tame_count,
-                                   std::uint64_t& walker_budget)
+                                   std::uint64_t& walker_budget,
+                                   std::uint64_t& free_working_set,
+                                   std::string& error)
 {
     const std::uint64_t base =
         auto_kangaroo_count(properties, range_bits, selected_devices);
     tame_count = static_cast<std::uint32_t>(base / 3u);
+    if (!resolve_walker_budget(
+            memory,
+            properties,
+            selected_devices,
+            walker_budget,
+            free_working_set,
+            error)) {
+        return 0u;
+    }
     if (target_count <= 1u) {
-        walker_budget = 0u;
         return static_cast<std::uint32_t>(base);
     }
 
@@ -1877,18 +2179,6 @@ std::uint32_t multi_kangaroo_count(const metalDeviceProp& properties,
         static_cast<unsigned __int128>(tame_count) +
         static_cast<unsigned __int128>(base - tame_count) *
             target_count;
-    const std::uint64_t free_working_set =
-        properties.recommendedMaxWorkingSetSize >
-                properties.currentAllocatedSize
-            ? properties.recommendedMaxWorkingSetSize -
-                properties.currentAllocatedSize
-            : 0u;
-    walker_budget = std::min<std::uint64_t>(
-        16ull << 30u,
-        free_working_set == 0u
-            ? 4ull << 30u
-            : free_working_set / 4u);
-    const std::uint64_t fixed_reserve = 64ull << 20u;
     const std::uint64_t per_walker =
         sizeof(KangarooStateHost) +
         static_cast<std::uint64_t>(step_count) * sizeof(std::uint16_t) +
@@ -1896,8 +2186,8 @@ std::uint32_t multi_kangaroo_count(const metalDeviceProp& properties,
             sizeof(KangarooCompactDpXHost) +
         sizeof(std::uint32_t);
     const std::uint64_t budget_walkers =
-        walker_budget > fixed_reserve && per_walker != 0u
-            ? (walker_budget - fixed_reserve) / per_walker
+        walker_budget > kWalkerFixedReserve && per_walker != 0u
+            ? (walker_budget - kWalkerFixedReserve) / per_walker
             : base;
     const std::uint64_t alignment =
         static_cast<std::uint64_t>(kThreadgroupSize) *
@@ -1907,9 +2197,14 @@ std::uint32_t multi_kangaroo_count(const metalDeviceProp& properties,
              std::numeric_limits<std::uint32_t>::max()) /
          alignment) *
         alignment;
-    const std::uint64_t budget_aligned = std::max<std::uint64_t>(
-        base,
-        (budget_walkers / alignment) * alignment);
+    const std::uint64_t budget_aligned =
+        (budget_walkers / alignment) * alignment;
+    if (budget_aligned < base) {
+        error =
+            "-kangaroo-mem is too small for the default multi-target "
+            "walker occupancy at the selected -kangsteps value";
+        return 0u;
+    }
     const std::uint64_t desired_bounded = static_cast<std::uint64_t>(
         std::min<unsigned __int128>(desired, maximum_aligned));
     const std::uint64_t desired_aligned = std::min<std::uint64_t>(
@@ -1959,6 +2254,72 @@ std::uint32_t multi_kangaroo_count(const metalDeviceProp& properties,
     return static_cast<std::uint32_t>(count);
 }
 
+bool target_window_capacity(const Options& options,
+                            int range_bits,
+                            std::size_t& result,
+                            std::string& error)
+{
+    std::uint64_t minimum_capacity = kMaxTargetWindow;
+    const std::uint64_t per_walker =
+        sizeof(KangarooStateHost) +
+        static_cast<std::uint64_t>(options.step_count) *
+            sizeof(std::uint16_t) +
+        static_cast<std::uint64_t>(options.step_count) *
+            sizeof(KangarooCompactDpXHost) +
+        sizeof(std::uint32_t);
+    if (per_walker == 0u) {
+        error = "kangaroo per-walker memory estimate overflowed";
+        return false;
+    }
+
+    for (int device : options.devices) {
+        if (!metal_ok(
+                metalSetDevice(device),
+                "metalSetDevice target window",
+                error)) {
+            return false;
+        }
+        metalDeviceProp properties{};
+        if (!metal_ok(
+                metalGetDeviceProperties(&properties, device),
+                "metalGetDeviceProperties target window",
+                error)) {
+            return false;
+        }
+        std::uint64_t budget = 0u;
+        std::uint64_t free_working_set = 0u;
+        if (!resolve_walker_budget(
+                options.memory,
+                properties,
+                options.devices.size(),
+                budget,
+                free_working_set,
+                error)) {
+            return false;
+        }
+        const std::uint64_t base =
+            auto_kangaroo_count(
+                properties,
+                range_bits,
+                options.devices.size());
+        const std::uint64_t tame = base / 3u;
+        const std::uint64_t walkers =
+            (budget - kWalkerFixedReserve) / per_walker;
+        const std::uint64_t capacity =
+            walkers > tame ? (walkers - tame) / 2u : 0u;
+        if (capacity == 0u) {
+            error =
+                "-kangaroo-mem cannot fit one shared-tame target window "
+                "at the selected -kangsteps value";
+            return false;
+        }
+        minimum_capacity = std::min(minimum_capacity, capacity);
+    }
+    result = static_cast<std::size_t>(
+        std::max<std::uint64_t>(1u, minimum_capacity));
+    return true;
+}
+
 template <typename T>
 bool allocate_device(T*& pointer, std::size_t bytes,
                      const char* name, std::string& error)
@@ -1977,6 +2338,7 @@ bool copy_to_device(void* destination, const void* source,
 
 bool prepare_gpu_context(GpuContext& context,
                          int device,
+                         const MemorySpec& memory,
                          int range_bits,
                          std::uint32_t step_count,
                          bool generation_mode,
@@ -2010,13 +2372,19 @@ bool prepare_gpu_context(GpuContext& context,
             : kCompactDpSlots;
     context.kangaroo_count = multi_kangaroo_count(
         properties,
+        memory,
         range_bits,
         step_count,
         context.dp_slots,
         selected_devices,
         generation_mode ? 1u : base_a.size(),
         context.tame_count,
-        context.walker_budget);
+        context.walker_budget,
+        context.free_working_set,
+        error);
+    if (context.kangaroo_count == 0u) {
+        return false;
+    }
     if (!generation_mode && base_a.size() > 1u &&
         static_cast<unsigned __int128>(
             context.kangaroo_count - context.tame_count) <
@@ -2188,6 +2556,15 @@ bool prepare_gpu_context(GpuContext& context,
         !metal_ok(metalDeviceSynchronize(), "kangarooInit synchronize", error)) {
         return false;
     }
+    metalDeviceProp allocated_properties{};
+    if (!metal_ok(
+            metalGetDeviceProperties(&allocated_properties, device),
+            "metalGetDeviceProperties after kangaroo allocation",
+            error)) {
+        return false;
+    }
+    context.allocated_working_set =
+        allocated_properties.currentAllocatedSize;
     return true;
 }
 
@@ -2332,6 +2709,7 @@ SolveResult solve_points(const Options& options,
         if (!prepare_gpu_context(
                 *context,
                 device,
+                options.memory,
                 range_bits,
                 options.step_count,
                 generation_mode,
@@ -2366,10 +2744,12 @@ SolveResult solve_points(const Options& options,
                                 ", tame: " +
                                 std::to_string(context->tame_count) +
                                 ", replay slots: " +
-                                std::to_string(context->dp_slots) +
-                                ", VRAM budget: " +
-                                std::to_string(context->walker_budget)
+                                std::to_string(context->dp_slots)
                           : "")
+                  << ", working set allocated/ceiling/free: "
+                  << context->allocated_working_set
+                  << "/" << context->walker_budget
+                  << "/" << context->free_working_set
                   << " [!]\n";
         contexts.push_back(std::move(context));
     }
@@ -2675,7 +3055,8 @@ bool append_result(const Options& options,
                    const std::vector<int>& exponents,
                    const HostPoint& point_after_subtract,
                    const cpp_int& low_key,
-                   const cpp_int& full_key)
+                   const cpp_int& full_key,
+                   const TargetInput* target = nullptr)
 {
     std::ostringstream block;
     block << "Pub: " << options.public_key_hex << "\n";
@@ -2689,7 +3070,19 @@ bool append_result(const Options& options,
     block << "\nPub after subtract: "
           << point_uncompressed_hex(point_after_subtract);
     block << "\nk_low: " << scalar_hex(low_key);
-    block << "\npriv: " << scalar_hex(full_key) << "\n\n";
+    block << "\npriv: " << scalar_hex(full_key);
+    if (target != nullptr && target->shifted) {
+        const cpp_int base_private =
+            (full_key + target->shift) % curve_order();
+        block << "\nLogical target: "
+              << (target->logical_index + 1u)
+              << "\nTarget source: " << target->source
+              << "\nShift: " << scalar_hex(target->shift)
+              << "\nBase pub: " << target->base_public_key_hex
+              << "\nBase source: " << target->base_source
+              << "\nBase priv: " << scalar_hex(base_private);
+    }
+    block << "\n\n";
 
     std::ofstream output(options.output_file, std::ios::app | std::ios::binary);
     if (!output) {
@@ -2819,15 +3212,30 @@ bool append_target_result(const Options& options,
                           const std::vector<int>& exponents,
                           const HostPoint& point_after_subtract,
                           const cpp_int& low_key,
-                          const cpp_int& full_key)
+                          const cpp_int& full_key,
+                          const HostPrecompute& precompute)
 {
+    if (target.shifted) {
+        const cpp_int base_private =
+            (full_key + target.shift) % curve_order();
+        if (!equal_points(
+                multiply_g(base_private, precompute),
+                target.base_original)) {
+            std::cerr
+                << "[!] Kangaroo shifted base-key verification failed for "
+                << "logical target " << (target.logical_index + 1u)
+                << " [!]\n";
+            return false;
+        }
+    }
     Options target_options = options;
     target_options.public_key_hex = target.public_key_hex;
     return append_result(target_options,
                          exponents,
                          point_after_subtract,
                          low_key,
-                         full_key);
+                         full_key,
+                         &target);
 }
 
 bool all_targets_solved(const std::vector<TargetInput>& targets)
@@ -2837,11 +3245,34 @@ bool all_targets_solved(const std::vector<TargetInput>& targets)
         [](const TargetInput& target) { return target.solved; });
 }
 
+struct MultiRunResources {
+    std::vector<std::unique_ptr<DpDatabase>> databases;
+    std::vector<bool> prepared;
+
+    void ensure(std::size_t range_count)
+    {
+        if (databases.size() == range_count &&
+            prepared.size() == range_count) {
+            return;
+        }
+        databases.clear();
+        databases.resize(range_count);
+        prepared.assign(range_count, false);
+    }
+};
+
+constexpr int kShiftedWindowExhausted = 3;
+
 int run_multi_target(Options& options,
                      std::vector<TargetInput>& targets,
                      const HostPrecompute& precompute,
-                     const RuntimeHooks& hooks)
+                     const RuntimeHooks& hooks,
+                     bool stop_after_first = false,
+                     MultiRunResources* shared_resources = nullptr)
 {
+    if (shared_resources != nullptr) {
+        shared_resources->ensure(options.ranges.size());
+    }
     const bool repeat_random_chain =
         options.manual_exponents.empty() && options.first_exponent >= 0;
     std::uint64_t chain_index = 0u;
@@ -2885,11 +3316,15 @@ int run_multi_target(Options& options,
                         exponents,
                         point_after_subtract[target_index],
                         0,
-                        scalar_sum)) {
+                        scalar_sum,
+                        precompute)) {
                     return 1;
                 }
                 targets[target_index].solved = true;
                 if (hooks.increment_found) hooks.increment_found();
+                if (stop_after_first) {
+                    return 0;
+                }
             } else {
                 Options target_options = options;
                 target_options.public_key_hex =
@@ -2934,7 +3369,7 @@ int run_multi_target(Options& options,
                 : auto_max_factor(effective_bits);
 
             std::vector<std::size_t> active_indices;
-            std::vector<HostPoint> points_to_solve;
+            active_indices.reserve(targets.size());
             for (std::size_t target_index = 0u;
                  target_index < targets.size();
                  ++target_index) {
@@ -2958,7 +3393,8 @@ int run_multi_target(Options& options,
                             exponents,
                             point_after_subtract[target_index],
                             low_key,
-                            full_key)) {
+                            full_key,
+                            precompute)) {
                         std::cerr
                             << "[!] Kangaroo range-start verification failed "
                             << "for target " << (target_index + 1u)
@@ -2967,42 +3403,61 @@ int run_multi_target(Options& options,
                     }
                     targets[target_index].solved = true;
                     if (hooks.increment_found) hooks.increment_found();
+                    if (stop_after_first) {
+                        return 0;
+                    }
                     continue;
                 }
                 active_indices.push_back(target_index);
-                points_to_solve.push_back(point_to_solve);
             }
             if (all_targets_solved(targets)) {
                 return 0;
             }
-            if (points_to_solve.empty()) {
+            if (active_indices.empty()) {
                 continue;
             }
 
-            if (hooks.set_speed_context) {
-                hooks.set_speed_context(
-                    multi_equivalent_keys_per_jump(
-                        range_size,
-                        base_max_factor,
-                        points_to_solve.size()));
-            }
-            DpDatabase database(points_to_solve.size() > 1u);
-            if (!prepare_cache(options,
-                               range,
-                               effective_bits,
-                               dp_bits,
-                               base_max_factor,
-                               points_to_solve.front(),
-                               precompute,
-                               database)) {
+            std::size_t window_capacity = 0u;
+            std::string window_error;
+            if (!target_window_capacity(
+                    options,
+                    effective_bits,
+                    window_capacity,
+                    window_error)) {
+                std::cerr
+                    << "[!] Kangaroo target-window error: "
+                    << window_error << " [!]\n";
                 return 1;
             }
+            window_capacity =
+                std::min(window_capacity, active_indices.size());
+
+            std::unique_ptr<DpDatabase> local_database;
+            DpDatabase* database = nullptr;
+            bool database_prepared = false;
+            if (shared_resources != nullptr) {
+                auto& slot =
+                    shared_resources->databases[range_index];
+                if (!slot) {
+                    slot = std::make_unique<DpDatabase>(true);
+                }
+                database = slot.get();
+                database_prepared =
+                    shared_resources->prepared[range_index];
+            } else {
+                local_database =
+                    std::make_unique<DpDatabase>(
+                        active_indices.size() > 1u);
+                database = local_database.get();
+            }
+
             std::cout << "[!] Kangaroo multi-target range "
                       << (range_index + 1u)
                       << "/" << options.ranges.size()
                       << " [" << scalar_hex(range.start)
                       << " .. " << scalar_hex(range.end)
-                      << "), active:" << points_to_solve.size()
+                      << "), active:" << active_indices.size()
+                      << ", window:" << window_capacity
                       << ", DP:" << dp_bits
                       << ", jumps:" << options.jump_count
                       << ", steps:" << options.step_count
@@ -3010,68 +3465,136 @@ int run_multi_target(Options& options,
                       << (effective_bits > 170 ? 256 : 176)
                       << "-bit [!]\n";
 
-            SolveResult solved = solve_points(
-                options,
-                points_to_solve,
-                range_size,
-                effective_bits,
-                dp_bits,
-                base_max_factor,
-                false,
-                database,
-                precompute);
-            if (!solved.error.empty()) {
-                std::cerr << "[!] Kangaroo multi-target solver error: "
-                          << solved.error << " [!]\n";
-                return 1;
-            }
-            for (std::size_t local_index = 0u;
-                 local_index < solved.solved_targets.size();
-                 ++local_index) {
-                if (!solved.solved_targets[local_index]) {
-                    continue;
+            for (std::size_t window_begin = 0u;
+                 window_begin < active_indices.size();
+                 window_begin += window_capacity) {
+                const std::size_t window_end =
+                    std::min(
+                        active_indices.size(),
+                        window_begin + window_capacity);
+                std::vector<HostPoint> points_to_solve;
+                points_to_solve.reserve(window_end - window_begin);
+                for (std::size_t position = window_begin;
+                     position < window_end;
+                     ++position) {
+                    points_to_solve.push_back(
+                        subtract_scalar(
+                            point_after_subtract[
+                                active_indices[position]],
+                            range.start,
+                            precompute));
                 }
-                const std::size_t target_index =
-                    active_indices[local_index];
-                const cpp_int low_key =
-                    range.start + solved.offsets[local_index];
-                const cpp_int full_key =
-                    (scalar_sum + low_key) % curve_order();
-                if (low_key < range.start || low_key >= range.end ||
-                    !equal_points(
-                        multiply_g(low_key, precompute),
-                        point_after_subtract[target_index]) ||
-                    !equal_points(
-                        multiply_g(full_key, precompute),
-                        targets[target_index].original)) {
+
+                if (database_prepared) {
+                    database->retain_tame();
+                } else {
+                    if (!prepare_cache(
+                            options,
+                            range,
+                            effective_bits,
+                            dp_bits,
+                            base_max_factor,
+                            points_to_solve.front(),
+                            precompute,
+                            *database)) {
+                        return 1;
+                    }
+                    database_prepared = true;
+                    if (shared_resources != nullptr) {
+                        shared_resources->prepared[range_index] = true;
+                    }
+                }
+                if (hooks.set_speed_context) {
+                    hooks.set_speed_context(
+                        multi_equivalent_keys_per_jump(
+                            range_size,
+                            base_max_factor,
+                            points_to_solve.size()));
+                }
+                std::cout
+                    << "[!] Kangaroo target window "
+                    << (window_begin / window_capacity + 1u)
+                    << "/"
+                    << ((active_indices.size() +
+                         window_capacity - 1u) /
+                        window_capacity)
+                    << ", targets:" << points_to_solve.size()
+                    << ", resident only [!]\n";
+
+                SolveResult solved = solve_points(
+                    options,
+                    points_to_solve,
+                    range_size,
+                    effective_bits,
+                    dp_bits,
+                    base_max_factor,
+                    false,
+                    *database,
+                    precompute);
+                if (!solved.error.empty()) {
                     std::cerr
-                        << "[!] Kangaroo multi-target verification failed "
-                        << "for target " << (target_index + 1u)
+                        << "[!] Kangaroo multi-target solver error: "
+                        << solved.error
                         << " [!]\n";
                     return 1;
                 }
-                std::cout << "\n[+] Kangaroo target "
-                          << (target_index + 1u)
-                          << " (" << targets[target_index].source
-                          << ") found [!]\n"
-                          << "[+] Kangaroo k_low: "
-                          << scalar_hex(low_key) << "\n"
-                          << "[+] Kangaroo priv: "
-                          << scalar_hex(full_key) << "\n";
-                if (!append_target_result(
-                        options,
-                        targets[target_index],
-                        exponents,
-                        point_after_subtract[target_index],
-                        low_key,
-                        full_key)) {
-                    return 1;
+                for (std::size_t local_index = 0u;
+                     local_index < solved.solved_targets.size();
+                     ++local_index) {
+                    if (!solved.solved_targets[local_index]) {
+                        continue;
+                    }
+                    const std::size_t target_index =
+                        active_indices[window_begin + local_index];
+                    const cpp_int low_key =
+                        range.start + solved.offsets[local_index];
+                    const cpp_int full_key =
+                        (scalar_sum + low_key) % curve_order();
+                    if (low_key < range.start ||
+                        low_key >= range.end ||
+                        !equal_points(
+                            multiply_g(low_key, precompute),
+                            point_after_subtract[target_index]) ||
+                        !equal_points(
+                            multiply_g(full_key, precompute),
+                            targets[target_index].original)) {
+                        std::cerr
+                            << "[!] Kangaroo multi-target verification "
+                            << "failed for target "
+                            << (target_index + 1u)
+                            << " [!]\n";
+                        return 1;
+                    }
+                    std::cout
+                        << "\n[+] Kangaroo target "
+                        << (target_index + 1u)
+                        << " (" << targets[target_index].source
+                        << ") found [!]\n"
+                        << "[+] Kangaroo k_low: "
+                        << scalar_hex(low_key) << "\n"
+                        << "[+] Kangaroo priv: "
+                        << scalar_hex(full_key) << "\n";
+                    if (!append_target_result(
+                            options,
+                            targets[target_index],
+                            exponents,
+                            point_after_subtract[target_index],
+                            low_key,
+                            full_key,
+                            precompute)) {
+                        return 1;
+                    }
+                    targets[target_index].solved = true;
+                    if (hooks.increment_found) {
+                        hooks.increment_found();
+                    }
+                    if (stop_after_first) {
+                        return 0;
+                    }
                 }
-                targets[target_index].solved = true;
-                if (hooks.increment_found) hooks.increment_found();
-            }
-            if (all_targets_solved(targets)) {
-                return 0;
+                if (all_targets_solved(targets)) {
+                    return 0;
+                }
             }
         }
 
@@ -3090,7 +3613,203 @@ int run_multi_target(Options& options,
     std::cout << "[!] Kangaroo multi-target finished: "
               << solved_count << "/" << targets.size()
               << " solved [!]\n";
+    if (stop_after_first && solved_count == 0u) {
+        return kShiftedWindowExhausted;
+    }
     return solved_count == targets.size() ? 0 : 1;
+}
+
+bool dense_shift_union(const Options& options,
+                       std::vector<SearchRange>& ranges)
+{
+    if (!options.shifts.enabled) {
+        return false;
+    }
+    const cpp_int last_shift =
+        options.shifts.start +
+        options.shifts.step * (options.shifts.count - 1u);
+    ranges.clear();
+    ranges.reserve(options.ranges.size());
+    for (const SearchRange& range : options.ranges) {
+        const cpp_int width = range.end - range.start;
+        if (width <= 0 || options.shifts.step > width) {
+            ranges.clear();
+            return false;
+        }
+        SearchRange expanded;
+        expanded.start = range.start + options.shifts.start;
+        expanded.end = range.end + last_shift;
+        if (expanded.end > curve_order()) {
+            ranges.clear();
+            return false;
+        }
+        ranges.push_back(std::move(expanded));
+    }
+
+    std::sort(
+        ranges.begin(),
+        ranges.end(),
+        [](const SearchRange& left, const SearchRange& right) {
+            return left.start < right.start;
+        });
+    std::vector<SearchRange> merged;
+    for (const SearchRange& range : ranges) {
+        if (!merged.empty() && range.start <= merged.back().end) {
+            merged.back().end =
+                std::max(merged.back().end, range.end);
+        } else {
+            merged.push_back(range);
+        }
+    }
+    ranges = std::move(merged);
+    return true;
+}
+
+int run_shifted_targets(Options& options,
+                        const std::vector<TargetInput>& bases,
+                        std::uint64_t logical_count,
+                        const HostPrecompute& precompute,
+                        const RuntimeHooks& hooks)
+{
+    int maximum_bits = 32;
+    for (const SearchRange& range : options.ranges) {
+        maximum_bits = std::max(
+            maximum_bits,
+            std::clamp(
+                bit_length(range.end - range.start - 1),
+                32,
+                256));
+    }
+    std::size_t window_capacity = 0u;
+    std::string error;
+    if (!target_window_capacity(
+            options,
+            maximum_bits,
+            window_capacity,
+            error)) {
+        std::cerr
+            << "[!] Kangaroo shifted target-window error: "
+            << error << " [!]\n";
+        return 1;
+    }
+    window_capacity =
+        std::min<std::size_t>(window_capacity, kMaxTargetWindow);
+
+    const HostPoint negative_step =
+        negate_point(multiply_g(options.shifts.step, precompute));
+    MultiRunResources shared_resources;
+    std::uint64_t processed = 0u;
+    for (std::size_t base_index = 0u;
+         base_index < bases.size();
+         ++base_index) {
+        for (std::uint64_t shift_index = 0u;
+             shift_index < options.shifts.count;) {
+            const std::uint64_t remaining =
+                options.shifts.count - shift_index;
+            const std::size_t field_count =
+                static_cast<std::size_t>(
+                    std::min<std::uint64_t>(
+                        remaining,
+                        window_capacity));
+            const cpp_int first_shift =
+                options.shifts.start +
+                options.shifts.step * shift_index;
+            HostPoint current =
+                subtract_scalar(
+                    bases[base_index].original,
+                    first_shift,
+                    precompute);
+
+            std::vector<TargetInput> window;
+            window.reserve(field_count);
+            for (std::size_t field = 0u;
+                 field < field_count;
+                 ++field) {
+                const std::uint64_t local_shift_index =
+                    shift_index +
+                    static_cast<std::uint64_t>(field);
+                const cpp_int shift =
+                    options.shifts.start +
+                    options.shifts.step * local_shift_index;
+                const std::uint64_t logical_index =
+                    static_cast<std::uint64_t>(base_index) *
+                        options.shifts.count +
+                    local_shift_index;
+
+                TargetInput target;
+                target.public_key_hex =
+                    point_uncompressed_hex(current);
+                target.source =
+                    bases[base_index].source +
+                    " shift[" +
+                    std::to_string(local_shift_index) +
+                    "]";
+                target.original = current;
+                target.shifted = true;
+                target.logical_index = logical_index;
+                target.shift = shift;
+                target.base_public_key_hex =
+                    bases[base_index].public_key_hex;
+                target.base_source = bases[base_index].source;
+                target.base_original = bases[base_index].original;
+
+                if (current.infinity) {
+                    if (!append_target_result(
+                            options,
+                            target,
+                            {},
+                            current,
+                            0,
+                            0,
+                            precompute)) {
+                        return 1;
+                    }
+                    if (hooks.increment_found) {
+                        hooks.increment_found();
+                    }
+                    std::cout
+                        << "[+] Kangaroo shifted source hit exact base "
+                        << "scalar at logical target "
+                        << (logical_index + 1u)
+                        << " [!]\n";
+                    return 0;
+                }
+                window.push_back(std::move(target));
+                current = add_points(current, negative_step);
+            }
+
+            std::cout
+                << "[!] Kangaroo shifted window: logical "
+                << (processed + 1u)
+                << ".." << (processed + field_count)
+                << "/" << logical_count
+                << ", resident:" << field_count
+                << ", shared tame DP retained [!]\n";
+            const int status = run_multi_target(
+                options,
+                window,
+                precompute,
+                hooks,
+                true,
+                &shared_resources);
+            if (status == 0) {
+                return 0;
+            }
+            if (status != kShiftedWindowExhausted) {
+                return status;
+            }
+            shift_index +=
+                static_cast<std::uint64_t>(field_count);
+            processed +=
+                static_cast<std::uint64_t>(field_count);
+        }
+    }
+
+    std::cout
+        << "[!] Kangaroo shifted source exhausted: 0/"
+        << logical_count
+        << " logical targets solved [!]\n";
+    return 1;
 }
 
 } // namespace
@@ -3113,6 +3832,9 @@ void print_help()
 [!] -kangaroo                       Recover a secp256k1 private key in a bounded range.
 [!] -target HEX|FILE / -hash HEX    Repeat a full public key, or load a target file.
 [!] -range VALUE                    Bit ranges: 64,65-72 or exact hex START:END (1..256 bits).
+[!] -kangaroo-shifts S:C[:D]        Logical targets Q-(S+i*D)G without expanding keys.
+[!] -kangaroo-mem auto|all|NN%|SIZE Walker/target-window working-set budget.
+[!]                                 Bare SIZE is MiB; MiB and GiB are accepted.
 [!] -first N -last N                Build a random descending exponent chain.
 [!] -exp LIST                       Use an explicit exponent list instead.
 [!] -prob P                         Intermediate exponent probability, default 0.5.
@@ -3133,14 +3855,26 @@ void print_help()
 [!] More than one unique target automatically selects the shared-tame
 [!] multi-target contour. Duplicate points are computed once. Target files
 [!] use one key per line; blank lines and # comments are ignored.
-[!] The multi-target walker pool grows with the target count and is bounded
-[!] automatically by the free recommended Metal working set.
+[!] Multi-target work is split into bounded resident windows; tame DPs are
+[!] retained between windows and wild DPs are discarded. auto uses 25% of
+[!] free recommended working set without a fixed 16 GiB ceiling. all uses
+[!] the remainder except 512 MiB. On unified-memory multi-GPU systems the
+[!] requested total is divided between replicas. The GPU line reports actual
+[!] allocated bytes, the selected ceiling, and free bytes at planning time.
+[!] For -kangaroo-shifts, START/STEP are hex scalars and COUNT is decimal,
+[!] 0xHEX or 2^EXP. Dense overlapping shifts are collapsed into their exact
+[!] scalar-range union. Sparse shifts use bounded windows and stop after the
+[!] first derived-key hit because that hit reconstructs and verifies the base
+[!] private key. Adjacent shifts do not create free unique coverage.
 [!]
 [!] Single-target example:
 [!] ./METAL_CRYPTO_TOOLKIT -kangaroo -target 02... -range 64 -exp 63 -device 0
 [!]
 [!] Multi-target example:
 [!] ./METAL_CRYPTO_TOOLKIT -kangaroo -target 02... -target targets.txt -range 64
+[!]
+[!] Massive shifted-source example:
+[!] ./METAL_CRYPTO_TOOLKIT -kangaroo -target 02145d...d1e16 -kangaroo-shifts 0:100000000:1 -range 135 -kangaroo-mem all
 [!]
 )HELP";
 }
@@ -3167,6 +3901,36 @@ int run(int argc, char** argv, const RuntimeHooks& hooks)
                   << error << " [!]\n";
         return 2;
     }
+    std::uint64_t logical_count = 0u;
+    if (!logical_target_count(
+            options,
+            targets,
+            logical_count,
+            error)) {
+        std::cerr << "[!] Kangaroo target error: "
+                  << error << " [!]\n";
+        return 2;
+    }
+    if (options.shifts.enabled) {
+        std::vector<SearchRange> collapsed_ranges;
+        if (dense_shift_union(options, collapsed_ranges)) {
+            std::cout
+                << "[!] Kangaroo compact shifts: "
+                << logical_count
+                << " logical targets collapsed into "
+                << collapsed_ranges.size()
+                << " exact union range(s); no target expansion [!]\n";
+            options.ranges = std::move(collapsed_ranges);
+            options.shifts.enabled = false;
+        } else {
+            std::cout
+                << "[!] Kangaroo compact shifts: "
+                << logical_count
+                << " logical targets from "
+                << targets.size()
+                << " base point(s); bounded resident windows [!]\n";
+        }
+    }
     options.public_key_hex = targets.front().public_key_hex;
     const HostPoint original_public = targets.front().original;
     if (targets.size() > 1u) {
@@ -3188,6 +3952,14 @@ int run(int argc, char** argv, const RuntimeHooks& hooks)
         }
     }
 
+    if (options.shifts.enabled) {
+        return run_shifted_targets(
+            options,
+            targets,
+            logical_count,
+            precompute,
+            hooks);
+    }
     if (targets.size() > 1u) {
         return run_multi_target(
             options, targets, precompute, hooks);

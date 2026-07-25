@@ -1322,9 +1322,28 @@ One unique target keeps the independently tuned single-target contour. Two or
 more unique targets automatically select the real multi-target contour: all
 targets share one tame herd and receive target-indexed positive and negative
 wild herds. This avoids rebuilding or repeating the tame third for every
-target. The walker pool grows with the number of targets and uses additional
-VRAM only up to an automatic budget derived from the free recommended Metal
-working set. No extra switch is needed.
+target. Targets are processed in bounded resident windows, while tame DPs are
+retained and wild DPs are discarded between windows. Consequently, the
+resident GPU allocation does not grow with the complete target count.
+
+`-kangaroo-mem` controls the working-set ceiling. `auto` uses at most 25% of
+the currently free recommended Metal working set. `all` permits everything
+except a 512 MiB runtime reserve; there is no fixed 16 GiB ceiling. A
+percentage or an exact MiB/GiB size can also be supplied. This value is a
+ceiling, not a command to waste memory: the tuned single-target contour and a
+small target window keep only the walkers that can do useful work. On Apple
+Silicon, CPU and GPU use the same physical memory, and a multi-device request
+is divided between the selected device replicas.
+
+For very large arithmetic target families, use the compact
+`-kangaroo-shifts START:COUNT[:STEP]` source instead of writing millions of
+public keys to a file. It represents
+`Q_i = Q - (START + i*STEP)G` without materialising those points. `START` and
+`STEP` are hexadecimal scalars; `COUNT` is decimal, `0xHEX`, or `2^EXP`.
+Overlapping shifted intervals are exactly collapsed into their scalar-range
+union. Sparse intervals are generated incrementally and processed through the
+same bounded target windows. A derived-key hit is converted back to the base
+private scalar and both public points are verified before output.
 
 **Range formats:**
 
@@ -1348,6 +1367,8 @@ that group order.
 | --- | --- |
 | `-target HEX\|FILE` / `-hash HEX` | repeat a complete public key, or load a target file; two or more unique points enable the multi-target contour |
 | `-range VALUE` | one or more bit ranges, or one exact hexadecimal interval |
+| `-kangaroo-shifts START:COUNT[:STEP]` | compact arithmetic family `Q-(START+i*STEP)G`; no expanded target file |
+| `-kangaroo-mem auto\|all\|NN%\|SIZE` | walker and resident-target budget; bare sizes are MiB, and `MiB`/`GiB` are accepted |
 | `-device LIST` | Metal devices such as `0`, `0,1,3`, or `0-3`; all available devices are used when omitted |
 | `-dpbits N` | distinguished-point bits, `14..60`; selected automatically when omitted |
 | `-lim N` | maximum operation factor; selected automatically when omitted |
@@ -1445,13 +1466,50 @@ solution is found; `-exp` and `-first/-last` are mutually exclusive.
 ```
 
 The file may contain more targets and labels after each key. All unique points
-share the same ranges and tame DP cache. The status line explicitly reports
-`multi-target shared-tame`, its active-target count, walker count, and the
-automatic VRAM budget.
+share the same ranges and tame DP cache. Resident target windows prevent the
+complete list from becoming one unbounded Metal allocation. The status lines
+report `multi-target shared-tame`, logical and resident target counts, walker
+count, and actual allocated/selected ceiling/free working-set bytes.
+
+**Example 6 — allow Kangaroo to use the remaining Metal working set.**
+
+```bash
+./METAL_CRYPTO_TOOLKIT -kangaroo \
+  -target ./kangaroo-targets.txt \
+  -range 135 \
+  -kangaroo-mem all \
+  -device 0 \
+  -o kangaroo-large-target-set.txt
+```
+
+Use `-kangaroo-mem 50%`, `-kangaroo-mem 32GiB`, or a bare MiB value such as
+`-kangaroo-mem 32768` for an explicit ceiling. An impossible exact request
+fails clearly instead of silently allocating less.
+
+**Example 7 — 100 million shifted puzzle-135 targets without expanding them.**
+
+```bash
+./METAL_CRYPTO_TOOLKIT -kangaroo \
+  -target 02145d2611c823a396ef6712ce0f712f09b9b4f3135e3e0aa3230fb9b6d08d1e16 \
+  -kangaroo-shifts 0:100000000:1 \
+  -range 135 \
+  -kangaroo-mem all \
+  -device 0 \
+  -o puzzle135-shifted.txt
+```
+
+For this dense `STEP=1` family, neighbouring intervals overlap, so the engine
+searches their exact union against the original public key. This needs
+constant target memory, but it does not create free cryptographic coverage:
+the union is only wider than the original interval. Sparse shifts can avoid
+overlap, but then each interval contributes real additional search work.
 
 The result block contains `Pub`, `Exps`, `Pub after subtract`, `k_low`, and
-`priv`. `priv` is the final verified private scalar. Cache formats PSWDP2 and
-PSWDP3 remain compatible with CUDA/RCKangaroo through 170-bit distances.
+`priv`. A sparse compact-source hit additionally contains `Logical target`,
+`Shift`, `Base pub`, and the verified `Base priv`. `priv` is the derived
+target's scalar; `Base priv` is the reconstructed original scalar. Cache
+formats PSWDP2 and PSWDP3 remain compatible with CUDA/RCKangaroo through
+170-bit distances.
 Wider distances use the PSWDP4 Metal extension with signed 256-bit GPU state.
 This makes genuine 256-bit endpoints representable; it does not make a full
 256-bit-width search practical on present hardware.
@@ -3728,9 +3786,27 @@ x-only public key, Bloom-фильтр или XOR-фильтр недостато
 При двух и более уникальных целях автоматически включается настоящий
 мультитаргетный контур: у всех целей общее tame-стадо и отдельные
 индексированные положительные и отрицательные wild-стада. Поэтому tame-треть
-не строится и не проходит заново для каждой цели. Число walkers растёт вместе
-с числом целей и занимает дополнительную VRAM только в пределах
-автоматического бюджета из свободного recommended Metal working set.
+не строится и не проходит заново для каждой цели. Цели обрабатываются
+ограниченными резидентными окнами: tame DP сохраняются между окнами, а wild DP
+удаляются. Поэтому GPU-аллокация не растёт вместе с полным числом целей.
+
+`-kangaroo-mem` задаёт верхнюю границу рабочего набора. `auto` использует не
+более 25% свободного recommended Metal working set. `all` разрешает весь
+остаток, кроме резерва 512 MiB под runtime; фиксированного потолка 16 GiB
+больше нет. Также можно указать процент или точный размер в MiB/GiB. Это
+лимит, а не приказ бессмысленно занять всю память: настроенный однотаргетный
+контур и маленькое окно сохраняют только полезное число walkers. На Apple
+Silicon CPU и GPU используют общую физическую память, а для нескольких
+устройств бюджет делится между репликами.
+
+Для огромного арифметического семейства целей используйте компактный источник
+`-kangaroo-shifts START:COUNT[:STEP]`, а не файл с миллионами публичных
+ключей. Он задаёт `Q_i = Q - (START + i*STEP)G`, не материализуя все точки.
+`START` и `STEP` — hex-скаляры, `COUNT` — decimal, `0xHEX` либо `2^EXP`.
+Перекрывающиеся сдвинутые интервалы точно схлопываются в их объединение.
+Разреженные интервалы генерируются последовательно и проходят через те же
+ограниченные окна. После совпадения производный приват преобразуется обратно
+в базовый, затем обе публичные точки обязательно проверяются.
 
 **Форматы диапазона:**
 
@@ -3754,6 +3830,8 @@ x-only public key, Bloom-фильтр или XOR-фильтр недостато
 | --- | --- |
 | `-target HEX\|FILE` / `-hash HEX` | повторяемый полный публичный ключ либо файл целей; две и более уникальные точки включают мультитаргетный контур |
 | `-range VALUE` | один или несколько битовых диапазонов либо один точный hex-интервал |
+| `-kangaroo-shifts START:COUNT[:STEP]` | компактное семейство `Q-(START+i*STEP)G` без развёрнутого файла целей |
+| `-kangaroo-mem auto\|all\|NN%\|SIZE` | бюджет walkers и резидентного окна; число без суффикса означает MiB, поддерживаются `MiB` и `GiB` |
 | `-device LIST` | устройства Metal: `0`, `0,1,3` или `0-3`; без параметра используются все доступные |
 | `-dpbits N` | число бит distinguished point, `14..60`; без параметра выбирается автоматически |
 | `-lim N` | максимальный коэффициент работы; без параметра выбирается автоматически |
@@ -3853,11 +3931,50 @@ placeholder требуется полный публичный ключ, а не
 
 Файл может содержать дополнительные цели и подписи после каждого ключа. Все
 уникальные точки используют общие диапазоны и tame DP cache. Строка
-статистики явно показывает `multi-target shared-tame`, число активных целей,
-walkers и автоматический бюджет VRAM.
+статистики явно показывает `multi-target shared-tame`, логическое и
+резидентное число целей, walkers, реально выделенный объём, выбранный лимит и
+свободный working set. Ограниченные окна не дают всему списку превратиться в
+одну неограниченную Metal-аллокацию.
+
+**Пример 6 — разрешить Kangaroo использовать оставшийся Metal working set.**
+
+```bash
+./METAL_CRYPTO_TOOLKIT -kangaroo \
+  -target ./kangaroo-targets.txt \
+  -range 135 \
+  -kangaroo-mem all \
+  -device 0 \
+  -o kangaroo-large-target-set.txt
+```
+
+Точный лимит можно задать как `-kangaroo-mem 50%`,
+`-kangaroo-mem 32GiB` либо числом MiB, например
+`-kangaroo-mem 32768`. Невозможный точный запрос завершается понятной
+ошибкой, а не молча уменьшает аллокацию.
+
+**Пример 7 — 100 миллионов сдвинутых целей puzzle 135 без разворачивания.**
+
+```bash
+./METAL_CRYPTO_TOOLKIT -kangaroo \
+  -target 02145d2611c823a396ef6712ce0f712f09b9b4f3135e3e0aa3230fb9b6d08d1e16 \
+  -kangaroo-shifts 0:100000000:1 \
+  -range 135 \
+  -kangaroo-mem all \
+  -device 0 \
+  -o puzzle135-shifted.txt
+```
+
+При плотном семействе с `STEP=1` соседние интервалы перекрываются, поэтому
+движок ищет их точное объединение по исходному публичному ключу. Память целей
+остаётся постоянной, но бесплатного криптографического покрытия это не даёт:
+объединённый диапазон лишь немного шире исходного. Разреженные сдвиги могут не
+перекрываться, однако каждый интервал тогда добавляет реальную поисковую
+работу.
 
 Результат содержит `Pub`, `Exps`, `Pub after subtract`, `k_low` и `priv`.
-Поле `priv` — итоговый проверенный приватный скаляр. Кеши PSWDP2 и PSWDP3
+При sparse compact-source совпадении дополнительно выводятся `Logical target`,
+`Shift`, `Base pub` и проверенный `Base priv`: `priv` относится к производной
+цели, а `Base priv` — восстановленный исходный скаляр. Кеши PSWDP2 и PSWDP3
 сохраняют совместимость с CUDA/RCKangaroo для дистанций до 170 бит. Более
 широкие дистанции используют Metal-расширение PSWDP4 и знаковое 256-битное
 состояние GPU. Поэтому реальные 256-битные границы представимы, но полный
