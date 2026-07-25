@@ -105,11 +105,13 @@ struct BsgsLookupEmitter {
     device atomic_uint* overflow;
     const constant BsgsSearchParams* params;
     ulong giant_base[4];
-    uint target_index;
+    ulong target_id_base;
+    uint target_field_count;
+    bool shifted_targets;
 
     inline void emit_hit(const thread ulong giant_index[4],
                          ulong j,
-                         uint flags) thread {
+                         ulong target_id) thread {
         const uint slot =
             atomic_fetch_add_explicit(hit_count, 1u, memory_order_relaxed);
         if (slot >= params->hit_capacity) {
@@ -120,8 +122,7 @@ struct BsgsLookupEmitter {
             hits[slot].giant_index[limb] = giant_index[limb];
         }
         hits[slot].j = j;
-        hits[slot].target_index = target_index;
-        hits[slot].flags = flags;
+        hits[slot].target_id = target_id;
     }
 
     inline void operator()(thread ulong* x,
@@ -134,9 +135,15 @@ struct BsgsLookupEmitter {
         }
         ulong giant_index[4];
         bsgs_copy256(giant_index, giant_base);
-        bsgs_u256_add_small(giant_index, ulong(field));
-        if (!bsgs_u256_less(giant_index, params->giant_count)) {
-            return;
+        ulong target_id = target_id_base;
+        if (shifted_targets) {
+            if (field >= target_field_count) return;
+            target_id += ulong(field);
+        } else {
+            bsgs_u256_add_small(giant_index, ulong(field));
+            if (!bsgs_u256_less(giant_index, params->giant_count)) {
+                return;
+            }
         }
 
         const ulong fingerprint = bsgs_fingerprint(x[0]);
@@ -174,12 +181,47 @@ struct BsgsLookupEmitter {
                 break;
             }
             if (match_ordinal >= params->match_skip) {
-                emit_hit(giant_index, entry.j, 0u);
+                emit_hit(giant_index, entry.j, target_id);
             }
             ++match_ordinal;
         }
     }
 };
+
+static inline void bsgs_emit_shifted_singular(
+    uint singular_field,
+    const constant BsgsSearchParams& params,
+    uint field_count,
+    thread BsgsLookupEmitter& emitter) {
+    if (params.match_skip == 0ul &&
+        singular_field < field_count &&
+        singular_field >= params.field_begin &&
+        singular_field < params.field_end) {
+        ulong giant_index[4] = {
+            emitter.giant_base[0],
+            emitter.giant_base[1],
+            emitter.giant_base[2],
+            emitter.giant_base[3]
+        };
+        emitter.emit_hit(
+            giant_index,
+            0ul,
+            emitter.target_id_base + ulong(singular_field));
+    }
+    if (params.match_skip == 0ul &&
+        params.field_begin == 0u &&
+        params.field_end == BSGS_WALK_SIZE) {
+        ulong marker_index[4] = {
+            emitter.giant_base[0],
+            emitter.giant_base[1],
+            emitter.giant_base[2],
+            emitter.giant_base[3] | BSGS_SHIFTED_SINGULAR_MARKER
+        };
+        emitter.emit_hit(marker_index,
+                         ulong(singular_field),
+                         emitter.target_id_base);
+    }
+}
 
 kernel void bsgsLookupGiant(
     const device BsgsBabyEntry* shard0 [[buffer(0)]],
@@ -206,7 +248,7 @@ kernel void bsgsLookupGiant(
     }
     const device BsgsWorkItem& item = work[tid];
     const device ulong* target_limbs =
-        targets + ulong(item.target_index) * 8ul;
+        targets + ulong(item.target_slot) * 8ul;
     secp256k1_ge target = bsgs_ge_from_limbs(target_limbs);
 
     ulong scalar_limbs[4];
@@ -251,7 +293,9 @@ kernel void bsgsLookupGiant(
          item.giant_base[1],
          item.giant_base[2],
          item.giant_base[3]},
-        item.target_index
+        item.target_id,
+        0u,
+        false
     };
 
     if (center_j.infinity != 0) {
@@ -267,7 +311,7 @@ kernel void bsgsLookupGiant(
             field >= params.field_begin &&
             field < params.field_end &&
             bsgs_u256_less(center_index, params.giant_count)) {
-            emitter.emit_hit(center_index, 0ul, 1u);
+            emitter.emit_hit(center_index, 0ul, item.target_id);
         }
         return;
     }
@@ -329,8 +373,133 @@ kernel void bsgsLookupGiant(
                 bsgs_u256_less_thread(center_index, group_end) &&
                 bsgs_u256_less(center_index, params.giant_count);
             if (valid) {
-                emitter.emit_hit(center_index, 0ul, 1u);
+                emitter.emit_hit(center_index, 0ul, item.target_id);
             }
+            return;
+        }
+    }
+    vanity_walk_batch_1024_parity(center_x,
+                                  center_y,
+                                  walk_gx,
+                                  walk_gy,
+                                  walk_2gnx,
+                                  walk_2gny,
+                                  true,
+                                  emitter);
+}
+
+kernel void bsgsLookupShifted(
+    const device BsgsBabyEntry* shard0 [[buffer(0)]],
+    const device BsgsBabyEntry* shard1 [[buffer(1)]],
+    const device BsgsBabyEntry* shard2 [[buffer(2)]],
+    const device BsgsBabyEntry* shard3 [[buffer(3)]],
+    const device ulong* targets [[buffer(4)]],
+    const device BsgsWorkItem* work [[buffer(5)]],
+    const device ulong* walk_gx [[buffer(6)]],
+    const device ulong* walk_gy [[buffer(7)]],
+    const device ulong* walk_2gnx [[buffer(8)]],
+    const device ulong* walk_2gny [[buffer(9)]],
+    const device BsgsCenterProbe* center_probes [[buffer(10)]],
+    const device ulong* bucket_offsets [[buffer(11)]],
+    constant secp256k1_ge_storage* precompute [[buffer(12)]],
+    constant ulong& precompute_pitch [[buffer(13)]],
+    device BsgsHit* hits [[buffer(14)]],
+    device atomic_uint* hit_count [[buffer(15)]],
+    device atomic_uint* overflow [[buffer(16)]],
+    constant BsgsSearchParams& params [[buffer(17)]],
+    uint tid [[thread_position_in_grid]]) {
+    if (tid >= params.work_count) return;
+    const device BsgsWorkItem& item = work[tid];
+    const device ulong* target_limbs =
+        targets + ulong(item.target_slot) * 8ul;
+    secp256k1_ge target = bsgs_ge_from_limbs(target_limbs);
+
+    ulong scalar_limbs[4];
+    for (uint limb = 0u; limb < 4u; ++limb) {
+        scalar_limbs[limb] = item.center_scalar[limb];
+    }
+    uchar scalar_bytes[32];
+    bsgs_limbs_to_be32(scalar_limbs, scalar_bytes);
+    secp256k1_scalar scalar;
+    secp256k1_scalar_set_b32(&scalar, scalar_bytes, nullptr);
+
+    secp256k1_gej center_j;
+    if (secp256k1_scalar_is_zero(&scalar)) {
+        secp256k1_gej_set_ge(&center_j, &target);
+    } else {
+        secp256k1_gej subtract_j;
+        secp256k1_ecmult_big(&subtract_j,
+                             &scalar,
+                             precompute,
+                             precompute_pitch,
+                             int(params.windows),
+                             params.window_bits);
+        secp256k1_ge subtract;
+        secp256k1_ge_set_gej(&subtract, &subtract_j);
+        secp256k1_ge_neg(&subtract, &subtract);
+        secp256k1_gej target_j;
+        secp256k1_gej_set_ge(&target_j, &target);
+        secp256k1_gej_add_ge_var(&center_j, &target_j, &subtract, nullptr);
+    }
+
+    BsgsLookupEmitter emitter = {
+        shard0,
+        shard1,
+        shard2,
+        shard3,
+        bucket_offsets,
+        hits,
+        hit_count,
+        overflow,
+        &params,
+        {item.giant_base[0],
+         item.giant_base[1],
+         item.giant_base[2],
+         item.giant_base[3]},
+        item.target_id,
+        item.reserved,
+        true
+    };
+
+    if (center_j.infinity != 0) {
+        bsgs_emit_shifted_singular(
+            BSGS_WALK_SIZE / 2u,
+            params,
+            item.reserved,
+            emitter);
+        return;
+    }
+
+    secp256k1_ge center;
+    secp256k1_ge_set_gej(&center, &center_j);
+    ulong center_x[4];
+    ulong center_y[4];
+    bsgs_ge_to_limbs(center, center_x, center_y);
+
+    ulong probe_low = 0ul;
+    ulong probe_high = ulong(BSGS_WALK_SIZE / 2u);
+    while (probe_low < probe_high) {
+        const ulong middle = probe_low + ((probe_high - probe_low) >> 1ul);
+        const BsgsCenterProbe probe = center_probes[middle];
+        if (bsgs_compare_x256(center_x, probe) > 0) {
+            probe_low = middle + 1ul;
+        } else {
+            probe_high = middle;
+        }
+    }
+    if (probe_low < ulong(BSGS_WALK_SIZE / 2u)) {
+        const BsgsCenterProbe probe = center_probes[probe_low];
+        if (bsgs_compare_x256(center_x, probe) == 0) {
+            const bool positive =
+                uint(center_y[0] & 1ul) == probe.odd_y;
+            const uint singular_field = positive
+                ? BSGS_WALK_SIZE / 2u + probe.offset
+                : BSGS_WALK_SIZE / 2u - probe.offset;
+            bsgs_emit_shifted_singular(
+                singular_field,
+                params,
+                item.reserved,
+                emitter);
             return;
         }
     }
@@ -370,10 +539,14 @@ kernel void bsgsResolveHits(
 
     device BsgsResolved& minus = resolved[ulong(tid) * 2ul];
     device BsgsResolved& plus = resolved[ulong(tid) * 2ul + 1ul];
-    minus.target_index = hit.target_index;
-    plus.target_index = hit.target_index;
+    minus.target_id = hit.target_id;
+    plus.target_id = hit.target_id;
     minus.valid = 0u;
     plus.valid = 0u;
+    if ((hit.giant_index[3] &
+         BSGS_SHIFTED_SINGULAR_MARKER) != 0ul) {
+        return;
+    }
 
     ulong candidate[4];
     bsgs_copy256(candidate, center);

@@ -8,6 +8,7 @@ using namespace metal;
 
 constant uint BSGS_WALK_SIZE = 1024u;
 constant uint BSGS_MAX_SHARDS = 4u;
+constant ulong BSGS_SHIFTED_SINGULAR_MARKER = 1ul << 63ul;
 
 struct BsgsBabyEntry {
     ulong fingerprint;
@@ -31,9 +32,9 @@ struct BsgsBabyParams {
 struct BsgsWorkItem {
     ulong center_scalar[4];
     ulong giant_base[4];
-    uint target_index;
-    uint reserved0;
-    ulong reserved1;
+    uint target_slot;
+    uint reserved;
+    ulong target_id;
 };
 
 struct BsgsSearchParams {
@@ -54,8 +55,7 @@ struct BsgsSearchParams {
 struct BsgsHit {
     ulong giant_index[4];
     ulong j;
-    uint target_index;
-    uint flags;
+    ulong target_id;
 };
 
 struct BsgsResolveParams {
@@ -67,8 +67,9 @@ struct BsgsResolveParams {
 
 struct BsgsResolved {
     ulong distance[4];
-    uint target_index;
+    ulong target_id;
     uint valid;
+    uint reserved;
 };
 
 static_assert(sizeof(BsgsBabyEntry) == 16, "BsgsBabyEntry layout");
@@ -78,7 +79,7 @@ static_assert(sizeof(BsgsWorkItem) == 80, "BsgsWorkItem layout");
 static_assert(sizeof(BsgsSearchParams) == 128, "BsgsSearchParams layout");
 static_assert(sizeof(BsgsHit) == 48, "BsgsHit layout");
 static_assert(sizeof(BsgsResolveParams) == 48, "BsgsResolveParams layout");
-static_assert(sizeof(BsgsResolved) == 40, "BsgsResolved layout");
+static_assert(sizeof(BsgsResolved) == 48, "BsgsResolved layout");
 
 static inline void bsgs_copy256(thread ulong out[4],
                                 const thread ulong in[4]) {

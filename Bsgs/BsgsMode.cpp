@@ -29,6 +29,7 @@
 #include <string>
 #include <thread>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -41,6 +42,9 @@ constexpr std::uint32_t kMaxDevices = 32u;
 constexpr std::uint32_t kMaxTableShards = 4u;
 constexpr std::uint32_t kHitCapacity = 65536u;
 constexpr std::uint32_t kWorkCapacity = 65536u;
+// giant_count <= ceil(n / 2), so bit 255 is never set on a valid BSGS
+// giant index and can safely tag the rare shifted-walk singular marker.
+constexpr std::uint64_t kShiftedSingularMarker = 1ull << 63u;
 constexpr std::uint64_t kRuntimeReserve = 512ull << 20u;
 constexpr std::uint32_t kCacheVersion = 2u;
 constexpr std::uint32_t kEndianMarker = 0x01020304u;
@@ -365,11 +369,19 @@ struct MemorySpec {
     std::uint64_t value = 0u;
 };
 
+struct ShiftSpec {
+    bool enabled = false;
+    BigUInt start;
+    BigUInt step{1u};
+    std::uint64_t count = 0u;
+};
+
 struct Options {
     std::vector<std::string> target_values;
     std::vector<SearchRange> ranges;
     std::vector<int> devices;
     MemorySpec memory;
+    ShiftSpec shifts;
     bool table_explicit = false;
     std::uint64_t table_size = 0u;
     bool cache_enabled = false;
@@ -578,6 +590,49 @@ bool parse_memory(std::string text, MemorySpec& out, std::string& error) {
     return true;
 }
 
+bool parse_shifts(const std::string& text,
+                  ShiftSpec& out,
+                  std::string& error) {
+    std::vector<std::string> fields;
+    std::stringstream input(text);
+    std::string field;
+    while (std::getline(input, field, ':')) fields.push_back(field);
+    if (fields.size() < 2u || fields.size() > 3u ||
+        fields[0].empty() || fields[1].empty() ||
+        (fields.size() == 3u && fields[2].empty())) {
+        error = "-bsgs-shifts expects HEX_START:COUNT[:HEX_STEP]";
+        return false;
+    }
+    ShiftSpec parsed;
+    parsed.enabled = true;
+    if (!parse_scalar(fields[0], parsed.start) ||
+        parsed.start >= curve_order()) {
+        error = "-bsgs-shifts START must be a scalar below the curve order";
+        return false;
+    }
+    if (!parse_u64_value(fields[1], parsed.count, error) ||
+        parsed.count == 0u) {
+        if (error.empty()) {
+            error = "-bsgs-shifts COUNT must be in 1..18446744073709551615";
+        }
+        return false;
+    }
+    if (fields.size() == 3u &&
+        (!parse_scalar(fields[2], parsed.step) ||
+         parsed.step.is_zero())) {
+        error = "-bsgs-shifts STEP must be a non-zero scalar";
+        return false;
+    }
+    const BigUInt last =
+        parsed.start + parsed.step * (parsed.count - 1u);
+    if (last >= curve_order()) {
+        error = "-bsgs-shifts sequence reaches or wraps the curve order";
+        return false;
+    }
+    out = parsed;
+    return true;
+}
+
 bool parse_options(int argc, char** argv, Options& options, std::string& error) {
     bool range_seen = false;
     bool exact_seen = false;
@@ -626,6 +681,18 @@ bool parse_options(int argc, char** argv, Options& options, std::string& error) 
             std::string value;
             if (!require_value(value) ||
                 !parse_memory(value, options.memory, error)) {
+                return false;
+            }
+            continue;
+        }
+        if (arg == "-bsgs-shifts") {
+            std::string value;
+            if (!require_value(value) ||
+                options.shifts.enabled ||
+                !parse_shifts(value, options.shifts, error)) {
+                if (error.empty()) {
+                    error = "-bsgs-shifts may be specified only once";
+                }
                 return false;
             }
             continue;
@@ -1021,6 +1088,35 @@ bool load_targets(const Options& options,
     return true;
 }
 
+bool logical_target_count(const Options& options,
+                          const std::vector<Target>& targets,
+                          std::uint64_t& count,
+                          std::string& error) {
+    if (targets.size() >
+        static_cast<std::size_t>(
+            std::numeric_limits<std::uint64_t>::max())) {
+        error = "BSGS target count does not fit in 64 bits";
+        return false;
+    }
+    const std::uint64_t bases =
+        static_cast<std::uint64_t>(targets.size());
+    const std::uint64_t multiplier =
+        options.shifts.enabled ? options.shifts.count : 1u;
+    if (bases != 0u &&
+        multiplier >
+            std::numeric_limits<std::uint64_t>::max() / bases) {
+        error = "base targets multiplied by -bsgs-shifts COUNT exceed the 64-bit target identifier space";
+        return false;
+    }
+    count = bases * multiplier;
+    if (count >
+        std::numeric_limits<std::uint64_t>::max() - kWorkCapacity) {
+        error = "BSGS reserves the last 65536 64-bit target identifiers for overflow-safe batching";
+        return false;
+    }
+    return true;
+}
+
 struct alignas(8) BabyEntry {
     std::uint64_t fingerprint = 0u;
     std::uint64_t j = 0u;
@@ -1043,9 +1139,9 @@ struct alignas(8) CenterProbe {
 struct alignas(8) WorkItem {
     std::uint64_t center_scalar[4]{};
     std::uint64_t giant_base[4]{};
-    std::uint32_t target_index = 0u;
-    std::uint32_t reserved0 = 0u;
-    std::uint64_t reserved1 = 0u;
+    std::uint32_t target_slot = 0u;
+    std::uint32_t reserved = 0u;
+    std::uint64_t target_id = 0u;
 };
 
 struct alignas(8) SearchParams {
@@ -1066,8 +1162,7 @@ struct alignas(8) SearchParams {
 struct alignas(8) Hit {
     std::uint64_t giant_index[4]{};
     std::uint64_t j = 0u;
-    std::uint32_t target_index = 0u;
-    std::uint32_t flags = 0u;
+    std::uint64_t target_id = 0u;
 };
 
 struct alignas(8) ResolveParams {
@@ -1079,8 +1174,9 @@ struct alignas(8) ResolveParams {
 
 struct alignas(8) Resolved {
     std::uint64_t distance[4]{};
-    std::uint32_t target_index = 0u;
+    std::uint64_t target_id = 0u;
     std::uint32_t valid = 0u;
+    std::uint32_t reserved = 0u;
 };
 
 static_assert(sizeof(BabyEntry) == 16u, "BabyEntry layout");
@@ -1090,7 +1186,7 @@ static_assert(sizeof(WorkItem) == 80u, "WorkItem layout");
 static_assert(sizeof(SearchParams) == 128u, "SearchParams layout");
 static_assert(sizeof(Hit) == 48u, "Hit layout");
 static_assert(sizeof(ResolveParams) == 48u, "ResolveParams layout");
-static_assert(sizeof(Resolved) == 40u, "Resolved layout");
+static_assert(sizeof(Resolved) == 48u, "Resolved layout");
 
 struct WalkTable {
     std::vector<std::uint64_t> gx;
@@ -1186,6 +1282,37 @@ struct Table {
     double build_seconds = 0.0;
     double load_seconds = 0.0;
 };
+
+void build_shifted_singular_matches(
+    const Options& options,
+    const Table& table,
+    const HostPrecompute& precompute,
+    std::vector<std::vector<std::uint64_t>>& matches) {
+    matches.assign(kWalkSize, {});
+    const HostPoint increment =
+        multiply_g(options.shifts.step, precompute);
+    HostPoint current;
+    for (std::uint32_t distance = 1u;
+         distance < kWalkSize;
+         ++distance) {
+        current = add_points(current, increment);
+        const std::uint64_t fingerprint =
+            point_limbs(current)[0];
+        auto entry = std::lower_bound(
+            table.entries.begin(),
+            table.entries.end(),
+            fingerprint,
+            [](const BabyEntry& candidate,
+               std::uint64_t value) {
+                return candidate.fingerprint < value;
+            });
+        while (entry != table.entries.end() &&
+               entry->fingerprint == fingerprint) {
+            matches[distance].push_back(entry->j);
+            ++entry;
+        }
+    }
+}
 
 void build_bucket_index(Table& table, std::uint32_t entries_per_bucket) {
     const std::uint64_t bucket_count =
@@ -1445,8 +1572,8 @@ struct MemoryPlan {
 
 bool make_memory_plan(const Options& options,
                       const BigUInt& width,
-                      std::size_t target_slots,
-                      std::size_t active_targets,
+                      std::uint64_t target_slots,
+                      std::uint64_t active_targets,
                       MemoryPlan& plan,
                       std::string& error) {
     std::uint64_t minimum_free =
@@ -2147,12 +2274,16 @@ struct RunShared {
     const SearchRange* range = nullptr;
     const HostPrecompute* precompute = nullptr;
     std::vector<Target>* targets = nullptr;
+    std::unordered_set<std::uint64_t>* shifted_solved = nullptr;
+    const std::vector<std::vector<std::uint64_t>>*
+        shifted_singular_matches = nullptr;
     const RuntimeHooks* hooks = nullptr;
     BigUInt width;
     BigUInt giant_count;
     BigUInt group_count;
     BigUInt random_group_offset;
     std::uint64_t m = 0u;
+    std::uint64_t target_count = 0u;
     std::uint64_t random_group_stride = 0u;
     std::mutex result_mutex;
     std::mutex work_mutex;
@@ -2272,25 +2403,67 @@ void set_failure(RunShared& shared, const std::string& error) {
 }
 
 bool write_result(RunShared& shared,
-                  std::size_t target_index,
+                  std::uint64_t target_id,
                   const BigUInt& distance) {
-    Target& target = (*shared.targets)[target_index];
-    if (target.solved.load(std::memory_order_acquire)) return true;
-    const BigUInt private_key = shared.range->start + distance;
-    if (private_key >= shared.range->end ||
-        !equal_points(multiply_g(private_key, *shared.precompute),
-                      target.point)) {
+    const bool shifted = shared.options->shifts.enabled;
+    const std::uint64_t shifts_per_base =
+        shifted ? shared.options->shifts.count : 1u;
+    const std::uint64_t target_slot =
+        shifted ? target_id / shifts_per_base : target_id;
+    if (target_slot >= shared.targets->size()) return true;
+    Target& target =
+        (*shared.targets)[static_cast<std::size_t>(target_slot)];
+    if ((!shifted &&
+         target.solved.load(std::memory_order_acquire)) ||
+        (shifted && shared.shifted_solved->count(target_id) != 0u)) {
         return true;
     }
-    bool expected = false;
-    if (!target.solved.compare_exchange_strong(
-            expected, true, std::memory_order_acq_rel)) {
+    const BigUInt private_key = shared.range->start + distance;
+    if (private_key >= shared.range->end) {
         return true;
+    }
+    BigUInt offset;
+    HostPoint expected_point = target.point;
+    std::string public_hex = target.normalized;
+    BigUInt base_private = private_key;
+    std::uint64_t shift_index = 0u;
+    if (shifted) {
+        shift_index = target_id % shifts_per_base;
+        offset = shared.options->shifts.start +
+            shared.options->shifts.step * shift_index;
+        expected_point = add_points(
+            target.point,
+            negate_point(multiply_g(offset, *shared.precompute)));
+        if (expected_point.infinity) return true;
+        public_hex = point_uncompressed_hex(expected_point);
+        base_private += offset;
+        if (base_private >= curve_order()) base_private -= curve_order();
+    }
+    if (!equal_points(multiply_g(private_key, *shared.precompute),
+                      expected_point)) {
+        return true;
+    }
+    if (shifted) {
+        if (!equal_points(multiply_g(base_private, *shared.precompute),
+                          target.point)) {
+            return true;
+        }
+        shared.shifted_solved->insert(target_id);
+    } else {
+        bool expected = false;
+        if (!target.solved.compare_exchange_strong(
+                expected, true, std::memory_order_acq_rel)) {
+            return true;
+        }
     }
     std::ofstream output(shared.options->output_file,
                          std::ios::app);
     if (!output) {
-        target.solved.store(false, std::memory_order_release);
+        if (shifted) {
+            shared.shifted_solved->erase(target_id);
+        } else {
+            target.solved.store(false, std::memory_order_release);
+        }
         set_failure(shared,
                     "cannot append output file '" +
                         shared.options->output_file.string() + "'");
@@ -2301,16 +2474,30 @@ bool write_result(RunShared& shared,
         scalar_hex(shared.range->end);
     const std::string private_hex = scalar_hex(private_key);
     for (const TargetAlias& alias : target.aliases) {
-        output << "target=" << alias.ordinal
-               << " source=" << alias.source
-               << " public=" << target.normalized
+        output << "target=" << (target_id + 1u)
+               << " source=" << alias.source;
+        if (shifted) {
+            output << " shift_index=" << shift_index
+                   << " shift=" << scalar_hex(offset);
+        }
+        output << " public=" << public_hex
                << " range=" << range_text
-               << " private=" << private_hex << "\n";
-        std::cout << "\n[+] BSGS target " << alias.ordinal
+               << " private=" << private_hex;
+        if (shifted) {
+            output << " base_public=" << target.normalized
+                   << " base_private=" << scalar_hex(base_private);
+        }
+        output << "\n";
+        std::cout << "\n[+] BSGS target " << (target_id + 1u)
                   << " (" << alias.source << ") found [!]\n"
-                  << "[+] BSGS public: " << target.normalized << "\n"
+                  << "[+] BSGS public: " << public_hex << "\n"
                   << "[+] BSGS range: " << range_text << "\n"
                   << "[+] BSGS private: " << private_hex << "\n";
+        if (shifted) {
+            std::cout << "[+] BSGS shift: " << scalar_hex(offset)
+                      << "; base private: "
+                      << scalar_hex(base_private) << "\n";
+        }
     }
     output.flush();
     if (!output) {
@@ -2324,10 +2511,86 @@ bool write_result(RunShared& shared,
     return true;
 }
 
+bool is_shifted_singular_marker(const Hit& hit) {
+    return (hit.giant_index[3] & kShiftedSingularMarker) != 0u;
+}
+
+bool process_shifted_singular_marker(RunShared& shared,
+                                     const Hit& hit) {
+    if (!is_shifted_singular_marker(hit) ||
+        shared.shifted_singular_matches == nullptr ||
+        hit.j >= kWalkSize ||
+        hit.target_id >= shared.target_count) {
+        return true;
+    }
+    std::uint64_t giant_limbs[4] = {
+        hit.giant_index[0],
+        hit.giant_index[1],
+        hit.giant_index[2],
+        hit.giant_index[3] & ~kShiftedSingularMarker
+    };
+    const BigUInt giant_index = from_limbs(giant_limbs);
+    const BigUInt center =
+        ((giant_index << 1u) + BigUInt(1u)) * shared.m;
+    const std::uint32_t singular_field =
+        static_cast<std::uint32_t>(hit.j);
+    const std::uint64_t block_target_id = hit.target_id;
+    const std::uint64_t shift_base =
+        block_target_id % shared.options->shifts.count;
+    const std::uint64_t field_count =
+        std::min<std::uint64_t>(
+            kWalkSize,
+            shared.options->shifts.count - shift_base);
+    for (std::uint32_t field = 0u;
+         field < field_count;
+         ++field) {
+        if (field == singular_field) continue;
+        const std::uint32_t distance_from_singular =
+            field > singular_field
+            ? field - singular_field
+            : singular_field - field;
+        const auto& matches =
+            (*shared.shifted_singular_matches)
+                [distance_from_singular];
+        const std::uint64_t target_id =
+            block_target_id + field;
+        for (std::uint64_t j : matches) {
+            const BigUInt baby(j);
+            if (center >= baby) {
+                const BigUInt candidate = center - baby;
+                if (candidate < shared.width &&
+                    !write_result(shared,
+                                  target_id,
+                                  candidate)) {
+                    return false;
+                }
+            }
+            if (j != 0u) {
+                const BigUInt candidate = center + baby;
+                if (candidate < shared.width &&
+                    !write_result(shared,
+                                  target_id,
+                                  candidate)) {
+                    return false;
+                }
+            }
+        }
+    }
+    return true;
+}
+
 std::uint64_t work_item_operations(const WorkItem& item,
                                    const BigUInt& giant_count,
                                    std::uint32_t field_begin,
-                                   std::uint32_t field_end) {
+                                   std::uint32_t field_end,
+                                   bool shifted_targets) {
+    if (shifted_targets) {
+        const std::uint32_t begin =
+            std::min(field_begin, item.reserved);
+        const std::uint32_t end =
+            std::min(field_end, item.reserved);
+        return end > begin ? end - begin : 0u;
+    }
     const BigUInt begin =
         from_limbs(item.giant_base) + BigUInt(field_begin);
     if (begin >= giant_count || field_begin >= field_end) return 0u;
@@ -2392,7 +2655,10 @@ bool execute_work(DeviceContext& context,
         static_cast<std::uint64_t>(shared.precompute->pitch);
     const std::uint32_t grid = static_cast<std::uint32_t>(
         (items.size() + kThreadgroupSize - 1u) / kThreadgroupSize);
-    if (!metal_ok(metal_launch("bsgsLookupGiant",
+    const char* lookup_kernel = shared.options->shifts.enabled
+        ? "bsgsLookupShifted"
+        : "bsgsLookupGiant";
+    if (!metal_ok(metal_launch(lookup_kernel,
                                grid,
                                kThreadgroupSize,
                                context.shards[0],
@@ -2413,10 +2679,10 @@ bool execute_work(DeviceContext& context,
                                context.hit_count,
                                context.overflow,
                                params),
-                  "launch bsgsLookupGiant",
+                  std::string("launch ") + lookup_kernel,
                   error) ||
         !metal_ok(metalDeviceSynchronize(),
-                  "synchronize bsgsLookupGiant",
+                  std::string("synchronize ") + lookup_kernel,
                   error)) {
         set_failure(shared, error);
         return false;
@@ -2488,13 +2754,27 @@ bool execute_work(DeviceContext& context,
             operations += work_item_operations(item,
                                                shared.giant_count,
                                                field_begin,
-                                               field_end);
+                                               field_end,
+                                               shared.options->shifts.enabled);
         }
     }
     if (shared.hooks->add_operations) {
         shared.hooks->add_operations(operations);
     }
     if (hit_count == 0u) return true;
+
+    std::vector<Hit> host_hits;
+    if (shared.options->shifts.enabled) {
+        host_hits.resize(hit_count);
+        if (!copy_from_device(host_hits.data(),
+                              context.hits,
+                              host_hits.size() * sizeof(Hit),
+                              "read BSGS shifted hits",
+                              error)) {
+            set_failure(shared, error);
+            return false;
+        }
+    }
 
     ResolveParams resolve{};
     const auto width_limbs = scalar_limbs(shared.width);
@@ -2531,12 +2811,18 @@ bool execute_work(DeviceContext& context,
         std::lock_guard<std::mutex> lock(shared.result_mutex);
         for (const Resolved& candidate : resolved) {
             if (candidate.valid == 0u ||
-                candidate.target_index >= shared.targets->size()) {
+                candidate.target_id >= shared.target_count) {
                 continue;
             }
             if (!write_result(shared,
-                              candidate.target_index,
+                              candidate.target_id,
                               from_limbs(candidate.distance))) {
+                return false;
+            }
+        }
+        for (const Hit& hit : host_hits) {
+            if (is_shifted_singular_marker(hit) &&
+                !process_shifted_singular_marker(shared, hit)) {
                 return false;
             }
         }
@@ -2552,25 +2838,14 @@ bool execute_work(DeviceContext& context,
     return true;
 }
 
-void search_device(DeviceContext& context,
-                   RunShared& shared) {
-    if (shared.failed.load(std::memory_order_acquire)) return;
-    std::string error;
-    if (!metal_ok(metalSetDevice(context.device),
-                  "metalSetDevice",
-                  error)) {
-        set_failure(shared, error);
-        return;
-    }
-    std::size_t active_targets = 0u;
-    for (const Target& target : *shared.targets) {
-        active_targets += static_cast<std::size_t>(
-            !target.solved.load(std::memory_order_acquire));
-    }
-    const std::size_t target_batch =
-        std::max<std::size_t>(
+void search_device_regular(DeviceContext& context,
+                           RunShared& shared) {
+    const std::uint64_t active_targets =
+        static_cast<std::uint64_t>(shared.targets->size());
+    const std::uint64_t target_batch =
+        std::max<std::uint64_t>(
             1u,
-            std::min<std::size_t>(
+            std::min<std::uint64_t>(
                 16384u, active_targets));
     const std::uint64_t groups_per_batch =
         std::max<std::uint64_t>(
@@ -2611,40 +2886,142 @@ void search_device(DeviceContext& context,
             group_templates.push_back(item);
             advance_actual_group(shared, actual_group);
         }
-        for (std::size_t first_target = 0u;
-             first_target < shared.targets->size();
-             first_target += target_batch) {
+        for (std::uint64_t first_target = 0u;
+             first_target < shared.target_count;) {
             std::vector<WorkItem> items;
             items.reserve(
-                static_cast<std::size_t>(groups) * target_batch);
-            const std::size_t last_target =
-                std::min(first_target + target_batch,
-                         shared.targets->size());
-            for (std::size_t target_index = first_target;
-                 target_index < last_target;
-                 ++target_index) {
-                if ((*shared.targets)[target_index].solved.load(
-                        std::memory_order_acquire)) {
+                static_cast<std::size_t>(groups * target_batch));
+            const std::uint64_t last_target =
+                first_target +
+                std::min(target_batch,
+                         shared.target_count - first_target);
+            for (std::uint64_t target_id = first_target;
+                 target_id < last_target;
+                 ++target_id) {
+                const std::uint64_t target_slot =
+                    target_id;
+                if ((*shared.targets)[static_cast<std::size_t>(target_slot)]
+                        .solved.load(std::memory_order_acquire)) {
                     continue;
                 }
-                for (const WorkItem& group_template : group_templates) {
+                for (const WorkItem& group_template :
+                     group_templates) {
                     WorkItem item = group_template;
-                    item.target_index =
-                        static_cast<std::uint32_t>(target_index);
+                    item.target_slot =
+                        static_cast<std::uint32_t>(target_slot);
+                    item.target_id = target_id;
                     items.push_back(item);
                 }
             }
             if (!execute_work(context, items, shared)) {
                 return;
             }
+            first_target = last_target;
         }
     }
 }
 
-bool all_solved(const std::vector<Target>& targets) {
-    return std::all_of(targets.begin(), targets.end(), [](const Target& target) {
-        return target.solved.load(std::memory_order_acquire);
-    });
+void search_device_shifted(DeviceContext& context,
+                           RunShared& shared) {
+    const std::uint64_t shifts_per_base =
+        shared.options->shifts.count;
+    std::vector<WorkItem> items;
+    items.reserve(kWorkCapacity);
+    const auto flush = [&]() {
+        if (items.empty()) return true;
+        const bool ok = execute_work(context, items, shared);
+        items.clear();
+        return ok;
+    };
+    for (;;) {
+        if (shared.failed.load(std::memory_order_acquire) ||
+            shared.remaining_targets.load(std::memory_order_acquire) == 0u) {
+            return;
+        }
+        BigUInt logical_group;
+        {
+            std::lock_guard<std::mutex> lock(shared.work_mutex);
+            if (shared.next_group >= shared.group_count) return;
+            logical_group = shared.next_group;
+            shared.next_group += BigUInt(1u);
+        }
+        const BigUInt actual_group =
+            first_actual_group(shared, logical_group);
+        const BigUInt giant_base = actual_group * kWalkSize;
+        for (std::uint32_t giant_field = 0u;
+             giant_field < kWalkSize;
+             ++giant_field) {
+            const BigUInt giant_index =
+                giant_base + BigUInt(giant_field);
+            if (giant_index >= shared.giant_count) break;
+            BigUInt giant_scalar =
+                ((giant_index << 1u) + BigUInt(1u)) * shared.m;
+            giant_scalar %= curve_order();
+            for (std::uint64_t target_slot = 0u;
+                 target_slot < shared.targets->size();
+                 ++target_slot) {
+                const std::uint64_t target_id_base =
+                    target_slot * shifts_per_base;
+                for (std::uint64_t shift_base = 0u;
+                     shift_base < shifts_per_base;
+                     shift_base += kWalkSize) {
+                    const std::uint32_t field_count =
+                        static_cast<std::uint32_t>(
+                            std::min<std::uint64_t>(
+                                kWalkSize,
+                                shifts_per_base - shift_base));
+                    const std::uint64_t center_shift_index =
+                        shift_base + kWalkSize / 2u;
+                    BigUInt center_scalar =
+                        giant_scalar +
+                        shared.range->start +
+                        shared.options->shifts.start +
+                        shared.options->shifts.step *
+                            center_shift_index;
+                    center_scalar %= curve_order();
+                    WorkItem item{};
+                    const auto center_limbs =
+                        scalar_limbs(center_scalar);
+                    const auto giant_limbs =
+                        scalar_limbs(giant_index);
+                    std::copy_n(center_limbs.data(),
+                                4u,
+                                item.center_scalar);
+                    std::copy_n(giant_limbs.data(),
+                                4u,
+                                item.giant_base);
+                    item.target_slot =
+                        static_cast<std::uint32_t>(target_slot);
+                    item.reserved = field_count;
+                    item.target_id =
+                        target_id_base + shift_base;
+                    items.push_back(item);
+                    if (items.size() == kWorkCapacity &&
+                        !flush()) {
+                        return;
+                    }
+                }
+            }
+        }
+        if (!flush()) return;
+    }
+}
+
+void search_device(DeviceContext& context,
+                   RunShared& shared) {
+    if (shared.failed.load(std::memory_order_acquire)) return;
+    std::string error;
+    if (!metal_ok(metalSetDevice(context.device),
+                  "metalSetDevice",
+                  error)) {
+        set_failure(shared, error);
+        return;
+    }
+    if (shared.options->shifts.enabled) {
+        search_device_shifted(context, shared);
+    } else {
+        search_device_regular(context, shared);
+    }
 }
 
 std::size_t unsolved_count(const std::vector<Target>& targets) {
@@ -2654,20 +3031,41 @@ std::size_t unsolved_count(const std::vector<Target>& targets) {
         }));
 }
 
+std::uint64_t logical_unsolved_count(
+    const Options& options,
+    const std::vector<Target>& targets,
+    const std::unordered_set<std::uint64_t>& shifted_solved,
+    std::uint64_t target_count) {
+    if (options.shifts.enabled) {
+        return target_count -
+            std::min<std::uint64_t>(
+                target_count,
+                static_cast<std::uint64_t>(shifted_solved.size()));
+    }
+    return static_cast<std::uint64_t>(unsolved_count(targets));
+}
+
 bool search_range(Options& options,
                   const SearchRange& range,
                   const HostPrecompute& precompute,
                   std::vector<Target>& targets,
+                  std::unordered_set<std::uint64_t>& shifted_solved,
+                  std::uint64_t target_count,
                   const RuntimeHooks& hooks,
                   std::map<std::uint64_t, std::shared_ptr<Table>>& tables,
                   std::uint64_t& attempted_m,
                   std::string& error) {
     const BigUInt width = range.end - range.start;
     MemoryPlan memory;
+    const std::uint64_t active_target_count =
+        logical_unsolved_count(options,
+                               targets,
+                               shifted_solved,
+                               target_count);
     if (!make_memory_plan(options,
                           width,
                           targets.size(),
-                          unsolved_count(targets),
+                          active_target_count,
                           memory,
                           error)) {
         return false;
@@ -2725,22 +3123,47 @@ bool search_range(Options& options,
         tables.emplace(memory.m, table);
     }
 
-    const HostPoint range_shift =
-        negate_point(multiply_g(range.start, precompute));
+    std::vector<std::vector<std::uint64_t>>
+        shifted_singular_matches;
+    if (options.shifts.enabled) {
+        const auto singular_started =
+            std::chrono::steady_clock::now();
+        build_shifted_singular_matches(
+            options,
+            *table,
+            precompute,
+            shifted_singular_matches);
+        const double singular_seconds =
+            std::chrono::duration<double>(
+                std::chrono::steady_clock::now() -
+                singular_started).count();
+        std::cout << "[!] BSGS shifted singular map: "
+                  << (kWalkSize - 1u)
+                  << " offsets in "
+                  << std::fixed << std::setprecision(3)
+                  << singular_seconds << " s [!]\n";
+    }
+
+    const HostPoint range_shift = options.shifts.enabled
+        ? HostPoint()
+        : negate_point(multiply_g(range.start, precompute));
     std::vector<std::uint64_t> target_limbs(targets.size() * 8u);
     for (std::size_t i = 0u; i < targets.size(); ++i) {
         if (targets[i].solved.load(std::memory_order_acquire)) {
             continue;
         }
-        const HostPoint shifted_target =
-            add_points(targets[i].point, range_shift);
-        if (shifted_target.infinity) {
+        const HostPoint shifted_target = options.shifts.enabled
+            ? targets[i].point
+            : add_points(targets[i].point, range_shift);
+        if (!options.shifts.enabled && shifted_target.infinity) {
             RunShared immediate;
             immediate.options = &options;
             immediate.range = &range;
             immediate.precompute = &precompute;
             immediate.targets = &targets;
+            immediate.shifted_solved = &shifted_solved;
             immediate.hooks = &hooks;
+            immediate.target_count = target_count;
             immediate.width = width;
             immediate.remaining_targets.store(
                 1u, std::memory_order_release);
@@ -2754,10 +3177,18 @@ bool search_range(Options& options,
                   limbs.end(),
                   target_limbs.begin() + i * 8u);
     }
-    if (all_solved(targets)) return true;
+    if (logical_unsolved_count(options,
+                               targets,
+                               shifted_solved,
+                               target_count) == 0u) {
+        return true;
+    }
 
-    const BigUInt step = BigUInt(memory.m) * 2u;
-    const WalkTable giant_walk = build_walk_table(step, precompute);
+    const BigUInt lookup_walk_step = options.shifts.enabled
+        ? options.shifts.step
+        : BigUInt(memory.m) * 2u;
+    const WalkTable giant_walk =
+        build_walk_table(lookup_walk_step, precompute);
     std::vector<std::unique_ptr<DeviceContext>> contexts;
     for (int device : options.devices) {
         auto context = std::make_unique<DeviceContext>();
@@ -2786,15 +3217,24 @@ bool search_range(Options& options,
     shared.range = &range;
     shared.precompute = &precompute;
     shared.targets = &targets;
+    shared.shifted_solved = &shifted_solved;
+    shared.shifted_singular_matches =
+        options.shifts.enabled
+        ? &shifted_singular_matches
+        : nullptr;
     shared.hooks = &hooks;
     shared.width = width;
     shared.m = memory.m;
+    shared.target_count = target_count;
     shared.giant_count = ceil_div(width, memory.m * 2u);
     shared.group_count = ceil_div(shared.giant_count, kWalkSize);
-    const std::size_t active_targets_before_search =
-        unsolved_count(targets);
+    const std::uint64_t active_targets_before_search =
+        logical_unsolved_count(options,
+                               targets,
+                               shifted_solved,
+                               target_count);
     shared.remaining_targets.store(
-        static_cast<std::uint64_t>(active_targets_before_search),
+        active_targets_before_search,
         std::memory_order_release);
     configure_random_groups(shared);
     if (options.random_search) {
@@ -2809,14 +3249,14 @@ bool search_range(Options& options,
     }
     const BigUInt total_ops =
         shared.giant_count *
-        static_cast<std::uint64_t>(active_targets_before_search);
+        active_targets_before_search;
     if (hooks.set_speed_context) {
         hooks.set_speed_context(
             SpeedPhase::Search,
             saturating_u64(total_ops),
             static_cast<double>(memory.m) * 2.0,
             static_cast<std::uint32_t>(
-                std::min<std::size_t>(
+                std::min<std::uint64_t>(
                     active_targets_before_search,
                     std::numeric_limits<std::uint32_t>::max())));
     }
@@ -2838,7 +3278,11 @@ bool search_range(Options& options,
     if (!table->from_cache &&
         table->build_seconds > 0.0 &&
         search_seconds > 0.0 &&
-        unsolved_count(targets) == active_targets_before_search &&
+        logical_unsolved_count(options,
+                               targets,
+                               shifted_solved,
+                               target_count) ==
+            active_targets_before_search &&
         !total_ops.is_zero()) {
         const long double baby_rate =
             static_cast<long double>(memory.m) /
@@ -2853,7 +3297,11 @@ bool search_range(Options& options,
     std::cout << "\n[!] BSGS table source: "
               << (table->from_cache ? "cache" : "built")
               << "; range complete, remaining targets="
-              << unsolved_count(targets) << " [!]\n";
+              << logical_unsolved_count(options,
+                                        targets,
+                                        shifted_solved,
+                                        target_count)
+              << " [!]\n";
     return true;
 }
 
@@ -2874,6 +3322,8 @@ void print_help() {
 [!] -target VALUE                   Repeatable public key or a target-file path.
 [!]                                 Keys: compressed 33-byte or uncompressed 65-byte hex.
 [!]                                 File: first token per line; blank/# lines are ignored.
+[!] -bsgs-shifts START:COUNT[:STEP] Search Q-(START+i*STEP)G without materializing
+[!]                                 generated public keys; START/STEP are hex scalars.
 [!] -range VALUE                    Bits 1..256: 64, 65-72, 64,80,96; or hex START:END.
 [!] -bsgs-mem auto|all|NN%|SIZE     Hard table/pipeline memory budget.
 [!]                                 Bare SIZE is MiB; MiB and GiB suffixes are accepted.
@@ -2892,6 +3342,10 @@ void print_help() {
 [!] the complete secp256k1 public key. Duplicate targets share one search.
 [!] The exact fingerprint64+j backend keeps every collision candidate; its
 [!] adaptive bucket index and target/work batch sizes are selected internally.
+[!] Shift mode keeps only each base Q resident and carries a 64-bit logical
+[!] target id through the GPU pipeline. Hundreds of millions of arithmetic
+[!] shifts therefore do not allocate hundreds of millions of public keys.
+[!] A shifted hit prints both its private key and the verified base private key.
 [!]
 [!] Memory:
 [!] auto uses at most 50% of the free recommended Metal working set.
@@ -2918,6 +3372,10 @@ void print_help() {
 [!] ./METAL_CRYPTO_TOOLKIT -bsgs -target targets.txt -range 0x1000:0x2000 -bsgs-table 2^12 -bsgs-table-cache
 [!] ./METAL_CRYPTO_TOOLKIT -bsgs -target targets.txt -range 56 -random -bsgs-random-seed 0x1234 -bsgs-mem 16GiB
 [!] ./METAL_CRYPTO_TOOLKIT -bsgs -target 02... -range 64 -bsgs-mem all -bsgs-table-dir /Volumes/Fast/bsgs
+[!] ./METAL_CRYPTO_TOOLKIT -bsgs -target 02145d...d1e16 -bsgs-shifts 0:100000000:1 -range 135 -bsgs-mem all
+[!]
+[!] Dense shifts are mathematically equivalent to searching the union of
+[!] shifted scalar intervals. Overlapping intervals do not create free speedup.
 [!]
 [!] Full 256-bit arithmetic prevents truncation; it does not make an exhaustive
 [!] 256-bit discrete-log search computationally practical.
@@ -2951,11 +3409,26 @@ int run(int argc, char** argv, const RuntimeHooks& hooks) {
         std::cerr << "[!] BSGS error: " << error << " [!]\n";
         return 2;
     }
-    std::cout << "[!] BSGS targets: " << targets.size()
-              << " unique from ";
+    std::uint64_t target_count = 0u;
+    if (!logical_target_count(options, targets, target_count, error)) {
+        std::cerr << "[!] BSGS error: " << error << " [!]\n";
+        return 2;
+    }
+    std::cout << "[!] BSGS targets: " << target_count
+              << " logical from " << targets.size()
+              << " unique base point";
+    if (targets.size() != 1u) std::cout << "s";
+    std::cout << " and ";
     std::size_t aliases = 0u;
     for (const Target& target : targets) aliases += target.aliases.size();
-    std::cout << aliases << " input records [!]\n";
+    std::cout << aliases << " input records";
+    if (options.shifts.enabled) {
+        std::cout << "; compact shifts start="
+                  << scalar_hex(options.shifts.start)
+                  << ", count=" << options.shifts.count
+                  << ", step=" << scalar_hex(options.shifts.step);
+    }
+    std::cout << " [!]\n";
 
     HostPrecompute precompute;
     if (!build_host_precompute(precompute, error)) {
@@ -2963,14 +3436,22 @@ int run(int argc, char** argv, const RuntimeHooks& hooks) {
         return 1;
     }
     std::map<std::uint64_t, std::shared_ptr<Table>> tables;
+    std::unordered_set<std::uint64_t> shifted_solved;
     for (const SearchRange& range : options.ranges) {
-        if (all_solved(targets)) break;
+        if (logical_unsolved_count(options,
+                                   targets,
+                                   shifted_solved,
+                                   target_count) == 0u) {
+            break;
+        }
         for (;;) {
             std::uint64_t attempted_m = 0u;
             if (search_range(options,
                              range,
                              precompute,
                              targets,
+                             shifted_solved,
+                             target_count,
                              hooks,
                              tables,
                              attempted_m,
@@ -3000,9 +3481,15 @@ int run(int argc, char** argv, const RuntimeHooks& hooks) {
     if (hooks.set_speed_context) {
         hooks.set_speed_context(SpeedPhase::Idle, 0u, 0.0, 0u);
     }
+    const std::uint64_t remaining =
+        logical_unsolved_count(options,
+                               targets,
+                               shifted_solved,
+                               target_count);
     std::cout << "\n[!] BSGS completed: "
-              << (targets.size() - unsolved_count(targets))
-              << "/" << targets.size() << " unique targets solved [!]\n";
+              << (target_count - remaining)
+              << "/" << target_count
+              << " unique logical targets solved [!]\n";
     return 0;
 }
 

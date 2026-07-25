@@ -1481,6 +1481,16 @@ each line; blank lines and lines beginning with `#` are ignored. Compressed
 and uncompressed forms of the same point are deduplicated for computation,
 while every original target number and source is retained in the result.
 
+For very large arithmetic target families, use
+`-bsgs-shifts START:COUNT[:STEP]`. For every base target `Q`, it searches the
+logical targets `Q - (START + i × STEP)G`, `0 <= i < COUNT`. `START` and
+`STEP` are hexadecimal scalars; `COUNT` is a decimal, `0xHEX`, or `2^EXP`
+64-bit count. The sequence must stay below the secp256k1 order. Only each base
+point and a bounded work window are resident: even hundreds of millions of
+logical targets are not expanded into public-key objects or per-target Metal
+buffers. A hit reports the derived target private key, its shift, and the
+separately verified private key of the base point.
+
 The `-range` grammar and exclusive upper bound are identical to Kangaroo:
 
 | Form | Interval searched |
@@ -1501,6 +1511,7 @@ removed before the next range.
 | `-bsgs-mem all` | all remaining recommended working set except a 512 MiB runtime reserve |
 | `-bsgs-mem NN%` | a percentage of the currently free recommended working set |
 | `-bsgs-mem SIZE` | hard byte budget; a bare number is MiB, or use `MiB`/`GiB` |
+| `-bsgs-shifts START:COUNT[:STEP]` | compact arithmetic targets `Q-(START+i×STEP)G` |
 | `-bsgs-table N` | exact baby-step count in decimal, `0xHEX`, or `2^EXP` form |
 | `-bsgs-table-cache` | opt in to `_local_artifacts/bsgs_tables` |
 | `-bsgs-table-dir DIR` | opt in to a cache at `DIR` |
@@ -1597,6 +1608,22 @@ reports `EqKey/s = GStep/s × 2M`.
   -bsgs-random-seed 0x1234 \
   -bsgs-mem 16GiB
 ```
+
+**Example 6 — 100 million shifted targets without a 100-million-key file.**
+
+```bash
+./METAL_CRYPTO_TOOLKIT -bsgs \
+  -target 02145d2611c823a396ef6712ce0f712f09b9b4f3135e3e0aa3230fb9b6d08d1e16 \
+  -bsgs-shifts 0:100000000:1 \
+  -range 135 \
+  -bsgs-mem all
+```
+
+This is mathematically a search over the union of the scalar intervals shifted
+by the listed offsets. Dense adjacent shifts create heavily overlapping
+intervals, so they do not multiply unique coverage for free. The compact mode
+removes the memory/loading bottleneck and lets the hypothesis be measured
+honestly; it does not change the amount of unique interval work.
 
 Every candidate is checked against the complete target point before it is
 printed. Full 256-bit counters and endpoints prevent truncation, but they do
@@ -3862,6 +3889,16 @@ steps сразу для всех ещё не найденных целей. В �
 Compressed и uncompressed формы одной точки вычисляются один раз, но в
 результате сохраняются все исходные номера и источники.
 
+Для очень больших арифметических семейств целей предусмотрен параметр
+`-bsgs-shifts START:COUNT[:STEP]`. Для каждой базовой точки `Q` он ищет
+логические цели `Q - (START + i × STEP)G`, где `0 <= i < COUNT`. `START` и
+`STEP` задаются hex-скалярами, а 64-битный `COUNT` — в decimal, `0xHEX` либо
+`2^EXP`. Последнее смещение должно оставаться ниже порядка secp256k1. В памяти
+хранятся только базовые точки и ограниченное рабочее окно: даже сотни миллионов
+логических целей не разворачиваются в объекты публичных ключей и отдельные
+Metal-буферы. При совпадении выводятся приват производной цели, её смещение и
+отдельно проверенный приват базовой точки.
+
 Грамматика `-range` и исключённая правая граница полностью совпадают с
 Kangaroo:
 
@@ -3883,6 +3920,7 @@ Kangaroo:
 | `-bsgs-mem all` | весь остаток recommended working set, кроме резерва 512 MiB |
 | `-bsgs-mem NN%` | процент текущего свободного recommended working set |
 | `-bsgs-mem SIZE` | жёсткий бюджет; число без суффикса означает MiB, доступны `MiB` и `GiB` |
+| `-bsgs-shifts START:COUNT[:STEP]` | компактные цели `Q-(START+i×STEP)G` |
 | `-bsgs-table N` | точное число baby steps: decimal, `0xHEX` либо `2^EXP` |
 | `-bsgs-table-cache` | включить кеш `_local_artifacts/bsgs_tables` |
 | `-bsgs-table-dir DIR` | включить кеш в папке `DIR` |
@@ -3980,6 +4018,22 @@ walker с шагом `2M` выводит `EqKey/s = GStep/s × 2M`.
   -bsgs-random-seed 0x1234 \
   -bsgs-mem 16GiB
 ```
+
+**Пример 6 — 100 миллионов смещённых целей без файла из 100 миллионов ключей.**
+
+```bash
+./METAL_CRYPTO_TOOLKIT -bsgs \
+  -target 02145d2611c823a396ef6712ce0f712f09b9b4f3135e3e0aa3230fb9b6d08d1e16 \
+  -bsgs-shifts 0:100000000:1 \
+  -range 135 \
+  -bsgs-mem all
+```
+
+Математически это поиск по объединению скалярных интервалов, сдвинутых на
+указанные величины. Плотные соседние сдвиги сильно перекрываются, поэтому не
+дают бесплатного умножения уникального покрытия. Компактный режим устраняет
+ограничение загрузки и памяти и позволяет честно проверить гипотезу, но не
+уменьшает объём уникальной интервальной работы.
 
 Каждый кандидат полностью сверяется с исходной точкой до вывода. 256-битные
 счётчики и границы исключают усечение, но не делают полный 256-битный
