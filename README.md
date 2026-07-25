@@ -23,6 +23,31 @@ Author: Mikhail Khoroshavin, also known as **XopMC**
 
 #### v15
 
+The July 25 update extends both interval-DLP modes for very large target
+families:
+
+- BSGS now streams bounded target tiles instead of keeping the complete input
+  resident, and `-random` uses a seeded, non-repeating permutation of all giant
+  groups. `-bsgs-random-seed` reproduces the traversal exactly.
+- `-bsgs-shifts START:COUNT[:STEP]` represents up to 64-bit-sized arithmetic
+  families `Q-(START+i*STEP)G` without expanding millions of public keys in
+  memory.
+- Two or more Kangaroo targets automatically select the shared-tame
+  multi-target contour. `-kangaroo-mem auto|all|NN%|SIZE` controls its actual
+  working-set ceiling without a fixed 16 GiB cap, while resident target windows
+  keep physical memory bounded.
+- `-kangaroo-shifts START:COUNT[:STEP]` provides the same compact shifted-target
+  source for Kangaroo. Shift-derived searches stop after the first fully
+  verified hit, and the standard speed thread reports completed work plus
+  overlap-aware unique equivalent coverage.
+
+The final shifted first-hit BSGS candidate was accepted on Apple M4 Max with a
+median wall-time reduction of **82.96–83.18%** against both surrounding
+baseline groups (0.3145 s versus 1.8458/1.8701 s, 2.180% CV). Its sealed
+correctness suite covered BSGS and Kangaroo shifted first-hit recovery,
+independent multi-target searches, non-repeating randomized BSGS, cyclic
+overlap accounting, `compact170`, `wide256`, private 1:1, and P2WSH controls.
+
 The July 24 `-bsgs` update adds a native deterministic Metal BSGS mode:
 
 - one or many compressed/uncompressed secp256k1 public-key targets are accepted
@@ -111,7 +136,7 @@ The program can:
 - check secp256k1, ed25519, and sr25519 results for Bitcoin, Ethereum, TON, Solana, Polkadot/Substrate, Cardano, Filecoin, IOTA, Aptos, Sui, XRP, ICP, and Tezos;
 - search direct values or large target collections stored in Bloom and XOR filters;
 - examine raw private-key ranges, incomplete hexadecimal templates, Casascius minikeys, and known historical generator families;
-- recover a secp256k1 private key with `-kangaroo` when the complete public key and a bounded scalar interval are known;
+- recover a secp256k1 private key with `-bsgs` or `-kangaroo` when the complete public key and a bounded scalar interval are known, including multi-target and compact shifted-target searches;
 - verify password candidates against supported wallet containers and extracted wallet hashes;
 - transfer found records to the output writer without stopping the compute loop for every disk write.
 
@@ -2476,6 +2501,32 @@ xattr -d com.apple.quarantine METAL_CRYPTO_TOOLKIT
 
 #### v15
 
+Обновление от 25 июля расширяет оба interval-DLP режима для очень больших
+семейств целей:
+
+- BSGS теперь обрабатывает цели ограниченными окнами, не удерживая весь вход в
+  памяти, а `-random` использует seed-зависимую перестановку всех giant-групп
+  без повторов. `-bsgs-random-seed` точно воспроизводит порядок обхода.
+- `-bsgs-shifts START:COUNT[:STEP]` задаёт арифметическое семейство
+  `Q-(START+i*STEP)G` с 64-битным количеством элементов без разворачивания
+  миллионов публичных ключей в памяти.
+- При двух и более целях Kangaroo автоматически включает настоящий
+  multi-target контур с общим tame herd.
+  `-kangaroo-mem auto|all|NN%|SIZE` задаёт фактический предел рабочего набора
+  без фиксированного ограничения 16 GiB, а резидентные окна целей сохраняют
+  ограниченное потребление физической памяти.
+- `-kangaroo-shifts START:COUNT[:STEP]` предоставляет Kangaroo такой же
+  компактный источник смещённых целей. Поиск семейства останавливается после
+  первого полностью проверенного совпадения, а штатный speed thread выводит
+  завершённую работу и уникальное эквивалентное покрытие с учётом пересечений.
+
+Финальный BSGS-кандидат с ранней остановкой принят на Apple M4 Max: медианное
+wall time уменьшилось **на 82,96–83,18%** относительно обеих окружающих
+baseline-групп (0,3145 с против 1,8458/1,8701 с, CV 2,180%). Закрытый набор
+корректности проверил BSGS/Kangaroo shifted first-hit, независимый multi-target,
+неповторяющийся случайный обход BSGS, циклические пересечения, `compact170`,
+`wide256`, private 1:1 и P2WSH.
+
 Обновление `-bsgs` от 24 июля добавляет нативный детерминированный режим BSGS
 для Metal:
 
@@ -2567,7 +2618,7 @@ A1/B/A2. Каждый диапазон показывает результат �
 - получать и проверять результаты secp256k1, ed25519 и sr25519 для Bitcoin, Ethereum, TON, Solana, Polkadot/Substrate, Cardano, Filecoin, IOTA, Aptos, Sui, XRP, ICP и Tezos;
 - искать одну известную цель напрямую либо проверять большие наборы целей через Bloom- и XOR-фильтры;
 - перебирать диапазоны приватов, восстанавливать неизвестные шестнадцатеричные позиции, проверять мини-ключи Casascius и воспроизводить известные старые генераторы;
-- восстанавливать приват secp256k1 через `-kangaroo`, когда известны полный публичный ключ и ограниченный диапазон скаляра;
+- восстанавливать приват secp256k1 через `-bsgs` или `-kangaroo`, когда известны полный публичный ключ и ограниченный диапазон скаляра, включая multi-target и компактный поиск по смещённым целям;
 - проверять пароли поддерживаемых файлов кошельков и заранее извлеченных хешей;
 - передавать найденные записи на вывод в фоне, не останавливая вычисления после каждого совпадения.
 
