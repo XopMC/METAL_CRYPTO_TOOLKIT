@@ -263,6 +263,9 @@ kernel void vanitySearch(
     secp256k1_fe inverse_z[VANITY_THREAD_CANDIDATES];
     uint inverse_index[VANITY_THREAD_CANDIDATES];
     uint valid_count = 0u;
+    secp256k1_ge generator = secp256k1_ge_const_g;
+    secp256k1_gej walk;
+    bool walk_ready = false;
 
 #pragma unroll
     for (uint lane = 0u; lane < VANITY_THREAD_CANDIDATES; ++lane) {
@@ -271,17 +274,29 @@ kernel void vanitySearch(
         if (candidate_index >= range_count) continue;
         vanity_copy32(scalars[lane], base_scalar);
         if (!vanity_add_index(scalars[lane], candidate_index)) continue;
-        secp256k1_scalar scalar;
-        if (!secp256k1_scalar_set_b32_seckey(&scalar, scalars[lane])) continue;
-        secp256k1_ecmult_big(
-            &jacobians[lane], &scalar, prec, size_t(prec_pitch),
-            int(prec_windows), prec_window_bits);
-        if (split_enabled != 0u) {
-            secp256k1_gej combined;
+        if (!walk_ready) {
+            secp256k1_scalar scalar;
+            if (!secp256k1_scalar_set_b32_seckey(
+                    &scalar, scalars[lane])) {
+                continue;
+            }
+            secp256k1_ecmult_big(
+                &walk, &scalar, prec, size_t(prec_pitch),
+                int(prec_windows), prec_window_bits);
+            if (split_enabled != 0u) {
+                secp256k1_gej combined;
+                secp256k1_gej_add_ge_var(
+                    &combined, &walk, &split_point, nullptr);
+                walk = combined;
+            }
+            walk_ready = true;
+        } else {
+            secp256k1_gej next;
             secp256k1_gej_add_ge_var(
-                &combined, &jacobians[lane], &split_point, nullptr);
-            jacobians[lane] = combined;
+                &next, &walk, &generator, nullptr);
+            walk = next;
         }
+        jacobians[lane] = walk;
         if (jacobians[lane].infinity != 0) continue;
         inverse_index[lane] = valid_count;
         input_z[valid_count] = jacobians[lane].z;
