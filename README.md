@@ -84,6 +84,17 @@ Wave 4 adds native Metal vanity-address generation:
 - GPU hits are recomputed from the scalar and fully encoded on the host before
   output, while the common `SpeedThreadFunc` remains the only `Key/s` printer.
 
+Wave 5 adds deterministic Ethereum CREATE2 salt search:
+
+- `-create2` evaluates the exact EIP-1014 preimage
+  `0xff || deployer || salt || init_code_hash` in a dedicated Metal kernel;
+- repeatable patterns and pattern files support lowercase hexadecimal
+  prefixes, suffixes, `*`, and single-character `?` matching;
+- direct U256 salt intervals and 64-nibble templates enumerate without gaps,
+  while finite random mode changes only the cyclic starting point;
+- every hit is recomputed with an independent host Keccak implementation, and
+  only the shared `SpeedThreadFunc` reports completed `Addr/s`.
+
 #### v15
 
 The July 25 update extends both interval-DLP modes for very large target
@@ -1847,6 +1858,72 @@ Full built-in help:
 ./METAL_CRYPTO_TOOLKIT -vanity -help
 ```
 
+#### `-create2`
+
+**Use it for:** finding a CREATE2 salt that makes one fixed deployer and one
+fixed initialization-code hash produce an Ethereum address matching a chosen
+hexadecimal pattern. This mode searches salts, not private keys.
+
+CREATE2 uses the exact EIP-1014 expression
+`keccak256(0xff || deployer || salt || init_code_hash)[12:]`.
+`-deployer` therefore takes exactly 20 bytes and `-init-code-hash` exactly
+32 bytes. The latter is already `keccak256(init_code)`, not raw bytecode.
+Patterns are lowercase, non-checksummed `0x` Ethereum addresses. `-pattern`
+is repeatable, and `-pattern-file` ignores blank lines, comments, and
+duplicates.
+
+| Argument | Meaning |
+| --- | --- |
+| `-deployer 0xADDRESS` | fixed 20-byte deployer/factory |
+| `-init-code-hash 0xHASH` | fixed 32-byte Keccak hash of initialization code |
+| `-pattern VALUE` | add one prefix/suffix/wildcard address pattern |
+| `-pattern-file FILE` | load one pattern per line |
+| `-start N -end N` | exact salt or template-ordinal interval `[START,END)` |
+| `-mask HEX/?` | 64 salt nibbles; each `?` is filled from the ordinal |
+| `-random` | cover a finite interval once from a random cyclic rotation |
+| `-n N` | salts per Metal launch |
+| `-device LIST` | selected Metal device indexes |
+| `-o FILE`, `-save`, `-silent` | verified-result output controls |
+
+Without `-mask`, the 256-bit ordinal is the salt itself. With a mask, unknown
+nibbles are filled from right to left in ordinary numeric order; fixed nibbles
+stay unchanged. If `-end` is omitted, the complete template domain is used.
+`-end 2^256` denotes the full remaining U256 domain, but cannot be combined
+with `-random`. Hit-buffer overflow is retried before work is credited, and
+every returned address is independently recomputed on the host.
+
+Official EIP-1014 example 0 (`init_code = 0x00`):
+
+```bash
+./METAL_CRYPTO_TOOLKIT -create2 \
+  -deployer 0x0000000000000000000000000000000000000000 \
+  -init-code-hash 0xbc36789e7a1e281436464229828f817d6612f7b477d66591ff96a9e064bcc98a \
+  -pattern 0x4d1a \
+  -start 0 -end 65536 \
+  -save
+```
+
+Template search:
+
+```bash
+./METAL_CRYPTO_TOOLKIT -create2 \
+  -deployer 0xdead00000000000000000000000000000000beef \
+  -init-code-hash 0x0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef \
+  -pattern 'create2:0x0000*' \
+  -mask '000000000000000000000000????????????????????????????????????????' \
+  -random -device 0
+```
+
+The full U256 scheduler prevents truncation; it does not make exhaustive
+256-bit salt search practical. Live statistics are emitted only by the common
+`SpeedThreadFunc` as completed `Addr/s`.
+
+Full built-in help:
+
+```bash
+./METAL_CRYPTO_TOOLKIT -create2 -help
+```
+
 #### `-minikeys`
 
 **Use it for:** Casascius minikey strings.
@@ -2821,6 +2898,17 @@ xattr -d com.apple.quarantine METAL_CRYPTO_TOOLKIT
   пересечений;
 - каждый GPU hit заново строится из скаляра и полностью кодируется на host, а
   единственным потоком печати `Key/s` остаётся общий `SpeedThreadFunc`.
+
+Волна 5 добавляет детерминированный поиск salt Ethereum CREATE2:
+
+- `-create2` вычисляет точный EIP-1014 preimage
+  `0xff || deployer || salt || init_code_hash` отдельным Metal-ядром;
+- повторяемые шаблоны и файлы шаблонов поддерживают lowercase hex-префиксы,
+  суффиксы, `*` и односимвольный `?`;
+- прямые U256-диапазоны salt и 64-ниббловые шаблоны перебираются без пропусков,
+  а finite random меняет только циклическую начальную точку;
+- каждый hit пересчитывается независимым host Keccak, а завершённые `Addr/s`
+  печатает только общий `SpeedThreadFunc`.
 
 #### v15
 
@@ -4599,6 +4687,72 @@ lowercase hex. Статистику завершённых `Key/s` печата�
 
 ```bash
 ./METAL_CRYPTO_TOOLKIT -vanity -help
+```
+
+#### `-create2`
+
+**Когда использовать:** для поиска CREATE2 salt, при котором фиксированный
+deployer и фиксированный hash initialization-кода дают Ethereum-адрес с
+нужным hexadecimal-шаблоном. Этот режим ищет salt, а не приватные ключи.
+
+CREATE2 использует точную формулу EIP-1014
+`keccak256(0xff || deployer || salt || init_code_hash)[12:]`.
+Поэтому `-deployer` принимает ровно 20 байт, а `-init-code-hash` — ровно
+32 байта. Второй параметр уже должен быть `keccak256(init_code)`, а не сырым
+bytecode. Шаблоны сравниваются с lowercase Ethereum-адресом без checksum.
+`-pattern` можно повторять, а `-pattern-file` игнорирует пустые строки,
+комментарии и дубликаты.
+
+| Параметр | Значение |
+| --- | --- |
+| `-deployer 0xADDRESS` | фиксированный 20-байтовый deployer/factory |
+| `-init-code-hash 0xHASH` | фиксированный 32-байтовый Keccak hash initialization-кода |
+| `-pattern VALUE` | добавить префикс/суффикс/wildcard адреса |
+| `-pattern-file FILE` | загрузить по одному шаблону на строку |
+| `-start N -end N` | точный интервал salt или template ordinal `[START,END)` |
+| `-mask HEX/?` | 64 ниббла salt; каждый `?` заполняется из ordinal |
+| `-random` | однократно покрыть finite-интервал со случайной циклической ротации |
+| `-n N` | число salt за один Metal launch |
+| `-device LIST` | индексы выбранных Metal-устройств |
+| `-o FILE`, `-save`, `-silent` | управление выводом проверенных результатов |
+
+Без `-mask` сам 256-битный ordinal является salt. С маской неизвестные нибблы
+заполняются справа налево в обычном числовом порядке, а фиксированные не
+меняются. Если `-end` не задан, используется весь template-domain.
+`-end 2^256` задаёт оставшийся полный U256-domain, но несовместим с `-random`.
+Переполнение hit-буфера повторяет незачтённую работу, а каждый найденный адрес
+независимо пересчитывается на host.
+
+Официальный пример 0 из EIP-1014 (`init_code = 0x00`):
+
+```bash
+./METAL_CRYPTO_TOOLKIT -create2 \
+  -deployer 0x0000000000000000000000000000000000000000 \
+  -init-code-hash 0xbc36789e7a1e281436464229828f817d6612f7b477d66591ff96a9e064bcc98a \
+  -pattern 0x4d1a \
+  -start 0 -end 65536 \
+  -save
+```
+
+Поиск по шаблону salt:
+
+```bash
+./METAL_CRYPTO_TOOLKIT -create2 \
+  -deployer 0xdead00000000000000000000000000000000beef \
+  -init-code-hash 0x0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef \
+  -pattern 'create2:0x0000*' \
+  -mask '000000000000000000000000????????????????????????????????????????' \
+  -random -device 0
+```
+
+Полный U256 scheduler исключает усечение, но не делает исчерпывающий
+256-битный поиск salt практически выполнимым. Текущие `Addr/s` печатает
+только общий `SpeedThreadFunc`.
+
+Полная встроенная справка:
+
+```bash
+./METAL_CRYPTO_TOOLKIT -create2 -help
 ```
 
 #### `-minikeys`
