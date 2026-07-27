@@ -26,7 +26,7 @@ struct VanityHit {
     uchar address[96];
 };
 
-constant uint VANITY_THREAD_CANDIDATES = 4u;
+constant uint VANITY_THREAD_CANDIDATES = 8u;
 constant char VANITY_BASE58_ALPHABET[] =
     "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
 constant char VANITY_BECH32_ALPHABET[] =

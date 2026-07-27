@@ -37,7 +37,7 @@ namespace vanity {
 namespace {
 
 constexpr std::uint32_t kThreadgroupSize = 128u;
-constexpr std::uint64_t kCandidatesPerThread = 4u;
+constexpr std::uint64_t kCandidatesPerThread = 8u;
 constexpr std::uint64_t kDefaultBatch = 1ull << 20u;
 constexpr std::uint32_t kHitCapacity = 65536u;
 constexpr std::size_t kMaximumPatternLength = 96u;
