@@ -6,6 +6,7 @@
 #include "Kernels/WalletModesHost.h"
 
 #include <algorithm>
+#include <cctype>
 #include <cerrno>
 #include <cinttypes>
 #include <chrono>
@@ -13,11 +14,13 @@
 #include <cstdio>
 #include <cstring>
 #include <functional>
+#include <iomanip>
 #include <limits>
 #include <memory>
 #include <mutex>
 #include <new>
 #include <shared_mutex>
+#include <sstream>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -3689,3 +3692,727 @@ metalError_t metal_vanity_apply_persistent_shift(uint64_t* startx_buf, uint64_t*
     if (st != metalSuccess) return st;
     return metal_launch("vanity_apply_persistent_shift_kernel", grid, block, startx_buf, starty_buf);
 }
+
+namespace modeinfra {
+namespace {
+
+constexpr std::uint64_t kMiB = 1024ull * 1024ull;
+constexpr std::uint64_t kGiB = 1024ull * kMiB;
+
+bool add_u64_checked(const U256& value,
+                     std::uint64_t addend,
+                     U256& result) {
+    return add_checked(value, U256::from_u64(addend), result);
+}
+
+bool u256_to_u64(const U256& value, std::uint64_t& result) {
+    if (value.limbs[1] != 0 || value.limbs[2] != 0 ||
+        value.limbs[3] != 0) {
+        return false;
+    }
+    result = value.limbs[0];
+    return true;
+}
+
+bool parse_u64_decimal(std::string_view text, std::uint64_t& result) {
+    if (text.empty()) {
+        return false;
+    }
+    std::uint64_t value = 0;
+    for (char ch : text) {
+        if (ch < '0' || ch > '9') {
+            return false;
+        }
+        const std::uint64_t digit = static_cast<std::uint64_t>(ch - '0');
+        if (value > (std::numeric_limits<std::uint64_t>::max() - digit) /
+                        10ull) {
+            return false;
+        }
+        value = value * 10ull + digit;
+    }
+    result = value;
+    return true;
+}
+
+std::string trim_lower(std::string_view text) {
+    std::size_t begin = 0;
+    std::size_t end = text.size();
+    while (begin < end &&
+           std::isspace(static_cast<unsigned char>(text[begin])) != 0) {
+        ++begin;
+    }
+    while (end > begin &&
+           std::isspace(static_cast<unsigned char>(text[end - 1])) != 0) {
+        --end;
+    }
+    std::string result(text.substr(begin, end - begin));
+    std::transform(result.begin(), result.end(), result.begin(), [](char ch) {
+        return static_cast<char>(
+            std::tolower(static_cast<unsigned char>(ch)));
+    });
+    return result;
+}
+
+bool checked_mul_u64(std::uint64_t left,
+                     std::uint64_t right,
+                     std::uint64_t& result) {
+    if (left != 0 &&
+        right > std::numeric_limits<std::uint64_t>::max() / left) {
+        return false;
+    }
+    result = left * right;
+    return true;
+}
+
+bool checked_add_u64(std::uint64_t left,
+                     std::uint64_t right,
+                     std::uint64_t& result) {
+    if (right > std::numeric_limits<std::uint64_t>::max() - left) {
+        return false;
+    }
+    result = left + right;
+    return true;
+}
+
+std::string format_rate(double value) {
+    static constexpr const char* kSuffixes[] = {
+        "", "K", "M", "G", "T", "P", "E"
+    };
+    std::size_t suffix = 0;
+    while (value >= 1000.0 &&
+           suffix + 1 < sizeof(kSuffixes) / sizeof(kSuffixes[0])) {
+        value /= 1000.0;
+        ++suffix;
+    }
+    std::ostringstream output;
+    output << std::fixed << std::setprecision(2) << value << kSuffixes[suffix];
+    return output.str();
+}
+
+std::uint64_t delta(std::uint64_t current, std::uint64_t base) {
+    return current >= base ? current - base : 0;
+}
+
+} // namespace
+
+void ModeProgress::begin(const char* mode_name,
+                         ProgressUnit primary_unit,
+                         ProgressPhase phase) {
+    active_.store(false, std::memory_order_release);
+    completed_candidates_.store(0, std::memory_order_relaxed);
+    primitive_operations_.store(0, std::memory_order_relaxed);
+    exact_verifications_.store(0, std::memory_order_relaxed);
+    logical_targets_.store(0, std::memory_order_relaxed);
+    resident_targets_.store(0, std::memory_order_relaxed);
+    solved_targets_.store(0, std::memory_order_relaxed);
+    founds_.store(0, std::memory_order_relaxed);
+    allocated_working_set_.store(0, std::memory_order_relaxed);
+    readback_ns_.store(0, std::memory_order_relaxed);
+    mode_name_.store(mode_name == nullptr ? "" : mode_name,
+                     std::memory_order_relaxed);
+    primary_unit_.store(static_cast<std::uint32_t>(primary_unit),
+                        std::memory_order_relaxed);
+    phase_.store(static_cast<std::uint32_t>(phase),
+                 std::memory_order_relaxed);
+    epoch_.fetch_add(1, std::memory_order_acq_rel);
+    active_.store(true, std::memory_order_release);
+}
+
+void ModeProgress::end() {
+    active_.store(false, std::memory_order_release);
+    phase_.store(static_cast<std::uint32_t>(ProgressPhase::Idle),
+                 std::memory_order_relaxed);
+    epoch_.fetch_add(1, std::memory_order_acq_rel);
+}
+
+void ModeProgress::set_phase(ProgressPhase phase) {
+    phase_.store(static_cast<std::uint32_t>(phase),
+                 std::memory_order_release);
+    epoch_.fetch_add(1, std::memory_order_acq_rel);
+}
+
+void ModeProgress::credit_completed(std::uint64_t candidates,
+                                    std::uint64_t primitive_operations,
+                                    std::uint64_t exact_verifications,
+                                    std::uint64_t readback_ns) {
+    completed_candidates_.fetch_add(candidates, std::memory_order_release);
+    primitive_operations_.fetch_add(
+        primitive_operations, std::memory_order_release);
+    exact_verifications_.fetch_add(
+        exact_verifications, std::memory_order_release);
+    readback_ns_.fetch_add(readback_ns, std::memory_order_release);
+}
+
+void ModeProgress::set_targets(std::uint64_t logical,
+                               std::uint64_t resident,
+                               std::uint64_t solved) {
+    logical_targets_.store(logical, std::memory_order_release);
+    resident_targets_.store(resident, std::memory_order_release);
+    solved_targets_.store(solved, std::memory_order_release);
+}
+
+void ModeProgress::set_founds(std::uint64_t founds) {
+    founds_.store(founds, std::memory_order_release);
+}
+
+void ModeProgress::set_allocated_working_set(std::uint64_t bytes) {
+    allocated_working_set_.store(bytes, std::memory_order_release);
+}
+
+ProgressSnapshot ModeProgress::snapshot() const {
+    ProgressSnapshot result;
+    result.active = active_.load(std::memory_order_acquire);
+    result.mode_name = mode_name_.load(std::memory_order_acquire);
+    result.phase = static_cast<ProgressPhase>(
+        phase_.load(std::memory_order_acquire));
+    result.primary_unit = static_cast<ProgressUnit>(
+        primary_unit_.load(std::memory_order_acquire));
+    result.epoch = epoch_.load(std::memory_order_acquire);
+    result.completed_candidates =
+        completed_candidates_.load(std::memory_order_acquire);
+    result.primitive_operations =
+        primitive_operations_.load(std::memory_order_acquire);
+    result.exact_verifications =
+        exact_verifications_.load(std::memory_order_acquire);
+    result.logical_targets =
+        logical_targets_.load(std::memory_order_acquire);
+    result.resident_targets =
+        resident_targets_.load(std::memory_order_acquire);
+    result.solved_targets =
+        solved_targets_.load(std::memory_order_acquire);
+    result.founds = founds_.load(std::memory_order_acquire);
+    result.allocated_working_set =
+        allocated_working_set_.load(std::memory_order_acquire);
+    result.readback_ns = readback_ns_.load(std::memory_order_acquire);
+    return result;
+}
+
+ModeProgress& global_mode_progress() {
+    static ModeProgress progress;
+    return progress;
+}
+
+const char* progress_phase_name(ProgressPhase phase) {
+    switch (phase) {
+    case ProgressPhase::Load: return "LOAD";
+    case ProgressPhase::Build: return "BUILD";
+    case ProgressPhase::Search: return "SEARCH";
+    case ProgressPhase::Verify: return "VERIFY";
+    case ProgressPhase::Idle:
+    default:
+        return "IDLE";
+    }
+}
+
+const char* progress_unit_name(ProgressUnit unit) {
+    switch (unit) {
+    case ProgressUnit::Key: return "Key";
+    case ProgressUnit::Address: return "Addr";
+    case ProgressUnit::Path: return "Path";
+    case ProgressUnit::Nonce: return "Nonce";
+    case ProgressUnit::Password: return "Pwd";
+    case ProgressUnit::Kdf: return "KDF";
+    case ProgressUnit::Verify: return "Verify";
+    case ProgressUnit::Candidate:
+    default:
+        return "Candidate";
+    }
+}
+
+std::string format_progress_line(const ProgressSnapshot& base,
+                                 const ProgressSnapshot& current,
+                                 double elapsed_seconds) {
+    if (elapsed_seconds <= 0.0) {
+        elapsed_seconds = 0.001;
+    }
+    const double completed_rate =
+        static_cast<double>(delta(current.completed_candidates,
+                                  base.completed_candidates)) /
+        elapsed_seconds;
+    const double primitive_rate =
+        static_cast<double>(delta(current.primitive_operations,
+                                  base.primitive_operations)) /
+        elapsed_seconds;
+    const double verify_rate =
+        static_cast<double>(delta(current.exact_verifications,
+                                  base.exact_verifications)) /
+        elapsed_seconds;
+
+    std::ostringstream output;
+    output << "[!] " << (current.mode_name == nullptr ? "" : current.mode_name)
+           << ":" << progress_phase_name(current.phase)
+           << " T:[" << current.completed_candidates << "]"
+           << " | S:[" << format_rate(completed_rate) << " "
+           << progress_unit_name(current.primary_unit) << "/s]";
+    if (current.primitive_operations != 0 ||
+        base.primitive_operations != 0) {
+        output << " [" << format_rate(primitive_rate) << " Primitive/s]";
+    }
+    if (current.exact_verifications != 0 ||
+        base.exact_verifications != 0) {
+        output << " [" << format_rate(verify_rate) << " Verify/s]";
+    }
+    output << " | A:[" << current.resident_targets
+           << "/" << current.logical_targets
+           << "] R:[" << current.solved_targets << "]"
+           << " | M:[" << std::fixed << std::setprecision(2)
+           << static_cast<double>(current.allocated_working_set) /
+                  static_cast<double>(kGiB)
+           << " GiB]"
+           << " RB:[" << std::fixed << std::setprecision(2)
+           << static_cast<double>(current.readback_ns) / 1000000.0
+           << " ms]"
+           << " | F:[" << current.founds << "] [!]";
+    return output.str();
+}
+
+bool parse_memory_spec(std::string_view text,
+                       MemorySpec& result,
+                       std::string& error) {
+    const std::string normalized = trim_lower(text);
+    if (normalized == "auto") {
+        result = MemorySpec{ MemoryKind::Auto, 0 };
+        return true;
+    }
+    if (normalized == "all") {
+        result = MemorySpec{ MemoryKind::All, 0 };
+        return true;
+    }
+    if (normalized.empty()) {
+        error = "memory value is empty";
+        return false;
+    }
+
+    if (normalized.back() == '%') {
+        std::uint64_t percent = 0;
+        if (!parse_u64_decimal(
+                std::string_view(normalized).substr(
+                    0, normalized.size() - 1), percent) ||
+            percent == 0 || percent > 100) {
+            error = "memory percentage must be between 1% and 100%";
+            return false;
+        }
+        result = MemorySpec{ MemoryKind::Percent, percent };
+        return true;
+    }
+
+    std::uint64_t multiplier = kMiB;
+    std::string_view digits(normalized);
+    if (normalized.size() >= 3) {
+        const std::string_view suffix =
+            std::string_view(normalized).substr(normalized.size() - 3);
+        if (suffix == "mib") {
+            digits = std::string_view(normalized).substr(
+                0, normalized.size() - 3);
+        } else if (suffix == "gib") {
+            digits = std::string_view(normalized).substr(
+                0, normalized.size() - 3);
+            multiplier = kGiB;
+        }
+    }
+    std::uint64_t count = 0;
+    std::uint64_t bytes = 0;
+    if (!parse_u64_decimal(digits, count) || count == 0 ||
+        !checked_mul_u64(count, multiplier, bytes)) {
+        error = "memory size must be a positive integer in MiB or GiB";
+        return false;
+    }
+    result = MemorySpec{ MemoryKind::Bytes, bytes };
+    return true;
+}
+
+bool resolve_memory_budget(const MemorySpec& spec,
+                           const std::vector<MemoryDeviceInfo>& devices,
+                           std::uint64_t mandatory_per_device,
+                           std::uint64_t host_resident_bytes,
+                           MemoryBudget& result,
+                           std::string& error,
+                           std::uint64_t runtime_reserve) {
+    if (devices.empty()) {
+        error = "no Metal devices were selected";
+        return false;
+    }
+
+    std::uint64_t minimum_free = std::numeric_limits<std::uint64_t>::max();
+    std::uint64_t minimum_max_buffer =
+        std::numeric_limits<std::uint64_t>::max();
+    bool any_unified = false;
+    for (const MemoryDeviceInfo& device : devices) {
+        const std::uint64_t total =
+            device.recommended_max_working_set != 0
+            ? device.recommended_max_working_set
+            : device.max_buffer_length;
+        const std::uint64_t free =
+            total > device.current_allocated
+            ? total - device.current_allocated
+            : 0;
+        minimum_free = std::min(minimum_free, free);
+        minimum_max_buffer =
+            std::min(minimum_max_buffer, device.max_buffer_length);
+        any_unified = any_unified || device.unified;
+    }
+    if (minimum_free <= runtime_reserve) {
+        error = "not enough recommended Metal working set after runtime reserve";
+        return false;
+    }
+
+    std::uint64_t requested = 0;
+    switch (spec.kind) {
+    case MemoryKind::Auto:
+        requested = std::min(
+            minimum_free / 2ull,
+            minimum_free - runtime_reserve);
+        break;
+    case MemoryKind::All:
+        requested = minimum_free - runtime_reserve;
+        break;
+    case MemoryKind::Percent:
+        requested = static_cast<std::uint64_t>(
+            (static_cast<unsigned __int128>(minimum_free) * spec.value) /
+            100ull);
+        break;
+    case MemoryKind::Bytes:
+        requested = spec.value;
+        break;
+    }
+    if (requested > minimum_free - runtime_reserve) {
+        error = "requested memory exceeds the remaining recommended Metal working set";
+        return false;
+    }
+
+    std::uint64_t replicated_mandatory = 0;
+    if (!checked_mul_u64(mandatory_per_device,
+                         static_cast<std::uint64_t>(devices.size()),
+                         replicated_mandatory)) {
+        error = "mandatory Metal memory size overflows 64 bits";
+        return false;
+    }
+    std::uint64_t mandatory_total = 0;
+    if (!checked_add_u64(replicated_mandatory,
+                         host_resident_bytes,
+                         mandatory_total)) {
+        error = "mandatory host and Metal memory size overflows 64 bits";
+        return false;
+    }
+
+    if (any_unified) {
+        if (mandatory_total > requested) {
+            error = "memory budget is smaller than mandatory unified-memory buffers";
+            return false;
+        }
+        const std::uint64_t device_pool = requested - host_resident_bytes;
+        result.per_device_budget =
+            device_pool / static_cast<std::uint64_t>(devices.size());
+        result.total_budget = requested;
+    } else {
+        if (mandatory_per_device > requested) {
+            error = "per-device memory budget is smaller than mandatory buffers";
+            return false;
+        }
+        result.per_device_budget = requested;
+        std::uint64_t replicated_budget = 0;
+        if (!checked_mul_u64(requested,
+                             static_cast<std::uint64_t>(devices.size()),
+                             replicated_budget) ||
+            !checked_add_u64(replicated_budget,
+                             host_resident_bytes,
+                             result.total_budget)) {
+            error = "aggregate Metal memory budget overflows 64 bits";
+            return false;
+        }
+    }
+
+    result.free_working_set = minimum_free;
+    result.max_buffer_length = minimum_max_buffer;
+    result.mandatory_bytes = mandatory_total;
+    result.unified = any_unified;
+    return true;
+}
+
+U256 U256::from_u64(std::uint64_t value) {
+    U256 result;
+    result.limbs[0] = value;
+    return result;
+}
+
+bool U256::is_zero() const {
+    return limbs[0] == 0 && limbs[1] == 0 &&
+           limbs[2] == 0 && limbs[3] == 0;
+}
+
+int compare(const U256& left, const U256& right) {
+    for (std::size_t i = 4; i-- > 0;) {
+        if (left.limbs[i] < right.limbs[i]) return -1;
+        if (left.limbs[i] > right.limbs[i]) return 1;
+    }
+    return 0;
+}
+
+bool add_checked(const U256& left, const U256& right, U256& result) {
+    unsigned __int128 carry = 0;
+    for (std::size_t i = 0; i < result.limbs.size(); ++i) {
+        const unsigned __int128 sum =
+            static_cast<unsigned __int128>(left.limbs[i]) +
+            right.limbs[i] + carry;
+        result.limbs[i] = static_cast<std::uint64_t>(sum);
+        carry = sum >> 64u;
+    }
+    return carry == 0;
+}
+
+bool subtract_checked(const U256& left,
+                      const U256& right,
+                      U256& result) {
+    if (compare(left, right) < 0) {
+        result = U256{};
+        return false;
+    }
+    std::uint64_t borrow = 0;
+    for (std::size_t i = 0; i < result.limbs.size(); ++i) {
+        const std::uint64_t right_with_borrow = right.limbs[i] + borrow;
+        const bool carry_from_borrow =
+            borrow != 0 && right_with_borrow == 0;
+        const bool next_borrow =
+            carry_from_borrow || left.limbs[i] < right_with_borrow;
+        result.limbs[i] = left.limbs[i] - right_with_borrow;
+        borrow = next_borrow ? 1u : 0u;
+    }
+    return borrow == 0;
+}
+
+bool multiply_checked(const U256& value,
+                      std::uint64_t factor,
+                      U256& result) {
+    unsigned __int128 carry = 0;
+    for (std::size_t i = 0; i < result.limbs.size(); ++i) {
+        const unsigned __int128 product =
+            static_cast<unsigned __int128>(value.limbs[i]) * factor +
+            carry;
+        result.limbs[i] = static_cast<std::uint64_t>(product);
+        carry = product >> 64u;
+    }
+    return carry == 0;
+}
+
+bool divide(const U256& value,
+            std::uint64_t divisor,
+            U256& quotient,
+            std::uint64_t& remainder) {
+    if (divisor == 0) {
+        quotient = U256{};
+        remainder = 0;
+        return false;
+    }
+    unsigned __int128 carry = 0;
+    for (std::size_t i = 4; i-- > 0;) {
+        const unsigned __int128 current =
+            (carry << 64u) | value.limbs[i];
+        quotient.limbs[i] =
+            static_cast<std::uint64_t>(current / divisor);
+        carry = current % divisor;
+    }
+    remainder = static_cast<std::uint64_t>(carry);
+    return true;
+}
+
+bool parse_u256(std::string_view text, U256& result, std::string& error) {
+    const std::string normalized = trim_lower(text);
+    if (normalized.empty()) {
+        error = "U256 value is empty";
+        return false;
+    }
+    if (normalized.rfind("2^", 0) == 0) {
+        std::uint64_t exponent = 0;
+        if (!parse_u64_decimal(std::string_view(normalized).substr(2),
+                               exponent) ||
+            exponent > 255) {
+            error = "U256 exponent must be between 0 and 255";
+            return false;
+        }
+        result = U256{};
+        result.limbs[exponent / 64u] =
+            1ull << static_cast<unsigned int>(exponent % 64u);
+        return true;
+    }
+
+    const bool hexadecimal = normalized.rfind("0x", 0) == 0;
+    const std::string_view digits = hexadecimal
+        ? std::string_view(normalized).substr(2)
+        : std::string_view(normalized);
+    if (digits.empty()) {
+        error = "U256 value has no digits";
+        return false;
+    }
+
+    result = U256{};
+    const std::uint64_t base = hexadecimal ? 16ull : 10ull;
+    for (char ch : digits) {
+        std::uint64_t digit = 0;
+        if (ch >= '0' && ch <= '9') {
+            digit = static_cast<std::uint64_t>(ch - '0');
+        } else if (hexadecimal && ch >= 'a' && ch <= 'f') {
+            digit = static_cast<std::uint64_t>(ch - 'a' + 10);
+        } else {
+            error = "U256 value contains an invalid digit";
+            return false;
+        }
+        if (digit >= base) {
+            error = "U256 value contains an invalid digit";
+            return false;
+        }
+        U256 multiplied;
+        U256 next;
+        if (!multiply_checked(result, base, multiplied) ||
+            !add_u64_checked(multiplied, digit, next)) {
+            error = "U256 value overflows 256 bits";
+            return false;
+        }
+        result = next;
+    }
+    return true;
+}
+
+std::string u256_hex(const U256& value) {
+    std::ostringstream output;
+    output << std::hex << std::setfill('0');
+    for (std::size_t i = 4; i-- > 0;) {
+        output << std::setw(16) << value.limbs[i];
+    }
+    return output.str();
+}
+
+bool MixedRadixDomain::reset(const std::vector<std::uint64_t>& radices,
+                             std::string& error) {
+    radices_.clear();
+    size_ = U256{};
+    if (radices.empty()) {
+        error = "mixed-radix domain requires at least one radix";
+        return false;
+    }
+    U256 total = U256::from_u64(1);
+    for (std::uint64_t radix : radices) {
+        if (radix == 0) {
+            error = "mixed-radix values must be non-zero";
+            return false;
+        }
+        U256 next;
+        if (!multiply_checked(total, radix, next)) {
+            error = "mixed-radix domain exceeds 256 bits";
+            return false;
+        }
+        total = next;
+    }
+    radices_ = radices;
+    size_ = total;
+    return true;
+}
+
+const U256& MixedRadixDomain::size() const {
+    return size_;
+}
+
+const std::vector<std::uint64_t>& MixedRadixDomain::radices() const {
+    return radices_;
+}
+
+bool MixedRadixDomain::decode(const U256& ordinal,
+                              std::vector<std::uint64_t>& digits,
+                              std::string& error) const {
+    if (radices_.empty() || compare(ordinal, size_) >= 0) {
+        error = "mixed-radix ordinal is outside the domain";
+        return false;
+    }
+    digits.assign(radices_.size(), 0);
+    U256 current = ordinal;
+    for (std::size_t i = 0; i < radices_.size(); ++i) {
+        U256 quotient;
+        std::uint64_t remainder = 0;
+        if (!divide(current, radices_[i], quotient, remainder)) {
+            error = "mixed-radix division failed";
+            return false;
+        }
+        digits[i] = remainder;
+        current = quotient;
+    }
+    return true;
+}
+
+bool MixedRadixDomain::split(std::uint64_t shard_index,
+                             std::uint64_t shard_count,
+                             U256& begin,
+                             U256& count,
+                             std::string& error) const {
+    if (radices_.empty() || shard_count == 0 ||
+        shard_index >= shard_count) {
+        error = "invalid mixed-radix shard";
+        return false;
+    }
+    U256 quotient;
+    std::uint64_t remainder = 0;
+    if (!divide(size_, shard_count, quotient, remainder)) {
+        error = "mixed-radix shard division failed";
+        return false;
+    }
+    U256 scaled;
+    if (!multiply_checked(quotient, shard_index, scaled) ||
+        !add_u64_checked(
+            scaled, std::min(shard_index, remainder), begin)) {
+        error = "mixed-radix shard offset overflows 256 bits";
+        return false;
+    }
+    if (!add_u64_checked(
+            quotient, shard_index < remainder ? 1ull : 0ull, count)) {
+        error = "mixed-radix shard length overflows 256 bits";
+        return false;
+    }
+    return true;
+}
+
+bool MixedRadixDomain::next_window(const U256& cursor,
+                                   std::uint64_t maximum_items,
+                                   U256& end,
+                                   std::uint64_t& count,
+                                   std::string& error) const {
+    if (maximum_items == 0 || compare(cursor, size_) > 0) {
+        error = "invalid mixed-radix window";
+        return false;
+    }
+    U256 remaining;
+    if (!subtract_checked(size_, cursor, remaining)) {
+        error = "mixed-radix cursor is outside the domain";
+        return false;
+    }
+    if (remaining.is_zero()) {
+        end = cursor;
+        count = 0;
+        return true;
+    }
+    const U256 maximum = U256::from_u64(maximum_items);
+    if (compare(remaining, maximum) <= 0) {
+        if (!u256_to_u64(remaining, count)) {
+            error = "mixed-radix final window exceeds 64 bits";
+            return false;
+        }
+    } else {
+        count = maximum_items;
+    }
+    if (!add_u64_checked(cursor, count, end)) {
+        error = "mixed-radix window end overflows 256 bits";
+        return false;
+    }
+    return true;
+}
+
+void print_help_section(FILE* output,
+                        const char* title,
+                        std::initializer_list<const char*> lines) {
+    if (output == nullptr) {
+        return;
+    }
+    std::fprintf(output, "[!] %s [!]\n", title == nullptr ? "" : title);
+    for (const char* line : lines) {
+        std::fprintf(output, "[!] %s\n", line == nullptr ? "" : line);
+    }
+}
+
+} // namespace modeinfra

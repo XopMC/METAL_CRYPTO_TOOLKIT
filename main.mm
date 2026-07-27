@@ -58995,6 +58995,14 @@ void SpeedThreadFunc()
     uint64_t bsgsLastPrintedOperations = bsgsBaseOperations;
     steady_clock::time_point bsgsBaseTime = steady_clock::now();
     steady_clock::time_point bsgsLastPrintTime = bsgsBaseTime;
+    modeinfra::ProgressSnapshot modeProgressBase =
+        modeinfra::global_mode_progress().snapshot();
+    uint64_t modeProgressEpoch = modeProgressBase.epoch;
+    steady_clock::time_point modeProgressBaseTime = steady_clock::now();
+    steady_clock::time_point modeProgressLastPrintTime =
+        modeProgressBaseTime;
+    uint64_t modeProgressLastCompleted =
+        modeProgressBase.completed_candidates;
 
     while (isRun)
     {
@@ -59077,6 +59085,41 @@ void SpeedThreadFunc()
                     kangarooLastPrintedOperations = totalOperations;
                     kangarooLastPrintTime = nowTime;
                 }
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            continue;
+        }
+        const modeinfra::ProgressSnapshot modeProgress =
+            modeinfra::global_mode_progress().snapshot();
+        if (modeProgress.active)
+        {
+            const auto nowTime = steady_clock::now();
+            if (modeProgress.epoch != modeProgressEpoch)
+            {
+                modeProgressEpoch = modeProgress.epoch;
+                modeProgressBase = modeProgress;
+                modeProgressBaseTime = nowTime;
+                modeProgressLastPrintTime = nowTime;
+                modeProgressLastCompleted =
+                    modeProgress.completed_candidates;
+            }
+            const double printElapsed =
+                duration_cast<duration<double>>(
+                    nowTime - modeProgressLastPrintTime).count();
+            if (printElapsed >= 1.0 &&
+                modeProgress.completed_candidates !=
+                    modeProgressLastCompleted)
+            {
+                const double elapsed =
+                    duration_cast<duration<double>>(
+                        nowTime - modeProgressBaseTime).count();
+                const std::string line = modeinfra::format_progress_line(
+                    modeProgressBase, modeProgress, elapsed);
+                std::printf("%s           \r", line.c_str());
+                std::fflush(stdout);
+                modeProgressLastCompleted =
+                    modeProgress.completed_candidates;
+                modeProgressLastPrintTime = nowTime;
             }
             std::this_thread::sleep_for(std::chrono::milliseconds(10));
             continue;

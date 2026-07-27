@@ -7,6 +7,10 @@
 #include <cstring>
 #include <string>
 #include <array>
+#include <atomic>
+#include <initializer_list>
+#include <string_view>
+#include <vector>
 #include <type_traits>
 #include <utility>
 
@@ -283,3 +287,179 @@ template <typename T>
 inline metalError_t metalMallocPitch(T** ptr, size_t* pitch, size_t width, size_t height) {
     return metalMallocPitch(reinterpret_cast<void**>(ptr), pitch, width, height);
 }
+
+namespace modeinfra {
+
+enum class ProgressPhase : std::uint32_t {
+    Idle = 0,
+    Load = 1,
+    Build = 2,
+    Search = 3,
+    Verify = 4,
+};
+
+enum class ProgressUnit : std::uint32_t {
+    Candidate = 0,
+    Key = 1,
+    Address = 2,
+    Path = 3,
+    Nonce = 4,
+    Password = 5,
+    Kdf = 6,
+    Verify = 7,
+};
+
+struct ProgressSnapshot {
+    bool active = false;
+    const char* mode_name = "";
+    ProgressPhase phase = ProgressPhase::Idle;
+    ProgressUnit primary_unit = ProgressUnit::Candidate;
+    std::uint64_t epoch = 0;
+    std::uint64_t completed_candidates = 0;
+    std::uint64_t primitive_operations = 0;
+    std::uint64_t exact_verifications = 0;
+    std::uint64_t logical_targets = 0;
+    std::uint64_t resident_targets = 0;
+    std::uint64_t solved_targets = 0;
+    std::uint64_t founds = 0;
+    std::uint64_t allocated_working_set = 0;
+    std::uint64_t readback_ns = 0;
+};
+
+class ModeProgress final {
+public:
+    // mode_name must point to storage that remains valid until end().
+    void begin(const char* mode_name,
+               ProgressUnit primary_unit,
+               ProgressPhase phase = ProgressPhase::Search);
+    void end();
+    void set_phase(ProgressPhase phase);
+    void credit_completed(std::uint64_t candidates,
+                          std::uint64_t primitive_operations = 0,
+                          std::uint64_t exact_verifications = 0,
+                          std::uint64_t readback_ns = 0);
+    void set_targets(std::uint64_t logical,
+                     std::uint64_t resident,
+                     std::uint64_t solved);
+    void set_founds(std::uint64_t founds);
+    void set_allocated_working_set(std::uint64_t bytes);
+    ProgressSnapshot snapshot() const;
+
+private:
+    std::atomic<bool> active_{ false };
+    std::atomic<const char*> mode_name_{ "" };
+    std::atomic<std::uint32_t> phase_{
+        static_cast<std::uint32_t>(ProgressPhase::Idle)
+    };
+    std::atomic<std::uint32_t> primary_unit_{
+        static_cast<std::uint32_t>(ProgressUnit::Candidate)
+    };
+    std::atomic<std::uint64_t> epoch_{ 0 };
+    std::atomic<std::uint64_t> completed_candidates_{ 0 };
+    std::atomic<std::uint64_t> primitive_operations_{ 0 };
+    std::atomic<std::uint64_t> exact_verifications_{ 0 };
+    std::atomic<std::uint64_t> logical_targets_{ 0 };
+    std::atomic<std::uint64_t> resident_targets_{ 0 };
+    std::atomic<std::uint64_t> solved_targets_{ 0 };
+    std::atomic<std::uint64_t> founds_{ 0 };
+    std::atomic<std::uint64_t> allocated_working_set_{ 0 };
+    std::atomic<std::uint64_t> readback_ns_{ 0 };
+};
+
+ModeProgress& global_mode_progress();
+const char* progress_phase_name(ProgressPhase phase);
+const char* progress_unit_name(ProgressUnit unit);
+std::string format_progress_line(const ProgressSnapshot& base,
+                                 const ProgressSnapshot& current,
+                                 double elapsed_seconds);
+
+enum class MemoryKind : std::uint32_t {
+    Auto = 0,
+    All = 1,
+    Percent = 2,
+    Bytes = 3,
+};
+
+struct MemorySpec {
+    MemoryKind kind = MemoryKind::Auto;
+    std::uint64_t value = 0;
+};
+
+struct MemoryDeviceInfo {
+    std::uint64_t recommended_max_working_set = 0;
+    std::uint64_t current_allocated = 0;
+    std::uint64_t max_buffer_length = 0;
+    bool unified = true;
+};
+
+struct MemoryBudget {
+    std::uint64_t free_working_set = 0;
+    std::uint64_t total_budget = 0;
+    std::uint64_t per_device_budget = 0;
+    std::uint64_t max_buffer_length = 0;
+    std::uint64_t mandatory_bytes = 0;
+    bool unified = true;
+};
+
+bool parse_memory_spec(std::string_view text,
+                       MemorySpec& result,
+                       std::string& error);
+bool resolve_memory_budget(const MemorySpec& spec,
+                           const std::vector<MemoryDeviceInfo>& devices,
+                           std::uint64_t mandatory_per_device,
+                           std::uint64_t host_resident_bytes,
+                           MemoryBudget& result,
+                           std::string& error,
+                           std::uint64_t runtime_reserve =
+                               512ull * 1024ull * 1024ull);
+
+struct U256 {
+    std::array<std::uint64_t, 4> limbs{};
+
+    static U256 from_u64(std::uint64_t value);
+    bool is_zero() const;
+};
+
+int compare(const U256& left, const U256& right);
+bool add_checked(const U256& left, const U256& right, U256& result);
+bool subtract_checked(const U256& left, const U256& right, U256& result);
+bool multiply_checked(const U256& value,
+                      std::uint64_t factor,
+                      U256& result);
+bool divide(const U256& value,
+            std::uint64_t divisor,
+            U256& quotient,
+            std::uint64_t& remainder);
+bool parse_u256(std::string_view text, U256& result, std::string& error);
+std::string u256_hex(const U256& value);
+
+class MixedRadixDomain final {
+public:
+    bool reset(const std::vector<std::uint64_t>& radices,
+               std::string& error);
+    const U256& size() const;
+    const std::vector<std::uint64_t>& radices() const;
+    bool decode(const U256& ordinal,
+                std::vector<std::uint64_t>& digits,
+                std::string& error) const;
+    bool split(std::uint64_t shard_index,
+               std::uint64_t shard_count,
+               U256& begin,
+               U256& count,
+               std::string& error) const;
+    bool next_window(const U256& cursor,
+                     std::uint64_t maximum_items,
+                     U256& end,
+                     std::uint64_t& count,
+                     std::string& error) const;
+
+private:
+    std::vector<std::uint64_t> radices_;
+    U256 size_{};
+};
+
+void print_help_section(FILE* output,
+                        const char* title,
+                        std::initializer_list<const char*> lines);
+
+} // namespace modeinfra
