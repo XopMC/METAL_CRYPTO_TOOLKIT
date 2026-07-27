@@ -58,6 +58,11 @@ struct InputTemplate {
     std::string text;
     std::string source;
     std::vector<std::uint32_t> missing;
+    std::vector<std::uint8_t> device_text;
+    std::array<std::uint8_t, 128> base58_prefix_little{};
+    std::uint32_t base58_prefix_chars = 0u;
+    std::uint32_t base58_prefix_little_len = 0u;
+    std::uint32_t base58_prefix_leading = 0u;
     modeinfra::MixedRadixDomain domain;
     modeinfra::U256 combinations = modeinfra::U256::from_u64(1u);
 };
@@ -261,6 +266,55 @@ bool is_hex_or_missing(char c) {
         std::isxdigit(static_cast<unsigned char>(c)) != 0;
 }
 
+int base58_digit(char c) {
+    const char* found = std::strchr(kBase58Alphabet, c);
+    return found == nullptr ? -1 : static_cast<int>(found - kBase58Alphabet);
+}
+
+bool prepare_base58_template(InputTemplate& item, std::string& error) {
+    item.device_text.resize(item.text.size(), 0u);
+    for (std::size_t i = 0u; i < item.text.size(); ++i) {
+        if (item.text[i] == '?') continue;
+        const int digit = base58_digit(item.text[i]);
+        if (digit < 0) {
+            error = item.source + ": Base58 template contains an invalid character";
+            return false;
+        }
+        item.device_text[i] = static_cast<std::uint8_t>(digit);
+    }
+    item.base58_prefix_chars = item.missing.empty()
+        ? static_cast<std::uint32_t>(item.text.size())
+        : item.missing.front();
+    while (item.base58_prefix_leading < item.base58_prefix_chars &&
+           item.device_text[item.base58_prefix_leading] == 0u) {
+        ++item.base58_prefix_leading;
+    }
+    for (std::uint32_t i = item.base58_prefix_leading;
+         i < item.base58_prefix_chars; ++i) {
+        std::uint32_t carry = item.device_text[i];
+        for (std::uint32_t j = 0u;
+             j < item.base58_prefix_little_len; ++j) {
+            carry +=
+                static_cast<std::uint32_t>(item.base58_prefix_little[j]) *
+                58u;
+            item.base58_prefix_little[j] =
+                static_cast<std::uint8_t>(carry & 0xffu);
+            carry >>= 8u;
+        }
+        while (carry != 0u) {
+            if (item.base58_prefix_little_len >=
+                item.base58_prefix_little.size()) {
+                error = item.source + ": Base58 prefix exceeds 128 decoded bytes";
+                return false;
+            }
+            item.base58_prefix_little[item.base58_prefix_little_len++] =
+                static_cast<std::uint8_t>(carry & 0xffu);
+            carry >>= 8u;
+        }
+    }
+    return true;
+}
+
 bool add_template(const std::string& raw,
                   const std::string& source,
                   RepairType type,
@@ -288,6 +342,7 @@ bool add_template(const std::string& raw,
                 return false;
             }
         }
+        item.device_text.assign(item.text.begin(), item.text.end());
     } else {
         if (item.text.empty() || item.text.size() > 128u) {
             error = source + ": Base58 template length must be 1..128";
@@ -311,6 +366,7 @@ bool add_template(const std::string& raw,
             std::to_string(kMaximumMissing) + " unknown positions are supported";
         return false;
     }
+    if (!raw_hex && !prepare_base58_template(item, error)) return false;
     const std::uint64_t radix = raw_hex ? 16u : 58u;
     const std::vector<std::uint64_t> radices(
         std::max<std::size_t>(1u, item.missing.size()),
@@ -460,11 +516,6 @@ bool load_targets(const Options& options,
         return false;
     }
     return true;
-}
-
-int base58_digit(char c) {
-    const char* found = std::strchr(kBase58Alphabet, c);
-    return found == nullptr ? -1 : static_cast<int>(found - kBase58Alphabet);
 }
 
 bool decode_base58(const std::string& text,
@@ -684,6 +735,7 @@ struct DeviceBuffers {
     std::uint8_t* template_text = nullptr;
     std::uint32_t* missing = nullptr;
     std::uint32_t* start_digits = nullptr;
+    std::uint8_t* base58_prefix_little = nullptr;
     std::uint8_t* target = nullptr;
     secp256k1_ge_storage* precompute = nullptr;
     Hit* hits = nullptr;
@@ -694,6 +746,7 @@ struct DeviceBuffers {
         if (template_text) metalFree(template_text);
         if (missing) metalFree(missing);
         if (start_digits) metalFree(start_digits);
+        if (base58_prefix_little) metalFree(base58_prefix_little);
         if (target) metalFree(target);
         if (precompute) metalFree(precompute);
         if (hits) metalFree(hits);
@@ -701,6 +754,7 @@ struct DeviceBuffers {
         template_text = nullptr;
         missing = nullptr;
         start_digits = nullptr;
+        base58_prefix_little = nullptr;
         target = nullptr;
         precompute = nullptr;
         hits = nullptr;
@@ -711,6 +765,7 @@ struct DeviceBuffers {
 };
 
 bool prepare_buffers(const InputTemplate& item,
+                     RepairType type,
                      const Target* target,
                      const HostPrecompute* precompute,
                      DeviceBuffers& buffers,
@@ -735,7 +790,7 @@ bool prepare_buffers(const InputTemplate& item,
     }
     buffers.allocated += template_bytes + missing_bytes * 2u +
         sizeof(Hit) * kHitCapacity + sizeof(std::uint32_t);
-    if (!metal_ok(metalMemcpy(buffers.template_text, item.text.data(),
+    if (!metal_ok(metalMemcpy(buffers.template_text, item.device_text.data(),
                               template_bytes, metalMemcpyHostToDevice),
                   "upload keyrepair template", error) ||
         (!item.missing.empty() &&
@@ -744,6 +799,23 @@ bool prepare_buffers(const InputTemplate& item,
                                metalMemcpyHostToDevice),
                    "upload keyrepair positions", error))) {
         return false;
+    }
+    if (type != RepairType::RawPrivate &&
+        type != RepairType::RawPublic) {
+        if (!allocate_device(
+                buffers.base58_prefix_little,
+                item.base58_prefix_little.size(),
+                "allocate keyrepair Base58 prefix", error) ||
+            !metal_ok(
+                metalMemcpy(
+                    buffers.base58_prefix_little,
+                    item.base58_prefix_little.data(),
+                    item.base58_prefix_little.size(),
+                    metalMemcpyHostToDevice),
+                "upload keyrepair Base58 prefix", error)) {
+            return false;
+        }
+        buffers.allocated += item.base58_prefix_little.size();
     }
     if (target != nullptr) {
         if (!allocate_device(buffers.target, target->serialized.size(),
@@ -918,6 +990,10 @@ bool launch_batch(RepairType type,
                               buffers.template_text, text_len,
                               buffers.missing, missing_count, kind,
                               buffers.start_digits, range_count,
+                              buffers.base58_prefix_little,
+                              item.base58_prefix_chars,
+                              item.base58_prefix_little_len,
+                              item.base58_prefix_leading,
                               buffers.hits, buffers.hit_count, kHitCapacity);
     }
     if (!metal_ok(status, "launch keyrepair kernel", error) ||
@@ -1166,7 +1242,8 @@ int run(int argc, char** argv, const RuntimeHooks& hooks) {
                     return 1;
                 }
                 DeviceBuffers buffers;
-                if (!prepare_buffers(item, target, host_precompute,
+                if (!prepare_buffers(item, options.type, target,
+                                     host_precompute,
                                      buffers, error)) {
                     progress.end();
                     std::cerr << "[!] KeyRepair runtime error: "

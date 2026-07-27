@@ -4,12 +4,6 @@
 
 using namespace metal;
 
-constant uchar KEYREPAIR_BASE58[58] = {
-    '1','2','3','4','5','6','7','8','9',
-    'A','B','C','D','E','F','G','H','J','K','L','M','N','P','Q','R','S','T','U','V','W','X','Y','Z',
-    'a','b','c','d','e','f','g','h','i','j','k','m','n','o','p','q','r','s','t','u','v','w','x','y','z'
-};
-
 enum KeyRepairType : uint {
     KEYREPAIR_WIF = 1u,
     KEYREPAIR_XPRV = 2u,
@@ -25,13 +19,6 @@ struct KeyRepairHit {
     uint kind;
     uchar decoded[128];
 };
-
-static inline int keyrepair_base58_digit(uchar c) {
-    for (int i = 0; i < 58; ++i) {
-        if (KEYREPAIR_BASE58[i] == c) return i;
-    }
-    return -1;
-}
 
 static inline uint keyrepair_be32(const thread uchar* p) {
     return (uint(p[0]) << 24u) | (uint(p[1]) << 16u) |
@@ -84,22 +71,56 @@ static inline void keyrepair_sha256(const thread uchar* data,
                                ulong(len), out);
 }
 
-static inline bool keyrepair_decode_base58(const thread uchar* text,
-                                           uint text_len,
-                                           thread uchar decoded[128],
-                                           thread uint& decoded_len) {
-    uchar little[128];
-    for (uint i = 0u; i < 128u; ++i) {
-        little[i] = 0u;
-        decoded[i] = 0u;
+static inline bool keyrepair_decode_base58_suffix(
+        const device uchar* template_digits,
+        uint text_len,
+        const device uint* missing_positions,
+        uint missing_count,
+        const device uint* start_digits,
+        ulong ordinal,
+        const device uchar* prefix_little,
+        uint prefix_chars,
+        uint prefix_little_len,
+        uint prefix_leading,
+        thread uchar decoded[128],
+        thread uint& decoded_len) {
+    if (prefix_chars > text_len || prefix_little_len > 128u ||
+        prefix_leading > prefix_chars || missing_count > 15u) {
+        return false;
     }
-    uint leading = 0u;
-    while (leading < text_len && text[leading] == '1') ++leading;
-    uint little_len = 0u;
-    for (uint i = leading; i < text_len; ++i) {
-        const int digit = keyrepair_base58_digit(text[i]);
-        if (digit < 0) return false;
-        uint carry = uint(digit);
+    uchar candidate_digits[15];
+    ulong ordinal_carry = ordinal;
+    for (uint i = 0u; i < missing_count; ++i) {
+        const ulong sum = ulong(start_digits[i]) + ordinal_carry;
+        candidate_digits[i] = uchar(sum % 58u);
+        ordinal_carry = sum / 58u;
+    }
+    if (ordinal_carry != 0u) return false;
+
+    uchar little[128];
+    for (uint i = 0u; i < prefix_little_len; ++i) {
+        little[i] = prefix_little[i];
+    }
+    uint leading = prefix_leading;
+    uint little_len = prefix_little_len;
+    uint missing_index = 0u;
+    bool still_leading =
+        prefix_leading == prefix_chars && prefix_little_len == 0u;
+    for (uint i = prefix_chars; i < text_len; ++i) {
+        uint digit = 0u;
+        if (missing_index < missing_count &&
+            missing_positions[missing_index] == i) {
+            digit = uint(candidate_digits[missing_index++]);
+        } else {
+            digit = uint(template_digits[i]);
+            if (digit >= 58u) return false;
+        }
+        if (still_leading && digit == 0u) {
+            ++leading;
+            continue;
+        }
+        still_leading = false;
+        uint carry = digit;
         for (uint j = 0u; j < little_len; ++j) {
             carry += uint(little[j]) * 58u;
             little[j] = uchar(carry & 0xffu);
@@ -111,7 +132,10 @@ static inline bool keyrepair_decode_base58(const thread uchar* text,
             carry >>= 8u;
         }
     }
-    if (leading + little_len > 128u) return false;
+    if (missing_index != missing_count || leading + little_len > 128u) {
+        return false;
+    }
+    for (uint i = 0u; i < leading; ++i) decoded[i] = 0u;
     for (uint i = 0u; i < little_len; ++i) {
         decoded[leading + i] = little[little_len - 1u - i];
     }
@@ -177,29 +201,25 @@ kernel void keyRepairBase58Check(const device uchar* template_text [[buffer(0)]]
                                  constant uint& kind [[buffer(4)]],
                                  const device uint* start_digits [[buffer(5)]],
                                  constant ulong& range_count [[buffer(6)]],
-                                 device KeyRepairHit* hits [[buffer(7)]],
-                                 device atomic_uint* hit_count [[buffer(8)]],
-                                 constant uint& hit_capacity [[buffer(9)]],
+                                 const device uchar* prefix_little [[buffer(7)]],
+                                 constant uint& prefix_chars [[buffer(8)]],
+                                 constant uint& prefix_little_len [[buffer(9)]],
+                                 constant uint& prefix_leading [[buffer(10)]],
+                                 device KeyRepairHit* hits [[buffer(11)]],
+                                 device atomic_uint* hit_count [[buffer(12)]],
+                                 constant uint& hit_capacity [[buffer(13)]],
                                  uint tid [[thread_position_in_grid]]) {
     if (ulong(tid) >= range_count || text_len == 0u || text_len > 128u ||
         missing_count > 15u) {
         return;
     }
     const ulong ordinal = ulong(tid);
-    ulong carry = ordinal;
-    uchar text[128];
-    for (uint i = 0u; i < text_len; ++i) text[i] = template_text[i];
-    for (uint i = 0u; i < missing_count; ++i) {
-        const uint pos = missing_positions[i];
-        if (pos >= text_len) return;
-        const ulong sum = ulong(start_digits[i]) + carry;
-        text[pos] = KEYREPAIR_BASE58[sum % 58u];
-        carry = sum / 58u;
-    }
-    if (carry != 0u) return;
     uchar decoded[128];
     uint decoded_len = 0u;
-    if (!keyrepair_decode_base58(text, text_len, decoded, decoded_len) ||
+    if (!keyrepair_decode_base58_suffix(
+            template_text, text_len, missing_positions, missing_count,
+            start_digits, ordinal, prefix_little, prefix_chars,
+            prefix_little_len, prefix_leading, decoded, decoded_len) ||
         !keyrepair_valid_structure(decoded, decoded_len, kind)) {
         return;
     }
