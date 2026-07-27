@@ -1772,8 +1772,12 @@ bool launch_batch(const Options& options,
     const std::uint32_t windows = precompute.windows;
     const std::uint32_t window_bits = precompute.bits;
     const std::uint64_t range_count = count;
+    constexpr std::uint64_t kCandidatesPerThread = 8u;
+    const std::uint64_t thread_count =
+        (count + kCandidatesPerThread - 1u) /
+        kCandidatesPerThread;
     const std::uint32_t grid = static_cast<std::uint32_t>(
-        (count + kThreadgroupSize - 1u) /
+        (thread_count + kThreadgroupSize - 1u) /
         kThreadgroupSize);
     const metalError_t launched = metal_launch(
         "nonceSearch", grid, kThreadgroupSize,
