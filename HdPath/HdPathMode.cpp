@@ -1249,13 +1249,10 @@ bool prepare_buffers(
         return false;
     }
     const std::array<std::uint8_t, 32> zero_private{};
-    const std::array<std::uint8_t, 33> zero_public{};
     const std::uint8_t* private_source =
         root.kind == RootKind::Private
         ? root.private_key.key.data() : zero_private.data();
-    const std::uint8_t* public_source =
-        root.kind == RootKind::Public
-        ? root.public_key.key.data() : zero_public.data();
+    const std::uint8_t* public_source = root.public_key.key.data();
     const std::uint8_t* chain_source =
         root.kind == RootKind::Private
         ? root.private_key.chain.data() : root.public_key.chain.data();
@@ -1539,6 +1536,13 @@ int run(int argc, char** argv, const RuntimeHooks& hooks) {
     HostPrecompute precompute;
     if (!build_precompute(precompute, error)) {
         std::cerr << "[!] HDPath runtime error: " << error << " [!]\n";
+        return 1;
+    }
+    if (root.kind == RootKind::Private &&
+        !derive_public_from_private(
+            root.private_key.key, precompute, root.public_key.key)) {
+        std::cerr << "[!] HDPath runtime error: cannot derive root public "
+                     "key [!]\n";
         return 1;
     }
 

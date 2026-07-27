@@ -159,12 +159,16 @@ static inline bool hd_ckd_private_once(
     uint window_count,
     uint window_bits,
     const thread extended_private_key_t& parent,
+    const thread uchar parent_public[33],
+    bool has_parent_public,
     uint index,
     thread extended_private_key_t& child) {
     uchar data[33];
     if ((index & 0x80000000u) != 0u) {
         data[0] = 0u;
         for (uint i = 0u; i < 32u; ++i) data[i + 1u] = parent.key[i];
+    } else if (has_parent_public) {
+        hd_copy_thread(data, parent_public, 33u);
     } else {
         secp256k1_pubkey public_key;
         if (!hd_public_from_private(
@@ -195,6 +199,8 @@ static inline bool hd_ckd_private(
     uint window_count,
     uint window_bits,
     const thread extended_private_key_t& parent,
+    const thread uchar parent_public[33],
+    bool has_parent_public,
     uint initial_index,
     thread extended_private_key_t& child) {
     uint index = initial_index;
@@ -203,7 +209,8 @@ static inline bool hd_ckd_private(
     for (;;) {
         if (hd_ckd_private_once(
                 precompute, pitch, window_count, window_bits,
-                parent, index, child)) {
+                parent, parent_public, has_parent_public,
+                index, child)) {
             return true;
         }
         if (index == boundary) return false;
@@ -346,11 +353,14 @@ kernel void workerHdPath(
         extended_private_key_t current;
         hd_copy_device_to_thread(current.key, root_private, 32u);
         hd_copy_device_to_thread(current.chain_code, root_chain, 32u);
+        uchar root_public_key[33];
+        hd_copy_device_to_thread(root_public_key, root_public, 33u);
         for (uint i = 0u; i < component_count && valid; ++i) {
             extended_private_key_t next;
             valid = hd_ckd_private(
                 precompute, size_t(pitch_value),
                 window_count, window_bits, current,
+                root_public_key, i == 0u,
                 indexes[i], next);
             current = next;
         }
