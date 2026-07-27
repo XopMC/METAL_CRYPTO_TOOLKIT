@@ -21,6 +21,7 @@
 #include "Vanity/VanityMode.h"
 #include "Create2/Create2Mode.h"
 #include "HdPath/HdPathMode.h"
+#include "Hamming/HammingMode.h"
 #include "Kernels/ProfanityHost.h"
 #include "Kernels/WalletModesHost.h"
 #include "RecoveryWordlistsEmbedded.h"
@@ -7213,6 +7214,7 @@ enum class HelpTopic {
     PassThread,
     Priv,
     PrivRecovery,
+    Hamming,
     Kangaroo,
     Bsgs,
     KeyRepair,
@@ -9273,8 +9275,10 @@ static HelpTopic detect_help_topic(int argc, char** argv) {
             return has_arg(argc, argv, "-recovery") ? HelpTopic::ProfanityRecovery : HelpTopic::Profanity;
         }
         if (is_help_topic_arg(arg, "-priv")) {
+            if (has_arg(argc, argv, "-hamming")) return HelpTopic::Hamming;
             return has_arg(argc, argv, "-recovery") ? HelpTopic::PrivRecovery : HelpTopic::Priv;
         }
+        if (is_help_topic_arg(arg, "-hamming")) return HelpTopic::Hamming;
         if (is_help_topic_arg(arg, "-kangaroo")) return HelpTopic::Kangaroo;
         if (is_help_topic_arg(arg, "-bsgs")) return HelpTopic::Bsgs;
         if (is_help_topic_arg(arg, "-keyrepair")) return HelpTopic::KeyRepair;
@@ -9343,6 +9347,7 @@ static const char* help_topic_command(HelpTopic topic) {
     case HelpTopic::PassThread: return "-pass_thread";
     case HelpTopic::Priv: return "-priv";
     case HelpTopic::PrivRecovery: return "-priv -recovery";
+    case HelpTopic::Hamming: return "-priv -hamming";
     case HelpTopic::Kangaroo: return "-kangaroo";
     case HelpTopic::Bsgs: return "-bsgs";
     case HelpTopic::KeyRepair: return "-keyrepair";
@@ -9430,6 +9435,7 @@ static void printHelpShort() {
 [!] [!] PRIVATE KEY / HISTORICAL REPLAY MODES [!] [!]
 [!] -priv                         Raw private key search.
 [!] -priv -recovery               Raw private key template recovery.
+[!] -priv -hamming                Exact Hamming-distance private-key search.
 [!] -kangaroo                     Bounded secp256k1 private-key recovery.
 [!] -bsgs                         Deterministic multi-target secp256k1 BSGS.
 [!] -keyrepair                    GPU checksum-first key/key-payload repair.
@@ -10757,6 +10763,9 @@ static void printHelpModeSection(HelpTopic topic) {
     case HelpTopic::Priv:
         printHelpPrivSection();
         break;
+    case HelpTopic::Hamming:
+        hamming::print_help();
+        break;
     case HelpTopic::Kangaroo:
         kangaroo::print_help();
         break;
@@ -10921,6 +10930,39 @@ int main(int argc, char** argv)
     if (has_help_arg(argc, argv)) {
         printHelpTopic(detect_help_topic(argc, argv));
         return 0;
+    }
+    if (hamming::requested(argc, argv)) {
+        counterTotal = 0;
+        Founds = 0;
+        isRun = true;
+
+        const std::time_t started =
+            std::chrono::system_clock::to_time_t(
+                std::chrono::system_clock::now());
+        std::cout << "[!] Program started at: " << std::ctime(&started);
+
+        std::thread speed_thread(SpeedThreadFunc);
+        const hamming::RuntimeHooks hooks{
+            [](std::uint64_t completed) {
+                counterTotal += completed;
+            },
+            []() {
+                ++Founds;
+            }
+        };
+        const int result = hamming::run(argc, argv, hooks);
+        isRun = false;
+        if (speed_thread.joinable()) {
+            speed_thread.join();
+        }
+
+        const std::time_t finished =
+            std::chrono::system_clock::to_time_t(
+                std::chrono::system_clock::now());
+        std::cout << "\n[!] Processed " << counterTotal
+                  << " Hamming candidates. Found: " << Founds
+                  << ". Program finished at " << std::ctime(&finished);
+        return result;
     }
     if (hdpath::requested(argc, argv)) {
         counterTotal = 0;

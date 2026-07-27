@@ -124,6 +124,22 @@ on the 16,777,216-path workload (**83.62%/83.55%**, 1.168% CV, 0.368%
 baseline drift). Boundary targets around both 128- and 256-thread group edges
 were recovered with full host re-derivation before integration.
 
+Wave 7 adds exact Hamming-distance private-key search:
+
+- `-priv -hamming BASE:DISTANCE[:MUTABLE_MASK]` enumerates the exact
+  combinatorial sphere around one 256-bit base scalar; mask zeroes keep fixed
+  bits and mask ones select the positions eligible for toggling;
+- a checked U256 combinadic rank/unrank mapping assigns every candidate once,
+  without materializing combinations or introducing duplicates;
+- `-start/-end` select an exact ordinal subrange and selected Metal devices
+  receive consecutive non-overlapping windows;
+- repeated full secp256k1 public-key targets and target files are canonicalized
+  and deduplicated, while every GPU hit is independently unranked, re-derived,
+  and verified on the host;
+- the common `SpeedThreadFunc` is the only live printer and reports credited
+  `Key/s`, primitive scalar multiplications, exact verifications, targets,
+  working set, and readback time.
+
 #### v15
 
 The July 25 update extends both interval-DLP modes for very large target
@@ -1996,6 +2012,42 @@ Full built-in help:
 ./METAL_CRYPTO_TOOLKIT -hdpath -help
 ```
 
+#### `-priv -hamming`
+
+**Use it for:** searching a bounded set of private keys that differ from one
+known 256-bit base in exactly `k` selected bit positions.
+
+The required value is `BASE:DISTANCE[:MUTABLE_MASK]`. `BASE` and the optional
+mask are normal 64-character big-endian hexadecimal strings. A one in the mask
+marks a mutable bit; a zero keeps it fixed. Without a mask all 256 bits are
+mutable. Bit zero is the most-significant bit of the displayed scalar.
+
+```bash
+./METAL_CRYPTO_TOOLKIT -priv \
+  -hamming 0000000000000000000000000000000000000000000000000000000000000001:2:00000000000000000000000000000000000000000000000000000000000000ff \
+  -target 02c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5 \
+  -wallet-mem auto
+```
+
+The complete domain has `C(popcount(mask), distance)` candidates.
+`-start/-end` select a half-open checked-U256 ordinal subrange in decimal,
+`0xHEX`, or `2^EXP` form. `-target` is repeatable and also accepts a file with
+one compressed or uncompressed secp256k1 public key per line. `-device` assigns
+windows without overlap, large target sets are streamed through bounded Metal
+tiles, `-n` controls only the resident launch, and an overflowed hit buffer is
+retried before work is credited.
+
+Every result contains the combinadic ordinal, base, distance, mask, verified
+private/public key, and original target sources. Live `Key/s` comes only from
+`SpeedThreadFunc`. Checked U256 arithmetic prevents truncation; it does not
+make a huge Hamming sphere practical.
+
+Full built-in help:
+
+```bash
+./METAL_CRYPTO_TOOLKIT -priv -hamming -help
+```
+
 #### `-minikeys`
 
 **Use it for:** Casascius minikey strings.
@@ -3012,6 +3064,22 @@ tune выбрал 256 потоков на Metal threadgroup: на нагрузк
 (**83,62%/83,55%**, CV 1,168%, drift baseline 0,368%). Перед интеграцией цели
 на границах 128- и 256-поточных групп были найдены с полной повторной
 деривацией на host.
+
+Волна 7 добавляет точный поиск приватных ключей по Hamming distance:
+
+- `-priv -hamming BASE:DISTANCE[:MUTABLE_MASK]` перебирает точную
+  комбинаторную сферу вокруг одного 256-битного base scalar; нули маски
+  фиксируют биты, единицы разрешают их переключение;
+- checked U256 combinadic rank/unrank сопоставляет каждому кандидату ровно
+  один ordinal без материализации combinations и без дублей;
+- `-start/-end` выбирают точный ordinal-поддиапазон, а Metal-устройства
+  получают последовательные непересекающиеся окна;
+- повторяемые полные публичные ключи secp256k1 и target-файлы канонизируются и
+  дедуплицируются, а каждый GPU hit независимо восстанавливается из ordinal,
+  заново вычисляется и проверяется на host;
+- единственным потоком текущей статистики остаётся общий `SpeedThreadFunc`,
+  который печатает зачтённые `Key/s`, scalar multiplications, точные проверки,
+  targets, working set и readback time.
 
 #### v15
 
@@ -4899,6 +4967,42 @@ xpub содержит проверенные path и public key, но не пр�
 
 ```bash
 ./METAL_CRYPTO_TOOLKIT -hdpath -help
+```
+
+#### `-priv -hamming`
+
+**Когда использовать:** для ограниченного поиска приватных ключей, которые
+отличаются от известного 256-битного base ровно в `k` выбранных битах.
+
+Обязательный формат — `BASE:DISTANCE[:MUTABLE_MASK]`. `BASE` и необязательная
+маска записываются как обычные 64-символьные big-endian hex-строки. Единица
+маски разрешает менять бит, ноль фиксирует его. Без маски изменяемыми считаются
+все 256 бит. Бит 0 — старший бит отображаемого scalar.
+
+```bash
+./METAL_CRYPTO_TOOLKIT -priv \
+  -hamming 0000000000000000000000000000000000000000000000000000000000000001:2:00000000000000000000000000000000000000000000000000000000000000ff \
+  -target 02c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5 \
+  -wallet-mem auto
+```
+
+Полный домен содержит `C(popcount(mask), distance)` кандидатов.
+`-start/-end` выбирают half-open checked-U256 ordinal-поддиапазон в decimal,
+`0xHEX` или `2^EXP`. `-target` можно повторять; существующий файл читается по
+одному compressed/uncompressed public key secp256k1 на строку. `-device`
+выдаёт непересекающиеся окна, большие наборы целей проходят ограниченными
+Metal-тайлами, `-n` управляет только resident launch, а переполнение
+hit-буфера повторяется до зачёта работы.
+
+Результат содержит combinadic ordinal, base, distance, mask, проверенный
+private/public key и исходные target sources. Текущие `Key/s` печатает только
+`SpeedThreadFunc`. Checked U256 исключает усечение, но не делает огромную
+Hamming-сферу практически выполнимой.
+
+Полная встроенная справка:
+
+```bash
+./METAL_CRYPTO_TOOLKIT -priv -hamming -help
 ```
 
 #### `-minikeys`
