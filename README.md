@@ -115,6 +115,15 @@ Wave 6 adds checked GPU BIP32 derivation-path search:
   credited `Path/s`, primitive child derivations, exact verifications, targets,
   working set, and readback time.
 
+The Wave 6 optimization sweep accepted two sequential improvements. Reusing
+the already available root public key for the first non-hardened CKDpriv edge
+reduced median wall time by **39.26%/39.20%** against the surrounding
+baselines. The following measured grid tune selected 256 threads per Metal
+threadgroup, reducing the accepted baseline from 1.4452/1.4399 s to 0.23679 s
+on the 16,777,216-path workload (**83.62%/83.55%**, 1.168% CV, 0.368%
+baseline drift). Boundary targets around both 128- and 256-thread group edges
+were recovered with full host re-derivation before integration.
+
 #### v15
 
 The July 25 update extends both interval-DLP modes for very large target
@@ -2993,6 +3002,16 @@ salt на поток и сетки 64/256 сохранили точный рез
 - общий `SpeedThreadFunc` остаётся единственным потоком статистики и печатает
   зачтённые `Path/s`, число child derivations, точные проверки, targets,
   working set и readback time.
+
+В оптимизационной части Волны 6 последовательно приняты два улучшения.
+Переиспользование уже вычисленного публичного ключа root для первого
+non-hardened шага CKDpriv уменьшило медианное wall time на
+**39,26%/39,20%** относительно окружающих baseline. Затем измеряемый grid
+tune выбрал 256 потоков на Metal threadgroup: на нагрузке из 16 777 216 путей
+медиана принятого baseline снизилась с 1,4452/1,4399 с до 0,23679 с
+(**83,62%/83,55%**, CV 1,168%, drift baseline 0,368%). Перед интеграцией цели
+на границах 128- и 256-поточных групп были найдены с полной повторной
+деривацией на host.
 
 #### v15
 
