@@ -46,6 +46,18 @@ Wave 1 activates exact BIP38 recovery:
 - `-wallet-mem` provides the common unified-memory ceiling and explicit
   `-wallet-scrypt-mem` values are strict caps.
 
+Wave 2 adds checksum-first GPU key repair:
+
+- `-keyrepair` restores limited unknown Base58 or hexadecimal positions in
+  WIF, xprv/xpub, raw secp256k1 private/public keys, and Base58Check address
+  payloads;
+- the Metal kernels generate candidates, reject invalid structures and
+  checksums first, and emit only bounded hits for mandatory host verification;
+- mixed-radix U256 scheduling supports the complete advertised 15-position
+  domain, and selected Metal devices receive exact non-overlapping shards;
+- raw-private repair requires a related public key, while an address repair is
+  always reported only as an address payload, never as recovered key material.
+
 #### v15
 
 The July 25 update extends both interval-DLP modes for very large target
@@ -2288,6 +2300,47 @@ Results contain the source line, password, verified 64-hex private key, compress
 
 Only encrypted private-key records are recovery targets. BIP38 confirmation codes and intermediate passphrase codes are not accepted. Dictionary passwords are limited to 127 bytes after NFC normalization.
 
+#### `-keyrepair`
+
+This mode repairs a limited number of unknown characters in key material that
+you already own. Select one explicit profile with `-repair-type`: `wif`,
+`xprv`, `xpub`, `address`, `raw-private`, or `raw-public`. A `?` denotes one
+unknown Base58 character or hexadecimal nibble. Repeat `-i`, pass templates
+positionally, or provide a text file containing one template per line; blank
+lines and `#` comments are ignored.
+
+Base58Check profiles are generated and structurally filtered on Metal before
+double-SHA256 checksum verification. Raw private candidates are checked against
+one or more full 33/65-byte secp256k1 public keys supplied by repeatable
+`-target` arguments or target files. Compressed and uncompressed forms of the
+same target are canonicalized as one identity. Raw public candidates receive a
+complete curve-point check. Every GPU hit is independently reconstructed and
+verified on the host before it is written.
+
+```bash
+./METAL_CRYPTO_TOOLKIT -keyrepair -repair-type wif \
+  -i "KwDiBf89QgGbjEhKnhXJuH7LrciVrZi3qYjgd9M7rFU73sVHnoW?" -n 128
+
+./METAL_CRYPTO_TOOLKIT -keyrepair -repair-type raw-private \
+  -i "000000000000000000000000000000000000000000000000000000000000000?" \
+  -target 0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798
+
+./METAL_CRYPTO_TOOLKIT -keyrepair -repair-type address \
+  -i "1BoatSLRHtKNngkdXEeobR76b53LETtpy?" -save
+```
+
+`-device` divides each exact mixed-radix space into deterministic,
+non-overlapping U256 shards. `-n` controls only the resident GPU window, so a
+logical domain may exceed 64 bits without requiring a single giant buffer.
+Overflowed hit windows are retried at a smaller size and are credited only
+once. Ongoing `Candidate/s` and `Verify/s` statistics are emitted exclusively
+by the existing `SpeedThreadFunc`.
+
+At most 15 positions may be unknown. This is intended for bounded repair, not
+unrestricted key search. A checksum-valid address produces only its address
+and payload. It does not imply knowledge of any private key. `raw-private`
+therefore refuses to run without a related public-key target.
+
 #### `-bisqwallet`
 
 **Active input format:**
@@ -2592,6 +2645,19 @@ xattr -d com.apple.quarantine METAL_CRYPTO_TOOLKIT
   без двойного учёта;
 - `-wallet-mem` задаёт общий предел unified memory, а явный
   `-wallet-scrypt-mem` является строгим cap.
+
+Волна 2 добавляет checksum-first восстановление ключей на GPU:
+
+- `-keyrepair` восстанавливает ограниченное число неизвестных Base58- или
+  hex-позиций в WIF, xprv/xpub, raw-приватных/публичных ключах secp256k1 и
+  Base58Check address payload;
+- Metal-ядра генерируют кандидаты, сначала отбрасывают неверную структуру и
+  checksum и передают только ограниченный буфер hits для обязательной
+  host-проверки;
+- mixed-radix U256 scheduler покрывает весь заявленный домен из 15 позиций, а
+  выбранные Metal-устройства получают точные непересекающиеся шарды;
+- для raw-private обязателен связанный публичный ключ, а результат address
+  всегда описывается только как адрес/payload, но не как найденный приват.
 
 #### v15
 
@@ -4845,6 +4911,46 @@ BIP38.
 В результате записываются исходная строка, пароль, проверенный 64-символьный приватный ключ, вид сжатия, HASH160 и профиль. Статистику печатает только `SpeedThreadFunc`: `KDF/s` означает завершенные BIP38 KDF-задачи, `Verify/s` — полные проверки целей. Количество целей не используется как искусственный множитель скорости.
 
 Целями являются только зашифрованные приватные ключи. Confirmation code и intermediate passphrase code BIP38 не принимаются. После NFC-нормализации словарный пароль должен занимать не более 127 байтов.
+
+#### `-keyrepair`
+
+Режим восстанавливает ограниченное число неизвестных символов в принадлежащем
+вам ключевом материале. Через `-repair-type` выбирается ровно один профиль:
+`wif`, `xprv`, `xpub`, `address`, `raw-private` или `raw-public`. Символ `?`
+означает неизвестный Base58-символ либо hex-полубайт. `-i` можно повторять,
+шаблоны можно передавать позиционно или загрузить из текстового файла по одному
+на строку; пустые строки и комментарии `#` игнорируются.
+
+Base58Check-кандидаты создаются на Metal, где сначала проверяются структура и
+двойной SHA-256 checksum. Raw private сверяется с одним или несколькими полными
+33/65-байтовыми публичными ключами secp256k1 из повторяемых `-target` или
+target-файлов. Сжатая и несжатая формы одной точки считаются одной целью. Для
+raw public выполняется полная проверка точки кривой. Каждый GPU hit заново
+собирается и независимо проверяется на host до записи результата.
+
+```bash
+./METAL_CRYPTO_TOOLKIT -keyrepair -repair-type wif \
+  -i "KwDiBf89QgGbjEhKnhXJuH7LrciVrZi3qYjgd9M7rFU73sVHnoW?" -n 128
+
+./METAL_CRYPTO_TOOLKIT -keyrepair -repair-type raw-private \
+  -i "000000000000000000000000000000000000000000000000000000000000000?" \
+  -target 0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798
+
+./METAL_CRYPTO_TOOLKIT -keyrepair -repair-type address \
+  -i "1BoatSLRHtKNngkdXEeobR76b53LETtpy?" -save
+```
+
+`-device` делит каждое mixed-radix пространство на детерминированные
+непересекающиеся U256-шарды. `-n` управляет только резидентным GPU-окном,
+поэтому логический домен может быть шире 64 бит и не требует одного огромного
+буфера. При overflow окно повторяется с меньшим размером и засчитывается ровно
+один раз. Текущую статистику `Candidate/s` и `Verify/s` печатает только
+существующий `SpeedThreadFunc`.
+
+Допускается не более 15 неизвестных позиций. Это режим ограниченного
+восстановления, а не неограниченного поиска ключей. Корректный checksum адреса
+даёт только адрес и его payload и не доказывает знание приватного ключа.
+Поэтому `raw-private` не запускается без связанной public-key цели.
 
 #### `-bisqwallet`
 
