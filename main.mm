@@ -10371,6 +10371,7 @@ static void printHelpBip38Section() {
 [!] GPU / memory / MultiGPU:
 [!] -wallet-mem auto|all|NN%|SIZE  Hard wallet working-set budget.
 [!]                                auto uses <=50% of the free recommended set;
+[!]                                BIP38 targets 32 GiB scratch when it fits;
 [!]                                all leaves a 512 MiB runtime reserve.
 [!] -wallet-scrypt-mem MiB         Bound scrypt scratch per selected Metal device.
 [!] -n N                           Cap active scrypt jobs/generated window.
@@ -28903,6 +28904,7 @@ static constexpr uint64_t WALLET_SCRYPT_GPU_MEMORY_RESERVE = 1ull << 30;
 static constexpr uint64_t WALLET_SCRYPT_GPU_MEMORY_RESERVE_FILTERED = 4ull << 30;
 static constexpr uint64_t WALLET_SCRYPT_SCRATCH_BUDGET = 16ull << 30;
 static constexpr uint64_t WALLET_SCRYPT_SCRATCH_BUDGET_FILTERED = 4ull << 30;
+static constexpr uint64_t WALLET_BIP38_AUTO_SCRYPT_SCRATCH_BUDGET = 32ull << 30;
 static constexpr uint64_t WALLET_BISQ_SCRYPT_LARGE_STRIDE_THRESHOLD = 128ull << 10;
 static constexpr uint64_t WALLET_BISQ_SCRYPT_LARGE_STRIDE_BUDGET = 8ull << 30;
 
@@ -48612,6 +48614,17 @@ metalError_t processMetalBrowserVault()
             const uint64_t hard_cap =
                 std::min<uint64_t>(available_cap, wallet_scratch_hard_cap);
             uint64_t scratch_bytes = wallet_scrypt_scratch_budget_bytes(hard_cap, max_scrypt_scratch_stride);
+            if (bip38_mode && !wallet_scrypt_scratch_budget_explicit) {
+                const bool automatic_memory =
+                    !wallet_memory_explicit ||
+                    wallet_memory_spec.kind == modeinfra::MemoryKind::Auto;
+                const uint64_t preferred = automatic_memory
+                    ? WALLET_BIP38_AUTO_SCRYPT_SCRATCH_BUDGET
+                    : hard_cap;
+                scratch_bytes = std::min<uint64_t>(
+                    hard_cap,
+                    std::max<uint64_t>(max_scrypt_scratch_stride, preferred));
+            }
             const bool bisq_auto_large_stride_cap =
                 bisq_mode && !wallet_scrypt_scratch_budget_explicit &&
                 max_scrypt_scratch_stride >= WALLET_BISQ_SCRYPT_LARGE_STRIDE_THRESHOLD;
