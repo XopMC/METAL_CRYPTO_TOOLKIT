@@ -21,6 +21,31 @@ Author: Mikhail Khoroshavin, also known as **XopMC**
 
 ### Changelog
 
+#### v16 development
+
+Wave 0 establishes the shared infrastructure used by the new GPU modes:
+
+- `ModeProgress` feeds the existing `SpeedThreadFunc`, which remains the only
+  statistics printer;
+- checked U256 scheduling and a unified-memory budget helper cover `auto`,
+  `all`, percentages, MiB/GiB sizes, selected-device replicas, and Metal
+  working-set limits;
+- device reporting now includes recommended/current working set,
+  `maxBufferLength`, and unified-memory capability.
+
+Wave 1 activates exact BIP38 recovery:
+
+- independent non-EC and EC-multiply Metal verification paths implement both
+  scrypt stages, AES-256-ECB, lot/sequence handling, secp256k1 derivation, and
+  complete P2PKH address-hash verification;
+- dictionaries use UTF-8 NFC normalization, while `-hex`, mask, and raw-range
+  sources retain exact byte semantics;
+- multi-target scheduling is scratch-safe even when the requested active-job
+  count is smaller than the number of KDF groups, and result overflow is
+  replayed without double-counting completed work;
+- `-wallet-mem` provides the common unified-memory ceiling and explicit
+  `-wallet-scrypt-mem` values are strict caps.
+
 #### v15
 
 The July 25 update extends both interval-DLP modes for very large target
@@ -2005,9 +2030,10 @@ Artifact controls:
 | `-f DIR` | recursively find extensions accepted by that wallet mode |
 | `-wallet-load-only` | parse, validate, group, and report targets, then exit before checking passwords |
 | `-wallet-dry-run` | alias for `-wallet-load-only` |
+| `-wallet-mem auto\|all\|NN%\|SIZE` | unified wallet working-set budget for v16 modes that explicitly advertise it; Wave 1 enables it for BIP38 |
 | `-wallet-scrypt-mem MiB` | scratch-memory cap for modes that actually use scrypt/KdfRomix |
 
-The automatic scrypt scratch target starts at 16384 MiB. When the total input size of the regular GPU filters reaches 8 GiB, the target falls back to 4096 MiB. The final allocation is also bounded by available unified memory and the scratch size of one job. `-wallet-scrypt-mem` has a performance effect only in the modes explicitly identified below.
+`-wallet-mem auto` uses at most half of the currently free recommended Metal working set. `all` uses the remaining recommended set minus a 512 MiB runtime reserve; percentages are relative to the current free set. On Apple Silicon, host-visible tables and every Metal-device replica consume the same unified-memory pool. The automatic scrypt scratch target starts at 16384 MiB. When the total input size of the regular GPU filters reaches 8 GiB, the target falls back to 4096 MiB. The final allocation is also bounded by `-wallet-mem`, available unified memory, and the scratch size of one job. An explicit `-wallet-scrypt-mem` is a strict cap and fails if one job cannot fit.
 
 Do not pass `-hash` or `-target` to wallet-password modes. Their verification target comes from the wallet artifact itself.
 
@@ -2217,6 +2243,51 @@ Profile 1 uses MD5 EVP_BytesToKey and AES-CBC. Profile 2 uses Java UTF-16BE, fix
 
 Result profile is one of `multibit-classic-md5-aes`, `multibit-hd-scrypt-aes`, or `multibit-classic-scrypt-aes`.
 
+#### `-bip38`
+
+This mode recovers passwords and private keys from standard Bitcoin-mainnet BIP38 `6P...` records. Text files may contain one or more embedded Base58Check keys. The loader rejects invalid checksums, prefixes, flags, and payload lengths before any GPU work.
+
+Both BIP38 profiles have exact Metal verification:
+
+- non-EC records run scrypt `16384/8/8`, AES-256-ECB decryption, secp256k1 public-key derivation, complete P2PKH address encoding, and address-hash verification;
+- EC-multiply records additionally implement owner salt/entropy, optional lot/sequence, passpoint derivation, the second scrypt `1024/1/1`, seed/factor recovery, and scalar multiplication.
+
+The following official BIP38 vectors are also embedded as executable
+correctness fixtures:
+
+```text
+6PRVWUbkzzsbcVac2qwfssoUJAN1Xhrg6bNk8J7Nzm5H7kxEbn2Nh2ZoGg
+6PYNKZ1EAgYgmQfmNVamxyXVWHzK5s6DGhwP4J5o44cvXdoY7sRzhtpUeo
+6PfQu77ygVyJLZjfvMLyhLMQbYnu5uguoJJ4kMCLqWwPEdfpwANVS76gTX
+6PgNBNNzDkKdhkT6uJntUXwwzQV8Rr2tZcbkDcuC9DZRsS6AtHts4Ypo1j
+```
+
+The first three use `TestingOneTwoThree`; the lot/sequence vector uses
+`MOLON LABE`. They recover the private keys published with BIP38 and are used
+by the exact CPU-to-Metal regression.
+
+The deterministic local mask/range fixture
+`6PYWCzYbiDh88rbbQVRFUCdqS51ptYow6EEeKRGFNAWqRG5FC4evLvwJd9` uses password
+`0` and recovers private key `3`; it is not an official BIP38 vector.
+
+Dictionary candidates are normalized to UTF-8 NFC as required by BIP38. Use `-hex` to supply exact password bytes without text normalization. Mask and raw-range candidates are byte-oriented. `-wallet-mem` bounds the complete wallet working set, `-wallet-scrypt-mem MiB` further bounds per-device scratch, `-n` caps active scrypt jobs, and `-device` splits candidate ordinals without overlap.
+
+```bash
+./METAL_CRYPTO_TOOLKIT -bip38 encrypted.txt \
+  -i passwords.txt -wallet-scrypt-mem 8192 -save
+
+./METAL_CRYPTO_TOOLKIT -bip38 -f bip38_keys \
+  -mask "?a?a?a?a?a?a?a?a" -n 256 -device 0 \
+  -wallet-mem all -wallet-scrypt-mem 16384 -save -o bip38_found.txt
+
+./METAL_CRYPTO_TOOLKIT -bip38 encrypted.txt \
+  -i password-bytes.hex -hex -save
+```
+
+Results contain the source line, password, verified 64-hex private key, compression kind, HASH160, and profile. Statistics are printed only by `SpeedThreadFunc`: `KDF/s` is completed BIP38 KDF work, while `Verify/s` is complete target verification work. Neither rate uses target count as an artificial multiplier.
+
+Only encrypted private-key records are recovery targets. BIP38 confirmation codes and intermediate passphrase codes are not accepted. Dictionary passwords are limited to 127 bytes after NFC normalization.
+
 #### `-bisqwallet`
 
 **Active input format:**
@@ -2314,11 +2385,10 @@ Raw secrets can be printed and saved. Use `-silent` when terminal output is not 
 
 These modes print the exact generator and extraction-mode catalogs, then exit. They do not start a search.
 
-## Reserved or inactive in v14
+## Reserved or inactive modes
 
-The following command names are parsed or documented for future/external compatibility, but must not be used as working recovery modes in v14:
+The following command names are parsed or documented for future/external compatibility, but must not be used as working recovery modes:
 
-- `-bip38`: metadata parsing for non-EC and EC-multiply records exists, but the compute and verification path is disabled in this build; it cannot emit a confirmed password;
 - `-slip39`: exact SLIP-39 share reconstruction worker is not enabled;
 - `-aezeed`: exact LND aezeed decode/KDF worker is not enabled;
 - `-eth2validator`: exact validator-key derivation worker is not enabled.
@@ -2343,7 +2413,7 @@ This table is a reminder, not a replacement for `<mode> -help`.
 | Profanity | `-offset`, `-random-seeds`, `-gpu-split` |
 | XP/WalletJS | `-once`, `-v`, `-time-s`, `-time-e`, `-time-delta`, `-time-events`, `-time-events-repeat`, `-time-mode`, `-screen-seed`, `-screen-seed-zero`, `-mileage`, `-mileage-s`, `-mileage-e`, and profile-specific variant aliases |
 | wallet candidates | `-mask`, `-mask-file`, `-cs1`, `-cs2`, `-cs3`, `-cs4` |
-| wallet runtime | `-wallet-load-only`, `-wallet-dry-run`, `-wallet-scrypt-mem`, `-scan-all`, `-walletdat-max-ckey`, `-walletdat-kdf-work`, `-walletdat-max-iter`, `-walletdat-min-jobs`, `-walletdat-kdf-loop` |
+| wallet runtime | `-wallet-load-only`, `-wallet-dry-run`, `-wallet-mem`, `-wallet-scrypt-mem`, `-scan-all`, `-walletdat-max-ckey`, `-walletdat-kdf-work`, `-walletdat-max-iter`, `-walletdat-min-jobs`, `-walletdat-kdf-loop` |
 | Metal/output | `-device`, `-b`, `-t`, `-bit`, `-fsize`, `-save`, `-o`, `-silent` |
 
 `-iteration` is not an active command-line option. `-pubkey` is intentionally rejected as deprecated.
@@ -2498,6 +2568,30 @@ xattr -d com.apple.quarantine METAL_CRYPTO_TOOLKIT
 ## Русский
 
 ### Изменения
+
+#### Разработка v16
+
+Волна 0 добавляет общую инфраструктуру для новых GPU-режимов:
+
+- `ModeProgress` передаёт данные существующему `SpeedThreadFunc`, который
+  остаётся единственным потоком печати статистики;
+- checked U256-планировщик и общий helper бюджета unified memory поддерживают
+  `auto`, `all`, проценты, размеры MiB/GiB, реплики выбранных устройств и
+  ограничения Metal working set;
+- информация об устройстве теперь включает recommended/current working set,
+  `maxBufferLength` и признак unified memory.
+
+Волна 1 включает точное восстановление BIP38:
+
+- отдельные Metal-контуры non-EC и EC-multiply реализуют обе стадии scrypt,
+  AES-256-ECB, lot/sequence, secp256k1 и полную проверку P2PKH address hash;
+- словари нормализуются в UTF-8 NFC, а `-hex`, маски и raw-диапазоны сохраняют
+  точную байтовую семантику;
+- multi-target планировщик безопасно делит KDF-группы даже при меньшем числе
+  активных заданий, а переполнение результатов повторяет незачтённую работу
+  без двойного учёта;
+- `-wallet-mem` задаёт общий предел unified memory, а явный
+  `-wallet-scrypt-mem` является строгим cap.
 
 #### v15
 
@@ -4499,9 +4593,10 @@ WALLETJS:<profile>:SOURCE:<source>:PRIV:<64_hex>:<TYPE>:<value>
 | `-f DIR` | рекурсивно ищет расширения, подходящие выбранному формату |
 | `-wallet-load-only` | разбирает, проверяет и группирует цели, затем завершает работу до перебора |
 | `-wallet-dry-run` | другое имя `-wallet-load-only` |
+| `-wallet-mem auto\|all\|NN%\|SIZE` | бюджет unified memory для v16-режимов, где он указан явно; в Волне 1 включён для BIP38 |
 | `-wallet-scrypt-mem MiB` | ограничивает промежуточную память только в режимах, где реально используется scrypt/KdfRomix |
 
-Автоматический предел памяти для scrypt сначала ориентируется на 16384 МиБ. Когда суммарный размер входных данных обычных GPU-фильтров достигает 8 ГиБ, ориентир снижается до 4096 МиБ. Итоговый буфер дополнительно ограничивается свободной объединенной памятью и размером одного задания. Если конкретный формат ниже не отмечен как scrypt/KdfRomix, `-wallet-scrypt-mem` не ускорит и не изменит его проверку.
+`-wallet-mem auto` использует не более половины текущего свободного recommended Metal working set. `all` использует остаток за вычетом 512 МиБ для runtime; процент считается от текущей свободной памяти. На Apple Silicon host-visible таблицы и реплики на Metal-устройствах расходуют один пул unified memory. Автоматический предел памяти для scrypt сначала ориентируется на 16384 МиБ. Когда суммарный размер входных данных обычных GPU-фильтров достигает 8 ГиБ, ориентир снижается до 4096 МиБ. Итоговый буфер дополнительно ограничивается `-wallet-mem`, свободной объединенной памятью и размером одного задания. Явный `-wallet-scrypt-mem` является строгим пределом и завершает запуск ошибкой, если не помещается одно задание.
 
 `-hash` и `-target` здесь не нужны: цель проверки уже находится внутри файла кошелька или извлеченной строки.
 
@@ -4705,6 +4800,52 @@ $multibit$3*<N>*<r>*<p>*<salt_8_bytes_hex>*<blob_32_bytes_hex>
 
 В результате будет один из профилей: `multibit-classic-md5-aes`, `multibit-hd-scrypt-aes` или `multibit-classic-scrypt-aes`.
 
+#### `-bip38`
+
+Режим восстанавливает пароли и приватные ключи из стандартных BIP38-записей Bitcoin mainnet вида `6P...`. В текстовом файле может быть одна или несколько встроенных Base58Check-строк. Неверные checksum, prefix, flags и длина payload отклоняются до запуска GPU.
+
+Для обоих профилей реализована точная Metal-проверка:
+
+- обычная non-EC запись использует scrypt `16384/8/8`, AES-256-ECB, получение публичного ключа secp256k1, полную сборку P2PKH-адреса и проверку address hash;
+- EC-multiply дополнительно учитывает owner salt/entropy, lot/sequence, строит passpoint, выполняет второй scrypt `1024/1/1`, восстанавливает seed/factor и умножает скаляры.
+
+В README встроены официальные BIP38-векторы, которые одновременно служат
+исполняемыми correctness fixtures:
+
+```text
+6PRVWUbkzzsbcVac2qwfssoUJAN1Xhrg6bNk8J7Nzm5H7kxEbn2Nh2ZoGg
+6PYNKZ1EAgYgmQfmNVamxyXVWHzK5s6DGhwP4J5o44cvXdoY7sRzhtpUeo
+6PfQu77ygVyJLZjfvMLyhLMQbYnu5uguoJJ4kMCLqWwPEdfpwANVS76gTX
+6PgNBNNzDkKdhkT6uJntUXwwzQV8Rr2tZcbkDcuC9DZRsS6AtHts4Ypo1j
+```
+
+Для первых трёх используется пароль `TestingOneTwoThree`, для вектора с
+lot/sequence — `MOLON LABE`. Результаты сверяются с опубликованными в BIP38
+приватными ключами в точной CPU-to-Metal регрессии.
+
+Детерминированный локальный fixture для маски и диапазона
+`6PYWCzYbiDh88rbbQVRFUCdqS51ptYow6EEeKRGFNAWqRG5FC4evLvwJd9` использует
+пароль `0` и восстанавливает приватный ключ `3`; это не официальный вектор
+BIP38.
+
+Текстовые кандидаты из словаря нормализуются в UTF-8 NFC по требованиям BIP38. `-hex` передает точные байты без нормализации. Маски и raw-диапазоны работают с байтами. `-wallet-mem` ограничивает общий working set кошелька, `-wallet-scrypt-mem MiB` дополнительно ограничивает scratch на устройство, `-n` — число активных scrypt-задач, а `-device` делит ordinal-пространство кандидатов без пересечений.
+
+```bash
+./METAL_CRYPTO_TOOLKIT -bip38 encrypted.txt \
+  -i passwords.txt -wallet-scrypt-mem 8192 -save
+
+./METAL_CRYPTO_TOOLKIT -bip38 -f bip38_keys \
+  -mask "?a?a?a?a?a?a?a?a" -n 256 -device 0 \
+  -wallet-mem all -wallet-scrypt-mem 16384 -save -o bip38_found.txt
+
+./METAL_CRYPTO_TOOLKIT -bip38 encrypted.txt \
+  -i password-bytes.hex -hex -save
+```
+
+В результате записываются исходная строка, пароль, проверенный 64-символьный приватный ключ, вид сжатия, HASH160 и профиль. Статистику печатает только `SpeedThreadFunc`: `KDF/s` означает завершенные BIP38 KDF-задачи, `Verify/s` — полные проверки целей. Количество целей не используется как искусственный множитель скорости.
+
+Целями являются только зашифрованные приватные ключи. Confirmation code и intermediate passphrase code BIP38 не принимаются. После NFC-нормализации словарный пароль должен занимать не более 127 байтов.
+
 #### `-bisqwallet`
 
 **Рабочий формат:**
@@ -4800,11 +4941,10 @@ WALLETSCAN:<source_file>:<type>:LINE:<line_number>:VALUE:<value>
 
 Печатают полный список генераторов и способов извлечения байтов, затем завершают работу. Сам поиск не запускается.
 
-## Зарезервировано или выключено в v14
+## Зарезервированные или выключенные режимы
 
-Следующие имена распознаются командной строкой или оставлены для совместимых форматов, но не являются рабочими режимами восстановления в v14:
+Следующие имена распознаются командной строкой или оставлены для совместимых форматов, но не являются рабочими режимами восстановления:
 
-- `-bip38`: разбор обычных и EC-multiply записей существует, но вычислительная проверка в этой сборке выключена; подтвержденный пароль получить нельзя;
 - `-slip39`: точная сборка долей SLIP-39 не включена;
 - `-aezeed`: точная обработка LND aezeed и KDF не включена;
 - `-eth2validator`: точная деривация ключей валидатора не включена.
@@ -4829,7 +4969,7 @@ WALLETSCAN:<source_file>:<type>:LINE:<line_number>:VALUE:<value>
 | Profanity | `-offset`, `-random-seeds`, `-gpu-split` |
 | XP/WalletJS | `-once`, `-v`, `-time-s`, `-time-e`, `-time-delta`, `-time-events`, `-time-events-repeat`, `-time-mode`, `-screen-seed`, `-screen-seed-zero`, `-mileage`, `-mileage-s`, `-mileage-e` и варианты конкретных профилей |
 | кандидаты паролей | `-mask`, `-mask-file`, `-cs1`, `-cs2`, `-cs3`, `-cs4` |
-| кошельки | `-wallet-load-only`, `-wallet-dry-run`, `-wallet-scrypt-mem`, `-scan-all`, `-walletdat-max-ckey`, `-walletdat-kdf-work`, `-walletdat-max-iter`, `-walletdat-min-jobs`, `-walletdat-kdf-loop` |
+| кошельки | `-wallet-load-only`, `-wallet-dry-run`, `-wallet-mem`, `-wallet-scrypt-mem`, `-scan-all`, `-walletdat-max-ckey`, `-walletdat-kdf-work`, `-walletdat-max-iter`, `-walletdat-min-jobs`, `-walletdat-kdf-loop` |
 | Metal и вывод | `-device`, `-b`, `-t`, `-bit`, `-fsize`, `-save`, `-o`, `-silent` |
 
 `-iteration` не является активным параметром. `-pubkey` намеренно отклоняется как устаревший.

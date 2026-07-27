@@ -49,6 +49,7 @@
 #include <limits>
 #include <cmath>
 #include <functional>
+#import <Foundation/Foundation.h>
 #include "big_int/big_int_host.h"
 #include "filter.h"
 #include "sr25519-donna-32bit/dot.h"
@@ -503,6 +504,8 @@ static std::vector<std::string> wallet_masks;
 static std::string wallet_custom_charset[4];
 static uint64_t wallet_scrypt_scratch_budget_override_mib = 0ull;
 static bool wallet_scrypt_scratch_budget_explicit = false;
+static modeinfra::MemorySpec wallet_memory_spec{};
+static bool wallet_memory_explicit = false;
 enum class ProfanityGpuSplitMode {
     Round,
     Seed,
@@ -9437,7 +9440,7 @@ static void printHelpShort() {
 [!] -multibitwallet               MultiBit wallet recovery.
 [!] -bisqwallet                   Bisq wallet hash recovery.
 [!] -dogechainwallet              Dogechain.info wallet recovery.
-[!] -bip38                        Reserved in v14; verification is disabled.
+[!] -bip38                        BIP38 non-EC and EC-multiply recovery.
 [!] -ethpresale                   Ethereum presale wallet recovery.
 [!] -androidwallet                Android wallet backup recovery.
 [!]
@@ -10338,16 +10341,65 @@ static void printHelpEthPresaleSection() {
 
 static void printHelpBip38Section() {
     puts(R"HELP(
-[!] MAIN MODE: -bip38  (reserved in v14)
+[!] MAIN MODE: -bip38  (BIP38 password recovery)
 [!]
-[!] Status:
-[!] This build can parse metadata for both BIP38 private-key profiles:
-[!]   6P... payload 01 42 <flag> <addresshash4> <encrypted32>
-[!]   6P... payload 01 43 <flag> <addresshash4> <ownerentropy8> <encryptedpart1_8> <encryptedpart2_16>
+[!] Purpose:
+[!] Recover passwords and private keys from standard BIP38 encrypted keys.
+[!] Both profiles have independent exact Metal verification paths:
+[!]   non-EC:      01 42 <flag> <addresshash4> <encrypted32>
+[!]   EC-multiply: 01 43 <flag> <addresshash4> <ownerentropy8>
+[!]                <encryptedpart1_8> <encryptedpart2_16>
 [!]
-[!] Password computation and result verification are disabled in v14.
-[!] The mode cannot confirm a password or write a recovered private key.
-[!] It is listed only so scripts can detect that the command name is reserved.
+[!] Inputs:
+[!] -bip38 FILE1 FILE2 ...         Load Base58Check 6P... keys from text files.
+[!] -bip38 -f DIR                  Recursively scan text/hash/json/wallet files.
+[!] Empty lines and comments are ignored; embedded 6P... tokens are accepted.
+[!] Invalid checksum, prefix, flags or payload length are rejected before GPU work.
+[!]
+[!] Password candidates:
+[!] Dictionary text is UTF-8 NFC-normalized as required by BIP38.
+[!] -hex bypasses text normalization and supplies exact password bytes.
+[!] Dictionary candidates are limited to 127 bytes after normalization.
+[!] Mask and raw-range candidates are byte-oriented and are not Unicode-normalized.
+[!]
+[!] GPU pipeline:
+[!] non-EC uses scrypt 16384/8/8 -> AES-256-ECB -> secp256k1/P2PKH verification.
+[!] EC-multiply uses owner scrypt 16384/8/8, passpoint, second scrypt 1024/1/1,
+[!] seedb/factorb recovery, scalar multiplication and complete P2PKH verification.
+[!] Compression and EC lot/sequence flags are honored.
+[!]
+[!] GPU / memory / MultiGPU:
+[!] -wallet-mem auto|all|NN%|SIZE  Hard wallet working-set budget.
+[!]                                auto uses <=50% of the free recommended set;
+[!]                                all leaves a 512 MiB runtime reserve.
+[!] -wallet-scrypt-mem MiB         Bound scrypt scratch per selected Metal device.
+[!] -n N                           Cap active scrypt jobs/generated window.
+[!] -device LIST                   Split candidate ordinals without overlap/gaps.
+[!] auto may back off allocation; explicit caps never exceed the requested size.
+[!]
+[!] Statistics:
+[!] SpeedThreadFunc is the only statistics printer.
+[!] KDF/s counts completed BIP38 KDF jobs after Metal completion/readback;
+[!] Verify/s counts full target verification attempts. Target count is not used
+[!] as an artificial multiplier. The line also reports targets, solved, memory,
+[!] readback time and founds.
+[!]
+[!] Output:
+[!] BIP38:<file#line>:PASSWORD:<password>:PRIV:<private64hex>:
+[!] <COMPRESSED|UNCOMPRESSED>:<hash160>:PROFILE:<profile>
+[!] Every emitted private key has passed complete secp256k1 and address-hash checks.
+[!]
+[!] Examples:
+[!] ./METAL_CRYPTO_TOOLKIT -bip38 encrypted.txt -i passwords.txt -save
+[!] ./METAL_CRYPTO_TOOLKIT -bip38 -f bip38_keys -mask "?a?a?a?a?a?a?a?a" \
+[!]   -wallet-mem all -wallet-scrypt-mem 8192 -device 0 -save -o bip38_found.txt
+[!] ./METAL_CRYPTO_TOOLKIT -bip38 encrypted.txt -i password-bytes.hex -hex \
+[!]   -wallet-scrypt-mem 4096 -save
+[!]
+[!] Limitations:
+[!] Only standard Bitcoin-mainnet BIP38 private-key records are accepted.
+[!] Confirmation codes and intermediate passphrase codes are not recovery targets.
+[!] Runtime errors return nonzero; a completed search with no match is successful.
 )HELP");
 }
 
@@ -13602,7 +13654,7 @@ int main(int argc, char** argv)
     fclose(OUT_FILE);
     release_all_gpu_contexts();
 
-    return 0;
+    return (BIP38_MODE && metalStatus != metalSuccess) ? 1 : 0;
 }
 
 static inline bool crypted_base_priv_mode_selected() {
@@ -13929,6 +13981,21 @@ bool readArgs(int argc, char** argv) {
             }
             wallet_scrypt_scratch_budget_override_mib = static_cast<uint64_t>(parsed);
             wallet_scrypt_scratch_budget_explicit = true;
+            a += 2;
+            continue;
+        }
+        if (strcmp(argv[a], "-wallet-mem") == 0) {
+            if (a + 1 >= argc) {
+                fprintf(stderr, "[!] Error: -wallet-mem requires auto, all, NN%%, MiB or GiB [!]\n");
+                return false;
+            }
+            std::string memory_error;
+            if (!modeinfra::parse_memory_spec(argv[a + 1], wallet_memory_spec, memory_error)) {
+                fprintf(stderr, "[!] Error: invalid -wallet-mem '%s': %s [!]\n",
+                    argv[a + 1], memory_error.c_str());
+                return false;
+            }
+            wallet_memory_explicit = true;
             a += 2;
             continue;
         }
@@ -16959,6 +17026,10 @@ bool readArgs(int argc, char** argv) {
     if (wallet_scrypt_scratch_budget_explicit &&
         !(is_browserlike_wallet_mode() || EXODUSSECO_MODE || BITCOINJWALLET_MODE || ANDROIDWALLET_MODE || ARMORYWALLET_MODE)) {
         std::cerr << "[!] Error: -wallet-scrypt-mem is valid only with scrypt wallet modes [!]" << std::endl;
+        return false;
+    }
+    if (wallet_memory_explicit && !BIP38_MODE) {
+        std::cerr << "[!] Error: -wallet-mem is not enabled for this wallet mode yet; Wave 1 supports it with -bip38 [!]" << std::endl;
         return false;
     }
     if (WALLET_LOAD_ONLY && !(is_wallet_artifact_password_mode() || BIP38_MODE || ANDROIDWALLET_MODE)) {
@@ -28636,19 +28707,48 @@ struct WalletPassBuf {
     }
 };
 
+static bool wallet_normalize_nfc_utf8(const std::string& input,
+                                      std::string& output,
+                                      std::string& error)
+{
+    @autoreleasepool {
+        NSString* source = [[NSString alloc]
+            initWithBytes:input.data()
+                   length:input.size()
+                 encoding:NSUTF8StringEncoding];
+        if (source == nil) {
+            error = "candidate is not valid UTF-8";
+            return false;
+        }
+        NSString* normalized = [source precomposedStringWithCanonicalMapping];
+        NSData* data = [normalized dataUsingEncoding:NSUTF8StringEncoding
+                                allowLossyConversion:NO];
+        if (data == nil) {
+            error = "candidate cannot be represented as normalized UTF-8";
+            return false;
+        }
+        output.assign(static_cast<const char*>(data.bytes), data.length);
+    }
+    return true;
+}
+
 struct WalletPassReader {
     std::vector<std::ifstream> files;
     std::vector<std::string> file_names;
     size_t file_idx = 0;
     bool hex_lines = false;
+    bool normalize_nfc_text = false;
     bool failed = false;
     std::string error;
 
-    bool open(const std::vector<std::string>& fnames, const bool input_is_hex) {
+    bool open(const std::vector<std::string>& fnames,
+              const bool input_is_hex,
+              const bool normalize_nfc = false) {
         files.clear();
         file_names = fnames;
         file_idx = 0;
         hex_lines = input_is_hex;
+        normalize_nfc_text = normalize_nfc && !input_is_hex;
         failed = false;
         error.clear();
         files.reserve(fnames.size());
@@ -28687,7 +28787,26 @@ struct WalletPassReader {
                 buf.push_bytes(bytes.data(), bytes.size());
             }
             else {
-                buf.push_text(line);
+                if (normalize_nfc_text) {
+                    std::string normalized;
+                    std::string normalize_error;
+                    if (!wallet_normalize_nfc_utf8(line, normalized, normalize_error)) {
+                        error = "invalid BIP38 candidate in " + file_names[file_idx] +
+                            ": " + normalize_error;
+                        failed = true;
+                        return buf.count > 0;
+                    }
+                    if (normalized.size() > WALLET_MAX_PASSWORD_LEN) {
+                        error = "BIP38 candidate in " + file_names[file_idx] +
+                            " exceeds the 127-byte normalized UTF-8 limit";
+                        failed = true;
+                        return buf.count > 0;
+                    }
+                    buf.push_text(normalized);
+                }
+                else {
+                    buf.push_text(line);
+                }
             }
         }
         return buf.count > 0;
@@ -29844,14 +29963,20 @@ Done:
 static inline uint64_t wallet_scrypt_scratch_budget_bytes(uint64_t hard_cap, uint64_t max_stride)
 {
     const uint64_t filter_bytes = gpu_filter_input_bytes_total();
-    const uint64_t preferred = wallet_scrypt_scratch_budget_explicit
-        ? (wallet_scrypt_scratch_budget_override_mib << 20)
-        : (filter_bytes >= (8ull << 30)
-        ? WALLET_SCRYPT_SCRATCH_BUDGET_FILTERED
-        : WALLET_SCRYPT_SCRATCH_BUDGET);
     if (hard_cap < max_stride) {
         return 0ull;
     }
+    if (wallet_scrypt_scratch_budget_explicit) {
+        const uint64_t explicit_cap =
+            wallet_scrypt_scratch_budget_override_mib << 20;
+        if (explicit_cap < max_stride) {
+            return 0ull;
+        }
+        return std::min<uint64_t>(hard_cap, explicit_cap);
+    }
+    const uint64_t preferred = filter_bytes >= (8ull << 30)
+        ? WALLET_SCRYPT_SCRATCH_BUDGET_FILTERED
+        : WALLET_SCRYPT_SCRATCH_BUDGET;
     return std::min<uint64_t>(hard_cap, std::max<uint64_t>(max_stride, preferred));
 }
 
@@ -29917,6 +30042,7 @@ struct BrowserVaultDeviceState {
     std::vector<uint32_t> target_file_indices;
     std::vector<WalletGenericTargetChunk> target_chunks;
     std::vector<uint32_t> chunk_target_counts;
+    std::vector<uint32_t> group_target_counts;
     WalletMaskSpec* mask_spec = nullptr;
     WalletRangeSpec* range_spec = nullptr;
     uint8_t* scrypt_scratch = nullptr;
@@ -30288,15 +30414,45 @@ static inline uint64_t wallet_chunk_concurrency(
     return std::max<uint64_t>(1ull, std::min<uint64_t>(max_concurrency, scratch_bytes / scratch_stride));
 }
 
+static uint32_t wallet_browservault_group_slice_target_count(
+    const BrowserVaultDeviceState& state,
+    const uint32_t group_offset,
+    const uint32_t group_count)
+{
+    uint64_t total = 0ull;
+    const uint64_t end = std::min<uint64_t>(
+        static_cast<uint64_t>(state.group_target_counts.size()),
+        static_cast<uint64_t>(group_offset) + static_cast<uint64_t>(group_count));
+    for (uint64_t i = group_offset; i < end; ++i) {
+        total += state.group_target_counts[static_cast<size_t>(i)];
+    }
+    return static_cast<uint32_t>(
+        std::min<uint64_t>(total, static_cast<uint64_t>(UINT32_MAX)));
+}
+
 static metalError_t wallet_flush_browservault_results(
     const std::vector<std::string>& target_files,
     std::vector<uint8_t>& solved_files,
-    bool& all_solved)
+    bool& all_solved,
+    bool* overflowed = nullptr)
 {
+    if (overflowed != nullptr) {
+        *overflowed = false;
+    }
     unsigned long long count = 0;
     metalError_t st = metalMemcpy(&count, p_wallet_count, sizeof(count), metalMemcpyDeviceToHost);
     if (st != metalSuccess || count == 0ull) return st;
     const unsigned long long capped = std::min<unsigned long long>(count, MAX_FOUNDS);
+    if (count > capped) {
+        fprintf(stderr,
+            "[!] Warning: browser-wallet result buffer overflow (%llu > %llu); "
+            "replaying the unfinished batch after solved-target upload [!]\n",
+            count,
+            capped);
+        if (overflowed != nullptr) {
+            *overflowed = true;
+        }
+    }
     std::vector<WalletModeResult> results(static_cast<size_t>(capped));
     st = metalMemcpy(results.data(), p_wallet_results, static_cast<size_t>(capped) * sizeof(WalletModeResult), metalMemcpyDeviceToHost);
     if (st != metalSuccess) return st;
@@ -30319,6 +30475,33 @@ static metalError_t wallet_flush_browservault_results(
     }
     if (!filtered.empty()) SaveResultBrowserVault(OUT_FILE, Founds, save, filtered.data(), static_cast<unsigned long long>(filtered.size()), target_files);
     return metalMemset(p_wallet_count, 0, sizeof(unsigned long long));
+}
+
+static void wallet_update_bip38_progress(
+    const std::vector<uint8_t>& solved_files,
+    const uint64_t completed_kdfs,
+    const uint64_t completed_verifications,
+    const uint64_t readback_ns)
+{
+    if (!BIP38_MODE) {
+        return;
+    }
+    uint64_t solved = 0ull;
+    {
+        std::lock_guard<std::mutex> lock(browservault_solved_mutex);
+        for (const uint8_t value : solved_files) {
+            solved += value != 0u ? 1ull : 0ull;
+        }
+    }
+    modeinfra::ModeProgress& progress = modeinfra::global_mode_progress();
+    progress.credit_completed(completed_kdfs,
+                              completed_kdfs,
+                              completed_verifications,
+                              readback_ns);
+    progress.set_targets(static_cast<uint64_t>(solved_files.size()),
+                         static_cast<uint64_t>(solved_files.size()),
+                         solved);
+    progress.set_founds(solved);
 }
 
 static metalError_t wallet_flush_exodusseco_results(
@@ -30473,9 +30656,6 @@ static metalError_t wallet_launch_browservault_generated(
         bool any_progress = false, all_chunks_done = true;
         for (size_t chunk_idx = 0; chunk_idx < state.target_chunks.size() && !all_solved; ++chunk_idx) {
             const WalletGenericTargetChunk& chunk = state.target_chunks[chunk_idx];
-            const uint32_t chunk_targets = chunk_idx < state.chunk_target_counts.size()
-                ? state.chunk_target_counts[chunk_idx]
-                : chunk.count;
             const uint64_t processed = chunk_processed[chunk_idx];
             if (processed >= count) continue;
             all_chunks_done = false;
@@ -30485,11 +30665,17 @@ static metalError_t wallet_launch_browservault_generated(
                 ? wallet_chunk_concurrency(state.scrypt_scratch_bytes, state.scrypt_concurrency, chunk_stride)
                 : walletdat_launch_thread_count();
             if (chunk_concurrency == 0ull) return metalErrorMemoryAllocation;
-            uint64_t sub_count = wallet_generic_candidate_sublaunch_count(count - processed, chunk.work, chunk.count);
+            const uint32_t group_sub_limit = chunk_uses_scrypt
+                ? static_cast<uint32_t>(std::max<uint64_t>(1ull,
+                    std::min<uint64_t>(chunk_concurrency, static_cast<uint64_t>(chunk.count))))
+                : chunk.count;
+            uint64_t sub_count = wallet_generic_candidate_sublaunch_count(
+                count - processed, chunk.work, group_sub_limit);
             if (chunk_uses_scrypt) {
                 sub_count = std::min<uint64_t>(
                     sub_count,
-                    wallet_scrypt_candidate_sublaunch_count(count - processed, chunk_concurrency, chunk.count));
+                    wallet_scrypt_candidate_sublaunch_count(
+                        count - processed, chunk_concurrency, group_sub_limit));
             }
             if (sub_count == 0ull) continue;
             const uint32_t launch_blocks = chunk_uses_scrypt
@@ -30497,16 +30683,55 @@ static metalError_t wallet_launch_browservault_generated(
                     std::min<uint64_t>((chunk_concurrency + BLOCK_THREADS - 1ull) / BLOCK_THREADS,
                         static_cast<uint64_t>(BLOCK_NUMBER))))
                 : BLOCK_NUMBER;
-            if (state.simple_aes_gcm_singletons) {
-                metal_launch("workerBrowserVault", launch_blocks, BLOCK_THREADS, nullptr, nullptr, state.targets + chunk.offset, state.ciphertext_pool, chunk.count, state.solved_flags, state.solved_count, candidate_kind, nullptr, nullptr, 0u, state.mask_spec, state.range_spec, start + processed, sub_count);
+            for (uint32_t group_offset = 0u;
+                 group_offset < chunk.count && !all_solved;
+                 group_offset += group_sub_limit) {
+                const uint32_t group_sub_count =
+                    std::min<uint32_t>(group_sub_limit, chunk.count - group_offset);
+                const uint32_t group_target_count =
+                    wallet_browservault_group_slice_target_count(
+                        state, chunk.offset + group_offset, group_sub_count);
+                uint64_t readback_ns = 0ull;
+                bool overflowed = false;
+                do {
+                    if (state.simple_aes_gcm_singletons) {
+                        metal_launch("workerBrowserVault", launch_blocks, BLOCK_THREADS, nullptr, nullptr, state.targets + chunk.offset + group_offset, state.ciphertext_pool, group_sub_count, state.solved_flags, state.solved_count, candidate_kind, nullptr, nullptr, 0u, state.mask_spec, state.range_spec, start + processed, sub_count);
+                    }
+                    else {
+			            metal_launch("workerBrowserVaultGrouped", launch_blocks, BLOCK_THREADS, nullptr, nullptr, _dev_precomp, pitch, state.targets, state.groups + chunk.offset + group_offset, state.ciphertext_pool, group_sub_count, state.solved_flags, state.solved_count, candidate_kind, nullptr, nullptr, 0u, state.mask_spec, state.range_spec, state.scrypt_scratch, chunk_stride, start + processed, sub_count);
+                    }
+                    st = metalGetLastError(); if (st != metalSuccess) return st;
+                    st = metalDeviceSynchronize(); if (st != metalSuccess) return st;
+                    const auto readback_begin = std::chrono::steady_clock::now();
+                    st = wallet_flush_browservault_results(
+                        target_files, solved_files, all_solved, &overflowed);
+                    if (st != metalSuccess) return st;
+                    readback_ns += static_cast<uint64_t>(
+                        std::chrono::duration_cast<std::chrono::nanoseconds>(
+                            std::chrono::steady_clock::now() - readback_begin).count());
+                    if (overflowed && !all_solved) {
+                        uint32_t remaining_targets = 0u;
+                        st = wallet_sync_solved_flags_common(
+                            state.solved_flags,
+                            state.solved_count,
+                            state.solved_version_uploaded,
+                            state.active_target_count_cached,
+                            state.target_file_indices,
+                            solved_files,
+                            browservault_solved_mutex,
+                            browservault_solved_version,
+                            remaining_targets);
+                        if (st != metalSuccess) return st;
+                        all_solved = remaining_targets == 0u;
+                    }
+                } while (overflowed && !all_solved);
+                counterTotal += sub_count * static_cast<uint64_t>(group_target_count);
+                wallet_update_bip38_progress(
+                    solved_files,
+                    sub_count * static_cast<uint64_t>(group_target_count),
+                    sub_count * static_cast<uint64_t>(group_target_count),
+                    readback_ns);
             }
-            else {
-			    metal_launch("workerBrowserVaultGrouped", launch_blocks, BLOCK_THREADS, nullptr, nullptr, _dev_precomp, pitch, state.targets, state.groups + chunk.offset, state.ciphertext_pool, chunk.count, state.solved_flags, state.solved_count, candidate_kind, nullptr, nullptr, 0u, state.mask_spec, state.range_spec, state.scrypt_scratch, chunk_stride, start + processed, sub_count);
-            }
-            st = metalGetLastError(); if (st != metalSuccess) return st;
-            st = metalDeviceSynchronize(); if (st != metalSuccess) return st;
-            counterTotal += sub_count * static_cast<uint64_t>(chunk_targets);
-            st = wallet_flush_browservault_results(target_files, solved_files, all_solved); if (st != metalSuccess) return st;
             chunk_processed[chunk_idx] = processed + sub_count;
             any_progress = true;
         }
@@ -30537,9 +30762,6 @@ static metalError_t wallet_launch_browservault_dict_batch(
         bool any_progress = false, all_chunks_done = true;
         for (size_t chunk_idx = 0; chunk_idx < state.target_chunks.size() && !all_solved; ++chunk_idx) {
             const WalletGenericTargetChunk& chunk = state.target_chunks[chunk_idx];
-            const uint32_t chunk_targets = chunk_idx < state.chunk_target_counts.size()
-                ? state.chunk_target_counts[chunk_idx]
-                : chunk.count;
             const uint64_t processed = chunk_processed[chunk_idx];
             if (processed >= batch.count) continue;
             all_chunks_done = false;
@@ -30549,11 +30771,21 @@ static metalError_t wallet_launch_browservault_dict_batch(
                 ? wallet_chunk_concurrency(state.scrypt_scratch_bytes, state.scrypt_concurrency, chunk_stride)
                 : walletdat_launch_thread_count();
             if (chunk_concurrency == 0ull) return metalErrorMemoryAllocation;
-            uint64_t sub_count = wallet_generic_candidate_sublaunch_count((uint64_t)batch.count - processed, chunk.work, chunk.count);
+            const uint32_t group_sub_limit = chunk_uses_scrypt
+                ? static_cast<uint32_t>(std::max<uint64_t>(1ull,
+                    std::min<uint64_t>(chunk_concurrency, static_cast<uint64_t>(chunk.count))))
+                : chunk.count;
+            uint64_t sub_count = wallet_generic_candidate_sublaunch_count(
+                static_cast<uint64_t>(batch.count) - processed,
+                chunk.work,
+                group_sub_limit);
             if (chunk_uses_scrypt) {
                 sub_count = std::min<uint64_t>(
                     sub_count,
-                    wallet_scrypt_candidate_sublaunch_count((uint64_t)batch.count - processed, chunk_concurrency, chunk.count));
+                    wallet_scrypt_candidate_sublaunch_count(
+                        static_cast<uint64_t>(batch.count) - processed,
+                        chunk_concurrency,
+                        group_sub_limit));
             }
             if (sub_count == 0ull) continue;
             const uint32_t launch_blocks = chunk_uses_scrypt
@@ -30561,16 +30793,55 @@ static metalError_t wallet_launch_browservault_dict_batch(
                     std::min<uint64_t>((chunk_concurrency + BLOCK_THREADS - 1ull) / BLOCK_THREADS,
                         static_cast<uint64_t>(BLOCK_NUMBER))))
                 : BLOCK_NUMBER;
-            if (state.simple_aes_gcm_singletons) {
-                metal_launch("workerBrowserVault", launch_blocks, BLOCK_THREADS, nullptr, nullptr, state.targets + chunk.offset, state.ciphertext_pool, chunk.count, state.solved_flags, state.solved_count, WALLET_CANDIDATE_DICTIONARY, state.pass_data, state.pass_lens, batch.count, nullptr, nullptr, processed, sub_count);
+            for (uint32_t group_offset = 0u;
+                 group_offset < chunk.count && !all_solved;
+                 group_offset += group_sub_limit) {
+                const uint32_t group_sub_count =
+                    std::min<uint32_t>(group_sub_limit, chunk.count - group_offset);
+                const uint32_t group_target_count =
+                    wallet_browservault_group_slice_target_count(
+                        state, chunk.offset + group_offset, group_sub_count);
+                uint64_t readback_ns = 0ull;
+                bool overflowed = false;
+                do {
+                    if (state.simple_aes_gcm_singletons) {
+                        metal_launch("workerBrowserVault", launch_blocks, BLOCK_THREADS, nullptr, nullptr, state.targets + chunk.offset + group_offset, state.ciphertext_pool, group_sub_count, state.solved_flags, state.solved_count, WALLET_CANDIDATE_DICTIONARY, state.pass_data, state.pass_lens, batch.count, nullptr, nullptr, processed, sub_count);
+                    }
+                    else {
+			            metal_launch("workerBrowserVaultGrouped", launch_blocks, BLOCK_THREADS, nullptr, nullptr, _dev_precomp, pitch, state.targets, state.groups + chunk.offset + group_offset, state.ciphertext_pool, group_sub_count, state.solved_flags, state.solved_count, WALLET_CANDIDATE_DICTIONARY, state.pass_data, state.pass_lens, batch.count, nullptr, nullptr, state.scrypt_scratch, chunk_stride, processed, sub_count);
+                    }
+                    st = metalGetLastError(); if (st != metalSuccess) return st;
+                    st = metalDeviceSynchronize(); if (st != metalSuccess) return st;
+                    const auto readback_begin = std::chrono::steady_clock::now();
+                    st = wallet_flush_browservault_results(
+                        target_files, solved_files, all_solved, &overflowed);
+                    if (st != metalSuccess) return st;
+                    readback_ns += static_cast<uint64_t>(
+                        std::chrono::duration_cast<std::chrono::nanoseconds>(
+                            std::chrono::steady_clock::now() - readback_begin).count());
+                    if (overflowed && !all_solved) {
+                        uint32_t remaining_targets = 0u;
+                        st = wallet_sync_solved_flags_common(
+                            state.solved_flags,
+                            state.solved_count,
+                            state.solved_version_uploaded,
+                            state.active_target_count_cached,
+                            state.target_file_indices,
+                            solved_files,
+                            browservault_solved_mutex,
+                            browservault_solved_version,
+                            remaining_targets);
+                        if (st != metalSuccess) return st;
+                        all_solved = remaining_targets == 0u;
+                    }
+                } while (overflowed && !all_solved);
+                counterTotal += sub_count * static_cast<uint64_t>(group_target_count);
+                wallet_update_bip38_progress(
+                    solved_files,
+                    sub_count * static_cast<uint64_t>(group_target_count),
+                    sub_count * static_cast<uint64_t>(group_target_count),
+                    readback_ns);
             }
-            else {
-			    metal_launch("workerBrowserVaultGrouped", launch_blocks, BLOCK_THREADS, nullptr, nullptr, _dev_precomp, pitch, state.targets, state.groups + chunk.offset, state.ciphertext_pool, chunk.count, state.solved_flags, state.solved_count, WALLET_CANDIDATE_DICTIONARY, state.pass_data, state.pass_lens, batch.count, nullptr, nullptr, state.scrypt_scratch, chunk_stride, processed, sub_count);
-            }
-            st = metalGetLastError(); if (st != metalSuccess) return st;
-            st = metalDeviceSynchronize(); if (st != metalSuccess) return st;
-            counterTotal += sub_count * static_cast<uint64_t>(chunk_targets);
-            st = wallet_flush_browservault_results(target_files, solved_files, all_solved); if (st != metalSuccess) return st;
             chunk_processed[chunk_idx] = processed + sub_count;
             any_progress = true;
         }
@@ -48221,11 +48492,84 @@ metalError_t processMetalBrowserVault()
         return metalSuccess;
     }
 
+    uint64_t wallet_scratch_hard_cap = std::numeric_limits<uint64_t>::max();
+    if (browservault_has_scrypt && (bip38_mode || wallet_memory_explicit)) {
+        std::vector<modeinfra::MemoryDeviceInfo> memory_devices;
+        memory_devices.reserve(g_gpu_contexts.size());
+        for (const GpuRuntimeContext& context : g_gpu_contexts) {
+            metalDeviceProp properties{};
+            const metalError_t properties_status =
+                metalGetDeviceProperties(&properties, context.device_id);
+            if (properties_status != metalSuccess) {
+                fprintf(stderr,
+                    "[!] Error: cannot query Metal memory limits for GPU %d: %s [!]\n",
+                    context.device_id,
+                    metalGetErrorString(properties_status));
+                return properties_status;
+            }
+            memory_devices.push_back(modeinfra::MemoryDeviceInfo{
+                properties.recommendedMaxWorkingSetSize,
+                properties.currentAllocatedSize,
+                properties.maxBufferLength,
+                properties.hasUnifiedMemory != 0
+            });
+        }
+        const uint64_t mandatory_per_device =
+            static_cast<uint64_t>(targets.size()) * sizeof(BrowserVaultDeviceTarget) +
+            static_cast<uint64_t>(groups.size()) * sizeof(BrowserVaultGroup) +
+            static_cast<uint64_t>(ciphertext_pool.size()) +
+            static_cast<uint64_t>(target_files.size());
+        const uint64_t host_resident_bytes =
+            static_cast<uint64_t>(sorted_targets.size()) * sizeof(BrowserVaultHostTarget) +
+            static_cast<uint64_t>(targets.size()) * sizeof(BrowserVaultDeviceTarget) +
+            static_cast<uint64_t>(groups.size()) * sizeof(BrowserVaultGroup) +
+            static_cast<uint64_t>(ciphertext_pool.size()) +
+            static_cast<uint64_t>(target_files.size());
+        modeinfra::MemoryBudget memory_budget{};
+        std::string memory_error;
+        if (!modeinfra::resolve_memory_budget(
+                wallet_memory_explicit
+                    ? wallet_memory_spec
+                    : modeinfra::MemorySpec{ modeinfra::MemoryKind::Auto, 0ull },
+                memory_devices,
+                mandatory_per_device,
+                host_resident_bytes,
+                memory_budget,
+                memory_error)) {
+            fprintf(stderr, "[!] Error: -wallet-mem: %s [!]\n", memory_error.c_str());
+            return metalErrorMemoryAllocation;
+        }
+        if (memory_budget.per_device_budget <= mandatory_per_device) {
+            fprintf(stderr,
+                "[!] Error: -wallet-mem leaves no room for one %s scrypt job [!]\n",
+                mode_lc);
+            return metalErrorMemoryAllocation;
+        }
+        wallet_scratch_hard_cap =
+            memory_budget.per_device_budget - mandatory_per_device;
+        printf("[!] %s wallet memory budget: %.2f GiB total, %.2f GiB/device, unified=%s [!]\n",
+            mode_lc,
+            static_cast<double>(memory_budget.total_budget) / 1073741824.0,
+            static_cast<double>(memory_budget.per_device_budget) / 1073741824.0,
+            memory_budget.unified ? "yes" : "no");
+    }
+
     std::vector<uint8_t> solved_files(target_files.size(), 0u);
     { std::lock_guard<std::mutex> lock(browservault_solved_mutex); browservault_solved_version = 0ull; }
     bool all_solved = false;
     std::vector<BrowserVaultDeviceState> states(g_gpu_contexts.size());
     metalError_t st = metalSuccess;
+    bool bip38_progress_active = false;
+    uint64_t bip38_working_set_bytes = 0ull;
+    if (bip38_mode) {
+        modeinfra::ModeProgress& progress = modeinfra::global_mode_progress();
+        progress.begin("BIP38", modeinfra::ProgressUnit::Kdf,
+                       modeinfra::ProgressPhase::Build);
+        progress.set_targets(static_cast<uint64_t>(target_files.size()),
+                             static_cast<uint64_t>(target_files.size()),
+                             0ull);
+        bip38_progress_active = true;
+    }
     for (size_t gi = 0; gi < g_gpu_contexts.size(); ++gi) {
         if (!activate_gpu_context(g_gpu_contexts[gi])) { st = metalErrorInvalidDevice; goto Done; }
         states[gi].target_count = static_cast<uint32_t>(targets.size());
@@ -48234,6 +48578,10 @@ metalError_t processMetalBrowserVault()
         states[gi].solved_count = static_cast<uint32_t>(target_files.size());
         states[gi].target_chunks = chunks;
         states[gi].chunk_target_counts = chunk_target_counts;
+        states[gi].group_target_counts.reserve(groups.size());
+        for (const BrowserVaultGroup& group : groups) {
+            states[gi].group_target_counts.push_back(group.target_count);
+        }
         for (const BrowserVaultDeviceTarget& t : targets) states[gi].target_file_indices.push_back(t.target_index);
         st = metalMalloc(reinterpret_cast<void**>(&states[gi].targets), targets.size() * sizeof(BrowserVaultDeviceTarget));
         if (st != metalSuccess) goto Done;
@@ -48259,7 +48607,10 @@ metalError_t processMetalBrowserVault()
             metalMemGetInfo(&free_mem, &total_mem);
             const uint64_t reserve_target = wallet_scrypt_memory_reserve_bytes();
             const uint64_t reserve = std::min<uint64_t>(static_cast<uint64_t>(free_mem / 2u), reserve_target);
-            const uint64_t hard_cap = static_cast<uint64_t>(free_mem > reserve ? free_mem - reserve : free_mem / 2u);
+            const uint64_t available_cap =
+                static_cast<uint64_t>(free_mem > reserve ? free_mem - reserve : free_mem / 2u);
+            const uint64_t hard_cap =
+                std::min<uint64_t>(available_cap, wallet_scratch_hard_cap);
             uint64_t scratch_bytes = wallet_scrypt_scratch_budget_bytes(hard_cap, max_scrypt_scratch_stride);
             const bool bisq_auto_large_stride_cap =
                 bisq_mode && !wallet_scrypt_scratch_budget_explicit &&
@@ -48321,9 +48672,29 @@ metalError_t processMetalBrowserVault()
                 static_cast<double>(scratch_bytes) / 1048576.0,
                 static_cast<unsigned long long>(concurrency));
         }
+        if (bip38_mode) {
+            const uint64_t fixed_bytes =
+                static_cast<uint64_t>(targets.size()) * sizeof(BrowserVaultDeviceTarget) +
+                static_cast<uint64_t>(groups.size()) * sizeof(BrowserVaultGroup) +
+                std::max<uint64_t>(1ull, static_cast<uint64_t>(ciphertext_pool.size())) +
+                std::max<uint64_t>(1ull, static_cast<uint64_t>(target_files.size()));
+            const uint64_t device_bytes = fixed_bytes + states[gi].scrypt_scratch_bytes;
+            if (bip38_working_set_bytes >
+                std::numeric_limits<uint64_t>::max() - device_bytes) {
+                bip38_working_set_bytes = std::numeric_limits<uint64_t>::max();
+            }
+            else {
+                bip38_working_set_bytes += device_bytes;
+            }
+        }
     }
 
     {
+        if (bip38_mode) {
+            modeinfra::ModeProgress& progress = modeinfra::global_mode_progress();
+            progress.set_allocated_working_set(bip38_working_set_bytes);
+            progress.set_phase(modeinfra::ProgressPhase::Search);
+        }
         const uint64_t wallet_generated_launch_chunk = use_n_count && n_number > 0 ? n_number : static_cast<uint64_t>(BLOCK_NUMBER) * BLOCK_THREADS;
         if (!wallet_masks.empty()) {
             for (const auto& mask : wallet_masks) {
@@ -48394,7 +48765,7 @@ metalError_t processMetalBrowserVault()
         }
         else {
             WalletPassReader reader;
-            if (!reader.open(mnemonicFiles, IS_HEX)) { fprintf(stderr, "[!] Error: %s [!]\n", reader.error.c_str()); st = metalErrorInvalidValue; goto Done; }
+            if (!reader.open(mnemonicFiles, IS_HEX, bip38_mode)) { fprintf(stderr, "[!] Error: %s [!]\n", reader.error.c_str()); st = metalErrorInvalidValue; goto Done; }
             const uint32_t batch_sz = wallet_effective_dict_batch_u32(mode_lc, wallet_generated_launch_chunk);
             std::vector<WalletPassBuf> batches;
             std::vector<metalError_t> gst(g_gpu_contexts.size(), metalSuccess);
@@ -48402,7 +48773,11 @@ metalError_t processMetalBrowserVault()
             workers.reserve(g_gpu_contexts.size());
             while (!all_solved) {
                 const bool any = wallet_read_split_pass_batch(reader, batch_sz, g_gpu_contexts.size(), batches);
-                if (reader.failed) { st = metalErrorInvalidValue; goto Done; }
+                if (reader.failed) {
+                    fprintf(stderr, "[!] Error: %s [!]\n", reader.error.c_str());
+                    st = metalErrorInvalidValue;
+                    goto Done;
+                }
                 if (!any) break;
                 std::fill(gst.begin(), gst.end(), metalSuccess);
                 workers.clear();
@@ -48426,6 +48801,10 @@ metalError_t processMetalBrowserVault()
     }
 
 Done:
+    if (bip38_progress_active) {
+        wallet_update_bip38_progress(solved_files, 0ull, 0ull, 0ull);
+        modeinfra::global_mode_progress().end();
+    }
     for (size_t gi = 0; gi < g_gpu_contexts.size(); ++gi) {
         if (activate_gpu_context(g_gpu_contexts[gi])) {
             wallet_release_browservault_device_state(states[gi]);

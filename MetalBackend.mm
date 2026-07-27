@@ -3939,9 +3939,10 @@ std::string format_progress_line(const ProgressSnapshot& base,
         elapsed_seconds;
 
     std::ostringstream output;
-    output << "[!] " << (current.mode_name == nullptr ? "" : current.mode_name)
-           << ":" << progress_phase_name(current.phase)
-           << " T:[" << current.completed_candidates << "]"
+    output << "[!] T:[" << current.completed_candidates << "]"
+           << " | MODE:["
+           << (current.mode_name == nullptr ? "" : current.mode_name)
+           << ":" << progress_phase_name(current.phase) << "]"
            << " | S:[" << format_rate(completed_rate) << " "
            << progress_unit_name(current.primary_unit) << "/s]";
     if (current.primitive_operations != 0 ||
