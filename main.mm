@@ -17,6 +17,7 @@
 #include "Kangaroo/KangarooMode.h"
 #include "Bsgs/BsgsMode.h"
 #include "KeyRepair/KeyRepairMode.h"
+#include "Nonce/NonceMode.h"
 #include "Kernels/ProfanityHost.h"
 #include "Kernels/WalletModesHost.h"
 #include "RecoveryWordlistsEmbedded.h"
@@ -7212,6 +7213,7 @@ enum class HelpTopic {
     Kangaroo,
     Bsgs,
     KeyRepair,
+    Nonce,
     Poetry,
     Minikeys,
     MinikeysSeed,
@@ -9270,6 +9272,7 @@ static HelpTopic detect_help_topic(int argc, char** argv) {
         if (is_help_topic_arg(arg, "-kangaroo")) return HelpTopic::Kangaroo;
         if (is_help_topic_arg(arg, "-bsgs")) return HelpTopic::Bsgs;
         if (is_help_topic_arg(arg, "-keyrepair")) return HelpTopic::KeyRepair;
+        if (is_help_topic_arg(arg, "-nonce")) return HelpTopic::Nonce;
         if (is_help_topic_arg(arg, "-poetry")) return HelpTopic::Poetry;
         if (is_help_topic_arg(arg, "-minikeys")) {
             return has_arg(argc, argv, "-seed") ? HelpTopic::MinikeysSeed : HelpTopic::Minikeys;
@@ -9334,6 +9337,7 @@ static const char* help_topic_command(HelpTopic topic) {
     case HelpTopic::Kangaroo: return "-kangaroo";
     case HelpTopic::Bsgs: return "-bsgs";
     case HelpTopic::KeyRepair: return "-keyrepair";
+    case HelpTopic::Nonce: return "-nonce";
     case HelpTopic::Poetry: return "-poetry";
     case HelpTopic::Minikeys: return "-minikeys";
     case HelpTopic::MinikeysSeed: return "-minikeys -seed";
@@ -9417,6 +9421,7 @@ static void printHelpShort() {
 [!] -kangaroo                     Bounded secp256k1 private-key recovery.
 [!] -bsgs                         Deterministic multi-target secp256k1 BSGS.
 [!] -keyrepair                    GPU checksum-first key/key-payload repair.
+[!] -nonce                        Weak/related ECDSA and BIP340 nonce recovery.
 [!] -poetry                       Poetry brainwallet phrase recovery.
 [!] -minikeys                     Casascius minikey search.
 [!] -minikeys -seed               Deterministic Casascius minikey seed mode.
@@ -10746,6 +10751,9 @@ static void printHelpModeSection(HelpTopic topic) {
     case HelpTopic::KeyRepair:
         keyrepair::print_help();
         break;
+    case HelpTopic::Nonce:
+        nonce_mode::print_help();
+        break;
     case HelpTopic::Poetry:
         poetry_print_help();
         break;
@@ -10889,6 +10897,39 @@ int main(int argc, char** argv)
     if (has_help_arg(argc, argv)) {
         printHelpTopic(detect_help_topic(argc, argv));
         return 0;
+    }
+    if (nonce_mode::requested(argc, argv)) {
+        counterTotal = 0;
+        Founds = 0;
+        isRun = true;
+
+        const std::time_t started =
+            std::chrono::system_clock::to_time_t(
+                std::chrono::system_clock::now());
+        std::cout << "[!] Program started at: " << std::ctime(&started);
+
+        std::thread speed_thread(SpeedThreadFunc);
+        const nonce_mode::RuntimeHooks hooks{
+            [](std::uint64_t completed) {
+                counterTotal += completed;
+            },
+            []() {
+                ++Founds;
+            }
+        };
+        const int result = nonce_mode::run(argc, argv, hooks);
+        isRun = false;
+        if (speed_thread.joinable()) {
+            speed_thread.join();
+        }
+
+        const std::time_t finished =
+            std::chrono::system_clock::to_time_t(
+                std::chrono::system_clock::now());
+        std::cout << "\n[!] Processed " << counterTotal
+                  << " nonce candidates. Found: " << Founds
+                  << ". Program finished at " << std::ctime(&finished);
+        return result;
     }
     if (keyrepair::requested(argc, argv)) {
         counterTotal = 0;

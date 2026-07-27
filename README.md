@@ -58,6 +58,20 @@ Wave 2 adds checksum-first GPU key repair:
 - raw-private repair requires a related public key, while an address repair is
   always reported only as an address payload, never as recovered key material.
 
+Wave 3 adds exact ECDSA/BIP340 nonce recovery:
+
+- `-nonce` accepts repeated signature records or line-oriented files and
+  searches bounded intervals, fixed/unknown-bit masks, or exact candidate
+  lists produced by an external lattice solver;
+- the Metal kernel reconstructs `R=kG` with explicit precompute-window
+  parameters and checks ECDSA `r` (including the valid `r+n` lift) or the
+  BIP340 even-Y nonce point;
+- reused, mirrored, additive, multiplicative, and affine-related ECDSA nonces
+  are solved algebraically before brute-force search;
+- every hit is independently checked against the signature equation and full
+  public key on the host, while only `SpeedThreadFunc` prints `Nonce/s` and
+  `Verify/s`.
+
 #### v15
 
 The July 25 update extends both interval-DLP modes for very large target
@@ -2341,6 +2355,52 @@ unrestricted key search. A checksum-valid address produces only its address
 and payload. It does not imply knowledge of any private key. `raw-private`
 therefore refuses to run without a related public-key target.
 
+#### `-nonce`
+
+This mode recovers secp256k1 private keys only when an ECDSA or BIP340 nonce is
+already bounded, partially known, related to another nonce, or supplied by an
+external preprocessing step. Pass records repeatedly with `-i`, or use a text
+file containing one record per line. Blank lines and `#` comments are ignored.
+
+ECDSA records use `ecdsa:R:S:Z[:PUBKEY]`. BIP340 records use
+`bip340:SIGNATURE64:MESSAGE32[:PUBKEY_X]`. When the public key is omitted,
+supply one shared `-target` or one target per record. ECDSA targets are complete
+33/65-byte keys; BIP340 also accepts a 32-byte x-only key.
+
+```bash
+./METAL_CRYPTO_TOOLKIT -nonce -i signatures.txt \
+  -start 1 -end 0x1000000 -n 1048576
+
+./METAL_CRYPTO_TOOLKIT -nonce -i signature.txt \
+  -mask "000000000000000000000000000000000000000000000000000000000000????"
+
+./METAL_CRYPTO_TOOLKIT -nonce -nonce-model bip340 -i schnorr.txt \
+  -target signer_xonly.txt -nonce-lattice lattice_candidates.txt
+
+./METAL_CRYPTO_TOOLKIT -nonce -i related.txt \
+  -nonce-relation affine:3:7
+```
+
+`-start/-end` define an exact exclusive interval. `-mask` accepts either 64
+hex/`?` nibbles or 256 binary `0`/`1`/`?` bits.
+`-nonce-candidates` and its `-nonce-lattice` alias accept exact scalar
+candidates, one per line. `-random` applies a seeded bijection to a range, so it
+changes traversal order without repeats or omissions. `-device` divides the
+checked U256 ordinal space into non-overlapping shards and `-n` controls only
+the resident window.
+
+Repeated ECDSA `r` values are automatically tested as both `k2=k1` and
+`k2=-k1 mod n`. For the first two records,
+`-nonce-relation same|add:B|mul:A|affine:A:B` solves `k2=A*k1+B` directly.
+Each GPU hit is reconstructed and verified against `R`, the signature
+equation, and the supplied public key before output. Live `Nonce/s` and
+`Verify/s` statistics come only from the existing `SpeedThreadFunc`.
+
+This mode does not make uniformly random 256-bit nonces searchable. General
+hidden-number/lattice reduction remains an external CPU preprocessing task;
+its candidate scalars can then be passed through the exact Metal verification
+path.
+
 #### `-bisqwallet`
 
 **Active input format:**
@@ -2658,6 +2718,20 @@ xattr -d com.apple.quarantine METAL_CRYPTO_TOOLKIT
   выбранные Metal-устройства получают точные непересекающиеся шарды;
 - для raw-private обязателен связанный публичный ключ, а результат address
   всегда описывается только как адрес/payload, но не как найденный приват.
+
+Волна 3 добавляет точное восстановление nonce ECDSA/BIP340:
+
+- `-nonce` принимает повторяемые записи подписей или построчные файлы и
+  проверяет ограниченные диапазоны, маски известных/неизвестных битов либо
+  точные списки кандидатов от внешнего lattice solver;
+- Metal-ядро восстанавливает `R=kG` с явными параметрами precompute-окон и
+  проверяет ECDSA `r` (включая допустимый подъём `r+n`) либо BIP340-точку с
+  чётной Y;
+- reused, mirrored, additive, multiplicative и affine-зависимые ECDSA nonce
+  решаются алгебраически до brute-force поиска;
+- каждый hit независимо сверяется на host с уравнением подписи и полным
+  публичным ключом, а `Nonce/s` и `Verify/s` печатает только
+  `SpeedThreadFunc`.
 
 #### v15
 
@@ -4951,6 +5025,53 @@ raw public выполняется полная проверка точки кр�
 восстановления, а не неограниченного поиска ключей. Корректный checksum адреса
 даёт только адрес и его payload и не доказывает знание приватного ключа.
 Поэтому `raw-private` не запускается без связанной public-key цели.
+
+#### `-nonce`
+
+Режим восстанавливает приват secp256k1 только тогда, когда nonce ECDSA/BIP340
+уже ограничен, частично известен, связан с другим nonce либо получен внешним
+preprocessing. Записи передаются повторяемым `-i` или построчным файлом;
+пустые строки и комментарии `#` игнорируются.
+
+Формат ECDSA: `ecdsa:R:S:Z[:PUBKEY]`. Формат BIP340:
+`bip340:SIGNATURE64:MESSAGE32[:PUBKEY_X]`. Если public key не указан внутри
+записи, передайте один общий `-target` либо по одной цели на каждую запись.
+ECDSA принимает полные 33/65-байтовые ключи, BIP340 — также 32-байтовый
+x-only ключ.
+
+```bash
+./METAL_CRYPTO_TOOLKIT -nonce -i signatures.txt \
+  -start 1 -end 0x1000000 -n 1048576
+
+./METAL_CRYPTO_TOOLKIT -nonce -i signature.txt \
+  -mask "000000000000000000000000000000000000000000000000000000000000????"
+
+./METAL_CRYPTO_TOOLKIT -nonce -nonce-model bip340 -i schnorr.txt \
+  -target signer_xonly.txt -nonce-lattice lattice_candidates.txt
+
+./METAL_CRYPTO_TOOLKIT -nonce -i related.txt \
+  -nonce-relation affine:3:7
+```
+
+`-start/-end` задают точный диапазон с исключённой верхней границей. `-mask`
+принимает 64 hex/`?` полубайта либо 256 двоичных символов `0`/`1`/`?`.
+`-nonce-candidates` и его alias `-nonce-lattice` загружают точные scalar-
+кандидаты по одному на строку. `-random` применяет seed-зависимую биекцию к
+диапазону и меняет порядок без повторов и пропусков. `-device` делит checked
+U256 ordinal-space на непересекающиеся шарды, а `-n` управляет только
+резидентным окном.
+
+Одинаковый ECDSA `r` автоматически проверяется для случаев `k2=k1` и
+`k2=-k1 mod n`. Для первых двух записей
+`-nonce-relation same|add:B|mul:A|affine:A:B` напрямую решает
+`k2=A*k1+B`. Каждый GPU hit заново собирается и сверяется с `R`, уравнением
+подписи и заданным public key до вывода. Текущие `Nonce/s` и `Verify/s`
+печатает только существующий `SpeedThreadFunc`.
+
+Режим не делает равномерный случайный 256-битный nonce практически
+перебираемым. Общая hidden-number/lattice редукция остаётся внешним CPU-
+preprocessing; полученные кандидаты затем можно передать в точный Metal-контур
+проверки.
 
 #### `-bisqwallet`
 
