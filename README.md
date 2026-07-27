@@ -100,6 +100,21 @@ production setting. Fixed-state packing, raw-nibble matching, two salts per
 thread, and 64/256-thread grids all retained exact output but failed the
 required stable gain against both surrounding baselines; none was integrated.
 
+Wave 6 adds checked GPU BIP32 derivation-path search:
+
+- `-hdpath` accepts a BIP39 mnemonic, raw seed, xprv/xpub, or a descriptor
+  containing one extended key;
+- fixed indexes, inclusive ranges, explicit lists, and finite wildcards are
+  combined into one checked U256 mixed-radix domain without materializing the
+  paths on the host;
+- CKDpriv and non-hardened CKDpub run in a dedicated Metal kernel, while
+  hardened descendants from xpub are rejected before launch;
+- repeated full-public-key targets and target files are normalized and
+  deduplicated, and every Metal hit is independently re-derived on the host;
+- the shared `SpeedThreadFunc` remains the only statistics printer and reports
+  credited `Path/s`, primitive child derivations, exact verifications, targets,
+  working set, and readback time.
+
 #### v15
 
 The July 25 update extends both interval-DLP modes for very large target
@@ -1929,6 +1944,49 @@ Full built-in help:
 ./METAL_CRYPTO_TOOLKIT -create2 -help
 ```
 
+#### `-hdpath`
+
+**Use it for:** recovering one or more unknown BIP32 child indexes when the
+root seed or extended key and the final secp256k1 public key are known.
+
+Select exactly one root with `-mnemonic`, `-seed`, `-xprv`, `-xpub`, or
+`-descriptor`. A descriptor may contain origin metadata and a derivation
+suffix. `-target` is repeatable and also accepts a file containing one
+compressed or uncompressed public key per line.
+
+Path templates start with `m/`. Fixed indexes, inclusive ranges, and lists may
+be mixed:
+
+```bash
+./METAL_CRYPTO_TOOLKIT -hdpath \
+  -seed 000102030405060708090a0b0c0d0e0f \
+  -path-template "m/{0-15}'" \
+  -target 035a784662a4a20a65bf6aab9ae98a6c068a81c52e4b032c0fb5400c706cfccc56
+```
+
+A wildcard uses one finite half-open interval:
+
+```bash
+./METAL_CRYPTO_TOOLKIT -hdpath \
+  -xpub xpub... \
+  -path-template "m/0/*" \
+  -start 0 -end 100000 \
+  -target targets.txt \
+  -wallet-mem auto -device 0 -save
+```
+
+The domain is scheduled as checked U256 mixed radix and windows are credited
+only after Metal completion and successful readback. CKDpub cannot derive
+hardened children and therefore rejects apostrophe or `h` components when the
+root is public. A result from xpub contains the verified path and public key
+but no private key.
+
+Full built-in help:
+
+```bash
+./METAL_CRYPTO_TOOLKIT -hdpath -help
+```
+
 #### `-minikeys`
 
 **Use it for:** Casascius minikey strings.
@@ -2920,6 +2978,21 @@ xattr -d com.apple.quarantine METAL_CRYPTO_TOOLKIT
 salt на поток и сетки 64/256 сохранили точный результат, но не дали требуемого
 стабильного выигрыша относительно обеих окружающих baseline-групп, поэтому не
 были интегрированы.
+
+Волна 6 добавляет checked GPU-поиск путей деривации BIP32:
+
+- `-hdpath` принимает BIP39 mnemonic, raw seed, xprv/xpub либо descriptor с
+  одним extended key;
+- фиксированные индексы, inclusive-диапазоны, явные списки и finite wildcard
+  объединяются в checked U256 mixed-radix domain без материализации путей на
+  host;
+- CKDpriv и non-hardened CKDpub выполняются отдельным Metal-ядром, а hardened
+  потомки от xpub отклоняются до запуска;
+- повторяемые полные публичные ключи и target-файлы нормализуются и
+  дедуплицируются, а каждый Metal hit независимо пересчитывается на host;
+- общий `SpeedThreadFunc` остаётся единственным потоком статистики и печатает
+  зачтённые `Path/s`, число child derivations, точные проверки, targets,
+  working set и readback time.
 
 #### v15
 
@@ -4764,6 +4837,49 @@ bytecode. Шаблоны сравниваются с lowercase Ethereum-адре
 
 ```bash
 ./METAL_CRYPTO_TOOLKIT -create2 -help
+```
+
+#### `-hdpath`
+
+**Когда использовать:** для восстановления одного или нескольких неизвестных
+BIP32 child index, когда известен корневой seed/extended key и итоговый
+публичный ключ secp256k1.
+
+Нужно выбрать ровно один root через `-mnemonic`, `-seed`, `-xprv`, `-xpub`
+либо `-descriptor`. Descriptor может содержать origin metadata и derivation
+suffix. `-target` можно повторять; существующий файл читается как список
+compressed/uncompressed публичных ключей.
+
+Path template начинается с `m/`. В одном шаблоне можно смешивать фиксированные
+индексы, inclusive-диапазоны и списки:
+
+```bash
+./METAL_CRYPTO_TOOLKIT -hdpath \
+  -seed 000102030405060708090a0b0c0d0e0f \
+  -path-template "m/{0-15}'" \
+  -target 035a784662a4a20a65bf6aab9ae98a6c068a81c52e4b032c0fb5400c706cfccc56
+```
+
+Wildcard использует один finite half-open интервал:
+
+```bash
+./METAL_CRYPTO_TOOLKIT -hdpath \
+  -xpub xpub... \
+  -path-template "m/0/*" \
+  -start 0 -end 100000 \
+  -target targets.txt \
+  -wallet-mem auto -device 0 -save
+```
+
+Домен планируется как checked U256 mixed radix; окно засчитывается только
+после завершения Metal и успешного readback. CKDpub не может строить hardened
+children, поэтому апостроф и `h` с публичным root отклоняются. Результат от
+xpub содержит проверенные path и public key, но не приватный ключ.
+
+Полная встроенная справка:
+
+```bash
+./METAL_CRYPTO_TOOLKIT -hdpath -help
 ```
 
 #### `-minikeys`

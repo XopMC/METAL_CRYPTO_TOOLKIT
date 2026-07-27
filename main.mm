@@ -20,6 +20,7 @@
 #include "Nonce/NonceMode.h"
 #include "Vanity/VanityMode.h"
 #include "Create2/Create2Mode.h"
+#include "HdPath/HdPathMode.h"
 #include "Kernels/ProfanityHost.h"
 #include "Kernels/WalletModesHost.h"
 #include "RecoveryWordlistsEmbedded.h"
@@ -7218,6 +7219,7 @@ enum class HelpTopic {
     Nonce,
     Vanity,
     Create2,
+    HdPath,
     Poetry,
     Minikeys,
     MinikeysSeed,
@@ -9279,6 +9281,7 @@ static HelpTopic detect_help_topic(int argc, char** argv) {
         if (is_help_topic_arg(arg, "-nonce")) return HelpTopic::Nonce;
         if (is_help_topic_arg(arg, "-vanity")) return HelpTopic::Vanity;
         if (is_help_topic_arg(arg, "-create2")) return HelpTopic::Create2;
+        if (is_help_topic_arg(arg, "-hdpath")) return HelpTopic::HdPath;
         if (is_help_topic_arg(arg, "-poetry")) return HelpTopic::Poetry;
         if (is_help_topic_arg(arg, "-minikeys")) {
             return has_arg(argc, argv, "-seed") ? HelpTopic::MinikeysSeed : HelpTopic::Minikeys;
@@ -9346,6 +9349,7 @@ static const char* help_topic_command(HelpTopic topic) {
     case HelpTopic::Nonce: return "-nonce";
     case HelpTopic::Vanity: return "-vanity";
     case HelpTopic::Create2: return "-create2";
+    case HelpTopic::HdPath: return "-hdpath";
     case HelpTopic::Poetry: return "-poetry";
     case HelpTopic::Minikeys: return "-minikeys";
     case HelpTopic::MinikeysSeed: return "-minikeys -seed";
@@ -9432,6 +9436,7 @@ static void printHelpShort() {
 [!] -nonce                        Weak/related ECDSA and BIP340 nonce recovery.
 [!] -vanity                       BTC/Ethereum/TRON vanity address generation.
 [!] -create2                      Ethereum CREATE2 salt/address search.
+[!] -hdpath                       GPU BIP32 derivation-path search.
 [!] -poetry                       Poetry brainwallet phrase recovery.
 [!] -minikeys                     Casascius minikey search.
 [!] -minikeys -seed               Deterministic Casascius minikey seed mode.
@@ -10770,6 +10775,9 @@ static void printHelpModeSection(HelpTopic topic) {
     case HelpTopic::Create2:
         create2_mode::print_help();
         break;
+    case HelpTopic::HdPath:
+        hdpath::print_help();
+        break;
     case HelpTopic::Poetry:
         poetry_print_help();
         break;
@@ -10913,6 +10921,39 @@ int main(int argc, char** argv)
     if (has_help_arg(argc, argv)) {
         printHelpTopic(detect_help_topic(argc, argv));
         return 0;
+    }
+    if (hdpath::requested(argc, argv)) {
+        counterTotal = 0;
+        Founds = 0;
+        isRun = true;
+
+        const std::time_t started =
+            std::chrono::system_clock::to_time_t(
+                std::chrono::system_clock::now());
+        std::cout << "[!] Program started at: " << std::ctime(&started);
+
+        std::thread speed_thread(SpeedThreadFunc);
+        const hdpath::RuntimeHooks hooks{
+            [](std::uint64_t completed) {
+                counterTotal += completed;
+            },
+            []() {
+                ++Founds;
+            }
+        };
+        const int result = hdpath::run(argc, argv, hooks);
+        isRun = false;
+        if (speed_thread.joinable()) {
+            speed_thread.join();
+        }
+
+        const std::time_t finished =
+            std::chrono::system_clock::to_time_t(
+                std::chrono::system_clock::now());
+        std::cout << "\n[!] Processed " << counterTotal
+                  << " derivation paths. Found: " << Founds
+                  << ". Program finished at " << std::ctime(&finished);
+        return result;
     }
     if (create2_mode::requested(argc, argv)) {
         counterTotal = 0;
