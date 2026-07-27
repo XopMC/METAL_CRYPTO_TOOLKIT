@@ -35,7 +35,7 @@
 namespace hdpath {
 namespace {
 
-constexpr std::uint32_t kThreadgroupSize = 128u;
+constexpr std::uint32_t kThreadgroupSize = 256u;
 constexpr std::uint64_t kDefaultBatch = 1ull << 16u;
 constexpr std::uint64_t kMaximumBatch =
     (static_cast<std::uint64_t>(
