@@ -2033,7 +2033,7 @@ Artifact controls:
 | `-wallet-mem auto\|all\|NN%\|SIZE` | unified wallet working-set budget for v16 modes that explicitly advertise it; Wave 1 enables it for BIP38 |
 | `-wallet-scrypt-mem MiB` | scratch-memory cap for modes that actually use scrypt/KdfRomix |
 
-`-wallet-mem auto` uses at most half of the currently free recommended Metal working set. `all` uses the remaining recommended set minus a 512 MiB runtime reserve; percentages are relative to the current free set. On Apple Silicon, host-visible tables and every Metal-device replica consume the same unified-memory pool. The automatic scrypt scratch target starts at 16384 MiB. When the total input size of the regular GPU filters reaches 8 GiB, the target falls back to 4096 MiB. The final allocation is also bounded by `-wallet-mem`, available unified memory, and the scratch size of one job. An explicit `-wallet-scrypt-mem` is a strict cap and fails if one job cannot fit.
+`-wallet-mem auto` uses at most half of the currently free recommended Metal working set. `all` uses the remaining recommended set minus a 512 MiB runtime reserve; percentages are relative to the current free set. On Apple Silicon, host-visible tables and every Metal-device replica consume the same unified-memory pool. The automatic scrypt scratch target starts at 16384 MiB; BIP38 uses a measured 32768 MiB target when no explicit scrypt cap is supplied. When the total input size of the regular GPU filters reaches 8 GiB, the target falls back to 4096 MiB. The final allocation is also bounded by `-wallet-mem`, available unified memory, and the scratch size of one job. An explicit `-wallet-scrypt-mem` is a strict cap and fails if one job cannot fit.
 
 Do not pass `-hash` or `-target` to wallet-password modes. Their verification target comes from the wallet artifact itself.
 
@@ -2270,7 +2270,7 @@ The deterministic local mask/range fixture
 `6PYWCzYbiDh88rbbQVRFUCdqS51ptYow6EEeKRGFNAWqRG5FC4evLvwJd9` uses password
 `0` and recovers private key `3`; it is not an official BIP38 vector.
 
-Dictionary candidates are normalized to UTF-8 NFC as required by BIP38. Use `-hex` to supply exact password bytes without text normalization. Mask and raw-range candidates are byte-oriented. `-wallet-mem` bounds the complete wallet working set, `-wallet-scrypt-mem MiB` further bounds per-device scratch, `-n` caps active scrypt jobs, and `-device` splits candidate ordinals without overlap.
+Dictionary candidates are normalized to UTF-8 NFC as required by BIP38. Use `-hex` to supply exact password bytes without text normalization. Mask and raw-range candidates are byte-oriented. `-wallet-mem` bounds the complete wallet working set, `-wallet-scrypt-mem MiB` further bounds per-device scratch, `-n` caps active scrypt jobs, and `-device` splits candidate ordinals without overlap. With default or explicit `-wallet-mem auto`, BIP38 targets up to 32 GiB of scratch when it fits; explicit memory sizes, percentages, `all`, and `-wallet-scrypt-mem` remain strict user limits.
 
 ```bash
 ./METAL_CRYPTO_TOOLKIT -bip38 encrypted.txt \
@@ -4596,7 +4596,7 @@ WALLETJS:<profile>:SOURCE:<source>:PRIV:<64_hex>:<TYPE>:<value>
 | `-wallet-mem auto\|all\|NN%\|SIZE` | бюджет unified memory для v16-режимов, где он указан явно; в Волне 1 включён для BIP38 |
 | `-wallet-scrypt-mem MiB` | ограничивает промежуточную память только в режимах, где реально используется scrypt/KdfRomix |
 
-`-wallet-mem auto` использует не более половины текущего свободного recommended Metal working set. `all` использует остаток за вычетом 512 МиБ для runtime; процент считается от текущей свободной памяти. На Apple Silicon host-visible таблицы и реплики на Metal-устройствах расходуют один пул unified memory. Автоматический предел памяти для scrypt сначала ориентируется на 16384 МиБ. Когда суммарный размер входных данных обычных GPU-фильтров достигает 8 ГиБ, ориентир снижается до 4096 МиБ. Итоговый буфер дополнительно ограничивается `-wallet-mem`, свободной объединенной памятью и размером одного задания. Явный `-wallet-scrypt-mem` является строгим пределом и завершает запуск ошибкой, если не помещается одно задание.
+`-wallet-mem auto` использует не более половины текущего свободного recommended Metal working set. `all` использует остаток за вычетом 512 МиБ для runtime; процент считается от текущей свободной памяти. На Apple Silicon host-visible таблицы и реплики на Metal-устройствах расходуют один пул unified memory. Автоматический предел памяти для scrypt сначала ориентируется на 16384 МиБ; BIP38 без явного scrypt-cap использует измеренный ориентир 32768 МиБ. Когда суммарный размер входных данных обычных GPU-фильтров достигает 8 ГиБ, ориентир снижается до 4096 МиБ. Итоговый буфер дополнительно ограничивается `-wallet-mem`, свободной объединенной памятью и размером одного задания. Явный `-wallet-scrypt-mem` является строгим пределом и завершает запуск ошибкой, если не помещается одно задание.
 
 `-hash` и `-target` здесь не нужны: цель проверки уже находится внутри файла кошелька или извлеченной строки.
 
@@ -4828,7 +4828,7 @@ lot/sequence — `MOLON LABE`. Результаты сверяются с опу
 пароль `0` и восстанавливает приватный ключ `3`; это не официальный вектор
 BIP38.
 
-Текстовые кандидаты из словаря нормализуются в UTF-8 NFC по требованиям BIP38. `-hex` передает точные байты без нормализации. Маски и raw-диапазоны работают с байтами. `-wallet-mem` ограничивает общий working set кошелька, `-wallet-scrypt-mem MiB` дополнительно ограничивает scratch на устройство, `-n` — число активных scrypt-задач, а `-device` делит ordinal-пространство кандидатов без пересечений.
+Текстовые кандидаты из словаря нормализуются в UTF-8 NFC по требованиям BIP38. `-hex` передает точные байты без нормализации. Маски и raw-диапазоны работают с байтами. `-wallet-mem` ограничивает общий working set кошелька, `-wallet-scrypt-mem MiB` дополнительно ограничивает scratch на устройство, `-n` — число активных scrypt-задач, а `-device` делит ordinal-пространство кандидатов без пересечений. При default или явном `-wallet-mem auto` BIP38 использует до 32 ГиБ scratch, если память доступна; точный размер, процент, `all` и `-wallet-scrypt-mem` остаются строгими пользовательскими пределами.
 
 ```bash
 ./METAL_CRYPTO_TOOLKIT -bip38 encrypted.txt \
