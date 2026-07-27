@@ -95,6 +95,11 @@ Wave 5 adds deterministic Ethereum CREATE2 salt search:
 - every hit is recomputed with an independent host Keccak implementation, and
   only the shared `SpeedThreadFunc` reports completed `Addr/s`.
 
+The Wave 5 optimization sweep keeps 128 threads per Metal threadgroup as the
+production setting. Fixed-state packing, raw-nibble matching, two salts per
+thread, and 64/256-thread grids all retained exact output but failed the
+required stable gain against both surrounding baselines; none was integrated.
+
 #### v15
 
 The July 25 update extends both interval-DLP modes for very large target
@@ -2909,6 +2914,12 @@ xattr -d com.apple.quarantine METAL_CRYPTO_TOOLKIT
   а finite random меняет только циклическую начальную точку;
 - каждый hit пересчитывается независимым host Keccak, а завершённые `Addr/s`
   печатает только общий `SpeedThreadFunc`.
+
+По итогам оптимизационной части Волны 5 production-настройкой остаются 128
+потоков на Metal threadgroup. Fixed-state packing, raw-nibble matching, два
+salt на поток и сетки 64/256 сохранили точный результат, но не дали требуемого
+стабильного выигрыша относительно обеих окружающих baseline-групп, поэтому не
+были интегрированы.
 
 #### v15
 
