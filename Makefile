@@ -40,6 +40,7 @@ CPP_SRCS := \
 	Bsgs/BsgsMode.cpp \
 	KeyRepair/KeyRepairMode.cpp \
 	Nonce/NonceMode.cpp \
+	Vanity/VanityMode.cpp \
 	host_secp/HostSecp256k1.cpp \
 	old_electrum_host.cpp \
 	lib/util.cpp lib/Bech32.cpp lib/V/VBase58.cpp \
@@ -61,6 +62,7 @@ LOCALIZED_HOST_HEADERS := Makefile KernelRuntime.h MacFileSystem.h Poetry.h Poet
 	Bsgs/BsgsMode.h \
 	KeyRepair/KeyRepairMode.h \
 	Nonce/NonceMode.h \
+	Vanity/VanityMode.h \
 	Prng32ComboAllowlist.generated.h Prng64ComboAllowlist.generated.h \
 	Kernels/ProfanityHost.h Kernels/WalletModesHost.h Kernels/XpReplayHost.h \
 	lib/hash/GPUHash.h lib/hash/sha3_ver3.h
