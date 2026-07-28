@@ -661,6 +661,10 @@ kernel void workerBrowserVaultGrouped(device bool* isResult [[buffer(0)]],
                 target_profile == BROWSERVAULT_PROFILE_STELLAR_AES_GCM) {
                 ok = wallet_aes256_gcm_verify(key32, target.iv, target.iv_len, ciphertext,
                                               target.ciphertext_len, target.tag);
+            } else if (target_profile == BROWSERVAULT_PROFILE_COPAY_SJCL_AES_CCM) {
+                ok = wallet_aes128_ccm_l2_tag8_verify(
+                    key32, target.iv, target.iv_len, ciphertext,
+                    target.ciphertext_len, target.tag);
             } else if (target_profile == BROWSERVAULT_PROFILE_ATOMIC_CRYPTOJS_AES) {
                 if (!atomic_key_ready) continue;
                 ok = wallet_aes256_cbc_check_cryptojs_atomic(key32, atomic_iv16, ciphertext,

@@ -389,6 +389,7 @@ static bool KEYSTORE_MODE = false;
 static bool WALLETDAT_MODE = false;
 static bool WALLETJS_MODE = false;
 static bool BROWSERVAULT_MODE = false;
+static bool COPAYWALLET_MODE = false;
 static bool SUBSTRATEWALLET_MODE = false;
 static bool ELECTRUMWALLET_MODE = false;
 static bool EXODUSSECO_MODE = false;
@@ -409,7 +410,7 @@ static bool WALLETSCAN_MODE = false;
 
 static inline bool is_browserlike_wallet_mode()
 {
-    return BROWSERVAULT_MODE || SUBSTRATEWALLET_MODE ||
+    return BROWSERVAULT_MODE || COPAYWALLET_MODE || SUBSTRATEWALLET_MODE ||
         BLOCKCHAINWALLET_MODE || MULTIBITWALLET_MODE ||
         BIP38_MODE || ETHPRESALE_MODE || BISQWALLET_MODE || DOGECHAINWALLET_MODE ||
         STELLARWALLET_MODE || ANDROIDWALLET_MODE;
@@ -8100,6 +8101,7 @@ enum class HelpTopic {
     WalletDat,
     WalletJs,
     BrowserVault,
+    CopayWallet,
     SubstrateWallet,
     BlockchainWallet,
     MultiBitWallet,
@@ -10238,6 +10240,7 @@ static HelpTopic detect_help_topic(int argc, char** argv) {
         if (is_help_topic_arg(arg, "-walletdat")) return HelpTopic::WalletDat;
         if (is_help_topic_arg(arg, "-walletjs")) return HelpTopic::WalletJs;
         if (is_help_topic_arg(arg, "-browservault")) return HelpTopic::BrowserVault;
+        if (is_help_topic_arg(arg, "-copaywallet")) return HelpTopic::CopayWallet;
         if (is_help_topic_arg(arg, "-substratewallet")) return HelpTopic::SubstrateWallet;
         if (is_help_topic_arg(arg, "-blockchainwallet")) return HelpTopic::BlockchainWallet;
         if (is_help_topic_arg(arg, "-multibitwallet")) return HelpTopic::MultiBitWallet;
@@ -10296,6 +10299,7 @@ static const char* help_topic_command(HelpTopic topic) {
     case HelpTopic::WalletDat: return "-walletdat";
     case HelpTopic::WalletJs: return "-walletjs";
     case HelpTopic::BrowserVault: return "-browservault";
+    case HelpTopic::CopayWallet: return "-copaywallet";
     case HelpTopic::SubstrateWallet: return "-substratewallet";
     case HelpTopic::BlockchainWallet: return "-blockchainwallet";
     case HelpTopic::MultiBitWallet: return "-multibitwallet";
@@ -10387,6 +10391,7 @@ static void printHelpShort() {
 [!] -keystore                     Ethereum JSON V3 password recovery.
 [!] -walletdat                    Bitcoin Core wallet.dat password recovery.
 [!] -browservault                 Browser extension vault recovery.
+[!] -copaywallet                  Copay/BitPay SJCL backup password recovery.
 [!] -substratewallet              Substrate/Polkadot JSON PKCS8 recovery.
 [!] -electrumwallet               Electrum wallet password recovery.
 [!] -exodusseco                   Exodus SECO container recovery.
@@ -11416,6 +11421,7 @@ static bool helpTopicUsesWalletPasswordCommonSection(HelpTopic topic) {
     case HelpTopic::Keystore:
     case HelpTopic::WalletDat:
     case HelpTopic::BrowserVault:
+    case HelpTopic::CopayWallet:
     case HelpTopic::SubstrateWallet:
     case HelpTopic::BlockchainWallet:
     case HelpTopic::MultiBitWallet:
@@ -11562,6 +11568,62 @@ static void printHelpPassThreadSection() {
 )HELP");
 }
 
+static void printHelpCopayWalletSection() {
+    puts(R"HELP([!] MAIN MODE: -copaywallet  (Copay / BitPay SJCL backup recovery)
+[!] ======================================================================
+[!] Purpose:
+[!] Recover passwords for encrypted Copay/BitPay wallet backups on Metal.
+[!] Every reported password passes the complete SJCL AES-CCM authentication
+[!] tag check; plaintext-shape heuristics are not used.
+[!]
+[!] Inputs:
+[!] -copaywallet FILE1 ...        Load one or more SJCL JSON backup files.
+[!] -copaywallet -f DIR           Recursively scan .json/no-extension files.
+[!] Duplicate encrypted backups are computed once.
+[!]
+[!] Supported profile:
+[!] SJCL v1, PBKDF2-HMAC-SHA256, AES-128-CCM, 64-bit tag, empty adata.
+[!] The normal Copay/BitPay 16-byte IV is clamped exactly as SJCL requires
+[!] for L=2; backups with unsupported cipher/KDF parameters are rejected.
+[!]
+[!] Password candidates:
+[!] -i FILE                        Dictionary/password list, repeatable.
+[!] -hex                           Dictionary lines are exact hex bytes.
+[!] -mask MASK / -mask-file FILE   GPU mask candidates.
+[!] -cs1/-cs2/-cs3/-cs4 CHARS      Custom mask charsets.
+[!] -start HEX [-end HEX]          Raw byte range, length-major, up to 127 bytes.
+[!] -n N                           Optional active candidate/window cap.
+[!]
+[!] GPU / memory:
+[!] -wallet-mem auto|all|NN%|SIZE  Hard unified-memory working-set budget.
+[!] -device LIST                   Split candidate ordinals without gaps/overlap.
+[!] Targets with identical salt/iterations share one grouped PBKDF2 result.
+[!] Large target sets use compact metadata and a pooled ciphertext allocation.
+[!]
+[!] Statistics:
+[!] SpeedThreadFunc is the only statistics printer.
+[!] KDF/s counts completed password/KDF-group jobs after Metal completion.
+[!] Verify/s counts actual authenticated backup checks; targets are never used
+[!] as an artificial speed multiplier.
+[!]
+[!] Output:
+[!] COPAYWALLET:<file>:PASSWORD:<password>:VAULT:<sha256>:
+[!] PROFILE:copay-sjcl-pbkdf2-aes-ccm
+[!]
+[!] Examples:
+[!] ./METAL_CRYPTO_TOOLKIT -copaywallet wallet-backup.json \
+[!]   -i passwords.txt -wallet-mem auto -save
+[!] ./METAL_CRYPTO_TOOLKIT -copaywallet -f copay_backups \
+[!]   -mask "?a?a?a?a?a?a?a?a" -wallet-mem all -device 0 \
+[!]   -save -o copay_found.txt
+[!]
+[!] Limitations:
+[!] Only authenticated SJCL v1 AES-128-CCM backups are accepted. Plain,
+[!] hardware-only and unknown future backup formats are rejected before GPU work.
+[!] Runtime errors return nonzero; a completed search with no match is successful.
+)HELP");
+}
+
 static void printHelpSubstrateWalletSection() {
     puts(R"HELP([!] MAIN MODE: -substratewallet  (Substrate / Polkadot JSON wallet recovery)
 [!] ======================================================================
@@ -11637,6 +11699,9 @@ static void printHelpModeSection(HelpTopic topic) {
         break;
     case HelpTopic::BrowserVault:
         printHelpRange("[!] MAIN MODE: -browservault", "[!] MAIN MODE: -exodusseco");
+        break;
+    case HelpTopic::CopayWallet:
+        printHelpCopayWalletSection();
         break;
     case HelpTopic::SubstrateWallet:
         printHelpSubstrateWalletSection();
@@ -15012,7 +15077,7 @@ int main(int argc, char** argv)
     if (BRAIN && metalStatus != metalSuccess) {
         return 1;
     }
-    return (BIP38_MODE && metalStatus != metalSuccess) ? 1 : 0;
+    return ((BIP38_MODE || COPAYWALLET_MODE) && metalStatus != metalSuccess) ? 1 : 0;
 }
 
 static inline bool crypted_base_priv_mode_selected() {
@@ -15216,6 +15281,15 @@ bool readArgs(int argc, char** argv) {
         }
         if (strcmp(argv[a], "-browservault") == 0) {
             BROWSERVAULT_MODE = true;
+            a++;
+            while (a < argc && !wallet_is_flag_token(argv[a])) {
+                wallet_artifact_files.push_back(string(argv[a]));
+                a++;
+            }
+            continue;
+        }
+        if (strcmp(argv[a], "-copaywallet") == 0) {
+            COPAYWALLET_MODE = true;
             a++;
             while (a < argc && !wallet_is_flag_token(argv[a])) {
                 wallet_artifact_files.push_back(string(argv[a]));
@@ -18381,6 +18455,7 @@ bool readArgs(int argc, char** argv) {
         (WALLETDAT_MODE ? 1 : 0) +
         (WALLETJS_MODE ? 1 : 0) +
         (BROWSERVAULT_MODE ? 1 : 0) +
+        (COPAYWALLET_MODE ? 1 : 0) +
         (SUBSTRATEWALLET_MODE ? 1 : 0) +
         (BLOCKCHAINWALLET_MODE ? 1 : 0) +
         (MULTIBITWALLET_MODE ? 1 : 0) +
@@ -18475,8 +18550,9 @@ bool readArgs(int argc, char** argv) {
         return false;
     }
     if (wallet_memory_explicit && !BIP38_MODE && !SUBSTRATEWALLET_MODE &&
+        !COPAYWALLET_MODE &&
         !MNEMONIC_SCRAMBLE_MODE) {
-        std::cerr << "[!] Error: -wallet-mem is not enabled for this wallet mode yet; it is supported by -bip38, -substratewallet and -mnemonic -scramble [!]" << std::endl;
+        std::cerr << "[!] Error: -wallet-mem is not enabled for this wallet mode yet; it is supported by -bip38, -copaywallet, -substratewallet and -mnemonic -scramble [!]" << std::endl;
         return false;
     }
     if ((!mnemonic_scramble_pattern.empty() ||
@@ -20859,6 +20935,7 @@ bool checkDevice() {
                 else if (BISQWALLET_MODE) tuneProfile = "bisqwallet";
                 else if (DOGECHAINWALLET_MODE) tuneProfile = "dogechainwallet";
                 else if (ANDROIDWALLET_MODE) tuneProfile = "androidwallet";
+                else if (COPAYWALLET_MODE) tuneProfile = "copaywallet";
                 else tuneProfile = "browservault";
             }
             else if (ELECTRUMWALLET_MODE) {
@@ -26863,6 +26940,114 @@ static bool wallet_parse_browservault_file(const std::string& path,
     return false;
 }
 
+static bool wallet_parse_copaywallet_text(
+    const std::string& source,
+    const std::string& json,
+    std::vector<BrowserVaultHostTarget>& targets,
+    std::unordered_set<std::string>& seen,
+    std::string& err)
+{
+    std::string iv_b64;
+    std::string salt_b64;
+    std::string ciphertext_b64;
+    std::string mode;
+    std::string cipher;
+    std::string adata;
+    uint32_t version = 0u;
+    uint32_t iterations = 0u;
+    uint32_t key_size = 0u;
+    uint32_t tag_size = 0u;
+    if (!wallet_json_get_string(json, "iv", iv_b64) ||
+        !wallet_json_get_string(json, "salt", salt_b64) ||
+        !wallet_json_get_string(json, "ct", ciphertext_b64) ||
+        !wallet_json_get_string(json, "mode", mode) ||
+        !wallet_json_get_string(json, "cipher", cipher) ||
+        !wallet_json_get_string(json, "adata", adata) ||
+        !wallet_json_get_u32(json, "v", version) ||
+        !wallet_json_get_u32(json, "iter", iterations) ||
+        !wallet_json_get_u32(json, "ks", key_size) ||
+        !wallet_json_get_u32(json, "ts", tag_size)) {
+        err = "missing required SJCL v1 iv/salt/ct/KDF/cipher fields";
+        return false;
+    }
+    mode = wallet_lower_copy(mode);
+    cipher = wallet_lower_copy(cipher);
+    if (version != 1u || iterations == 0u || key_size != 128u ||
+        tag_size != 64u || mode != "ccm" || cipher != "aes" ||
+        !adata.empty()) {
+        err = "unsupported SJCL profile (requires v1, AES-128-CCM, 64-bit tag, empty adata)";
+        return false;
+    }
+
+    std::vector<uint8_t> iv;
+    std::vector<uint8_t> salt;
+    std::vector<uint8_t> encrypted_and_tag;
+    std::string decode_error;
+    if (!wallet_base64_to_bytes(iv_b64, iv, decode_error) ||
+        !wallet_base64_to_bytes(salt_b64, salt, decode_error) ||
+        !wallet_base64_to_bytes(ciphertext_b64, encrypted_and_tag, decode_error)) {
+        err = "invalid SJCL base64 field: " + decode_error;
+        return false;
+    }
+    if (iv.size() < 13u || salt.empty() ||
+        salt.size() > WALLET_MAX_SALT_LEN ||
+        encrypted_and_tag.size() <= 8u ||
+        encrypted_and_tag.size() - 8u > 65535u) {
+        err = "unsupported SJCL nonce/salt/ciphertext length";
+        return false;
+    }
+
+    const std::string key = wallet_browser_vault_key(
+        encrypted_and_tag, iv, salt, iterations,
+        BROWSERVAULT_PROFILE_COPAY_SJCL_AES_CCM);
+    if (!seen.insert(key).second) {
+        return true;
+    }
+
+    BrowserVaultHostTarget target;
+    target.file = source;
+    target.dev.profile = BROWSERVAULT_PROFILE_COPAY_SJCL_AES_CCM;
+    target.dev.iterations = iterations;
+    target.dev.salt_len = static_cast<uint32_t>(salt.size());
+    target.dev.iv_len = 13u;
+    target.dev.ciphertext_len =
+        static_cast<uint32_t>(encrypted_and_tag.size() - 8u);
+    memcpy(target.dev.salt, salt.data(), salt.size());
+    memcpy(target.dev.iv, iv.data(), 13u);
+    memcpy(target.dev.tag,
+        encrypted_and_tag.data() + target.dev.ciphertext_len, 8u);
+    target.ciphertext.assign(
+        encrypted_and_tag.begin(),
+        encrypted_and_tag.begin() + target.dev.ciphertext_len);
+    wallet_browser_vault_hash(
+        encrypted_and_tag, iv, salt, iterations,
+        BROWSERVAULT_PROFILE_COPAY_SJCL_AES_CCM,
+        target.dev.vault_hash);
+    targets.push_back(std::move(target));
+    return true;
+}
+
+static bool wallet_parse_copaywallet_file(
+    const std::string& path,
+    std::vector<BrowserVaultHostTarget>& targets,
+    std::unordered_set<std::string>& seen,
+    std::string& err)
+{
+    std::string text;
+    if (!mac_read_text_file(path, text, err)) {
+        return false;
+    }
+    const size_t before = targets.size();
+    if (!wallet_parse_copaywallet_text(path, text, targets, seen, err)) {
+        return false;
+    }
+    if (targets.size() == before) {
+        err = "duplicate Copay/BitPay SJCL backup";
+        return false;
+    }
+    return true;
+}
+
 static uint32_t wallet_substrate_load_le32(const uint8_t* bytes)
 {
     return static_cast<uint32_t>(bytes[0]) |
@@ -28997,6 +29182,35 @@ static BrowserVaultLoadFileResult wallet_load_one_browservault_file(const std::s
     result.skipped = !result.loaded;
     if (result.skipped && result.err.empty()) {
         result.err = "no usable browser vault targets";
+    }
+    return result;
+}
+
+static BrowserVaultLoadFileResult wallet_load_one_copaywallet_file(
+    const std::string& path)
+{
+    BrowserVaultLoadFileResult result;
+    result.path = path;
+    if (!mac_is_regular_file(path)) {
+        result.skipped = true;
+        result.err = "not a regular file";
+        return result;
+    }
+    std::unordered_set<std::string> local_seen;
+    if (!wallet_parse_copaywallet_file(
+            path, result.targets, local_seen, result.err)) {
+        result.skipped = true;
+        return result;
+    }
+    for (BrowserVaultHostTarget& target : result.targets) {
+        if (target.file.empty()) {
+            target.file = path;
+        }
+    }
+    result.loaded = !result.targets.empty();
+    result.skipped = !result.loaded;
+    if (result.skipped && result.err.empty()) {
+        result.err = "no usable Copay/BitPay SJCL backup";
     }
     return result;
 }
@@ -32286,7 +32500,7 @@ static void wallet_update_browser_mode_progress(
     const uint64_t completed_verifications,
     const uint64_t readback_ns)
 {
-    if (!BIP38_MODE && !SUBSTRATEWALLET_MODE) {
+    if (!BIP38_MODE && !SUBSTRATEWALLET_MODE && !COPAYWALLET_MODE) {
         return;
     }
     uint64_t solved = 0ull;
@@ -50024,6 +50238,7 @@ Done:
 metalError_t processMetalBrowserVault()
 {
     const bool substrate_mode = SUBSTRATEWALLET_MODE;
+    const bool copay_mode = COPAYWALLET_MODE;
     const bool stellar_mode = STELLARWALLET_MODE;
     const bool blockchain_mode = BLOCKCHAINWALLET_MODE;
     const bool multibit_mode = MULTIBITWALLET_MODE;
@@ -50032,13 +50247,13 @@ metalError_t processMetalBrowserVault()
     const bool ethpresale_mode = ETHPRESALE_MODE;
     const bool bisq_mode = BISQWALLET_MODE;
     const bool android_mode = ANDROIDWALLET_MODE;
-    const char* mode_name = substrate_mode ? "SUBSTRATEWALLET" : (bip38_mode ? "BIP38" : (ethpresale_mode ? "ETHPRESALE" : (bisq_mode ? "BISQWALLET" : (dogechain_mode ? "DOGECHAINWALLET" : (android_mode ? "ANDROIDWALLET" : (multibit_mode ? "MULTIBITWALLET" : (blockchain_mode ? "BLOCKCHAINWALLET" : (stellar_mode ? "STELLARWALLET" : "BROWSERVAULT"))))))));
-    const char* mode_lc = substrate_mode ? "substratewallet" : (bip38_mode ? "bip38" : (ethpresale_mode ? "ethpresale" : (bisq_mode ? "bisqwallet" : (dogechain_mode ? "dogechainwallet" : (android_mode ? "androidwallet" : (multibit_mode ? "multibitwallet" : (blockchain_mode ? "blockchainwallet" : (stellar_mode ? "stellarwallet" : "browservault"))))))));
+    const char* mode_name = substrate_mode ? "SUBSTRATEWALLET" : (copay_mode ? "COPAYWALLET" : (bip38_mode ? "BIP38" : (ethpresale_mode ? "ETHPRESALE" : (bisq_mode ? "BISQWALLET" : (dogechain_mode ? "DOGECHAINWALLET" : (android_mode ? "ANDROIDWALLET" : (multibit_mode ? "MULTIBITWALLET" : (blockchain_mode ? "BLOCKCHAINWALLET" : (stellar_mode ? "STELLARWALLET" : "BROWSERVAULT")))))))));
+    const char* mode_lc = substrate_mode ? "substratewallet" : (copay_mode ? "copaywallet" : (bip38_mode ? "bip38" : (ethpresale_mode ? "ethpresale" : (bisq_mode ? "bisqwallet" : (dogechain_mode ? "dogechainwallet" : (android_mode ? "androidwallet" : (multibit_mode ? "multibitwallet" : (blockchain_mode ? "blockchainwallet" : (stellar_mode ? "stellarwallet" : "browservault")))))))));
     const std::vector<std::string> scan_exts = (blockchain_mode || dogechain_mode || ethpresale_mode || bip38_mode || bisq_mode || android_mode)
         ? std::vector<std::string>{ ".txt", ".hash", ".json", ".wallet", "" }
         : (multibit_mode
             ? std::vector<std::string>{ ".txt", ".hash", ".key", ".wallet", "" }
-        : (substrate_mode
+        : ((substrate_mode || copay_mode)
             ? std::vector<std::string>{ ".json", "" }
         : (stellar_mode
             ? std::vector<std::string>{ ".txt", ".hash", ".stellar", "" }
@@ -50062,6 +50277,10 @@ metalError_t processMetalBrowserVault()
     if (substrate_mode) {
         wallet_parallel_load_files(files, mode_lc, load_results,
                                    wallet_load_one_substratewallet_file);
+    }
+    else if (copay_mode) {
+        wallet_parallel_load_files(
+            files, mode_lc, load_results, wallet_load_one_copaywallet_file);
     }
     else if (blockchain_mode) {
         wallet_parallel_load_files(files, mode_lc, load_results, wallet_load_one_blockchainwallet_file);
@@ -50153,6 +50372,7 @@ metalError_t processMetalBrowserVault()
     size_t phantom_scrypt_targets = 0u;
     size_t substrate_scrypt_targets = 0u;
     size_t substrate_legacy_targets = 0u;
+    size_t copay_sjcl_targets = 0u;
     size_t atomic_cryptojs_targets = 0u;
     size_t stellar_targets = 0u;
     size_t blockchain_targets = 0u;
@@ -50201,6 +50421,10 @@ metalError_t processMetalBrowserVault()
         else if (t.dev.profile ==
                  BROWSERVAULT_PROFILE_SUBSTRATE_LEGACY_PKCS8) {
             ++substrate_legacy_targets;
+        }
+        else if (t.dev.profile ==
+                 BROWSERVAULT_PROFILE_COPAY_SJCL_AES_CCM) {
+            ++copay_sjcl_targets;
         }
         else if (t.dev.profile == BROWSERVAULT_PROFILE_ATOMIC_CRYPTOJS_AES) {
             ++atomic_cryptojs_targets;
@@ -50299,8 +50523,8 @@ metalError_t processMetalBrowserVault()
     printf("[!] starting %s mode [!]\n", mode_name);
     printf("[!] loaded %s targets: %zu [!]\n", mode_lc, targets.size());
     counterWalletActiveTargets = static_cast<uint64_t>(targets.size());
-    printf("[!] %s profiles: metamask=%zu phantom_pbkdf2=%zu phantom_scrypt=%zu substrate_v3=%zu substrate_v2=%zu atomic_cryptojs=%zu stellar=%zu blockchain=%zu multibit_md5=%zu multibit_hd=%zu multibit_scrypt=%zu bisq=%zu bip38_non_ec=%zu bip38_ec=%zu dogechain=%zu android_backup=%zu ethpresale=%zu [!]\n",
-        mode_lc, metamask_targets, phantom_pbkdf2_targets, phantom_scrypt_targets, substrate_scrypt_targets, substrate_legacy_targets, atomic_cryptojs_targets, stellar_targets, blockchain_targets,
+    printf("[!] %s profiles: metamask=%zu phantom_pbkdf2=%zu phantom_scrypt=%zu substrate_v3=%zu substrate_v2=%zu copay_sjcl=%zu atomic_cryptojs=%zu stellar=%zu blockchain=%zu multibit_md5=%zu multibit_hd=%zu multibit_scrypt=%zu bisq=%zu bip38_non_ec=%zu bip38_ec=%zu dogechain=%zu android_backup=%zu ethpresale=%zu [!]\n",
+        mode_lc, metamask_targets, phantom_pbkdf2_targets, phantom_scrypt_targets, substrate_scrypt_targets, substrate_legacy_targets, copay_sjcl_targets, atomic_cryptojs_targets, stellar_targets, blockchain_targets,
         multibit_classic_md5_targets, multibit_hd_scrypt_targets, multibit_classic_scrypt_targets, bisq_targets, bip38_non_ec_targets, bip38_ec_targets, dogechain_targets, android_backup_targets, ethpresale_targets);
     printf("[!] %s KDF groups: %zu [saved %.2fx KDF work, singletons=%zu, max_group=%u] [!]\n",
         mode_lc,
@@ -50323,8 +50547,9 @@ metalError_t processMetalBrowserVault()
     }
 
     uint64_t wallet_scratch_hard_cap = std::numeric_limits<uint64_t>::max();
-    if (browservault_has_scrypt &&
-        (bip38_mode || substrate_mode || wallet_memory_explicit)) {
+    if ((browservault_has_scrypt &&
+         (bip38_mode || substrate_mode || wallet_memory_explicit)) ||
+        copay_mode) {
         std::vector<modeinfra::MemoryDeviceInfo> memory_devices;
         memory_devices.reserve(g_gpu_contexts.size());
         for (const GpuRuntimeContext& context : g_gpu_contexts) {
@@ -50370,7 +50595,8 @@ metalError_t processMetalBrowserVault()
             fprintf(stderr, "[!] Error: -wallet-mem: %s [!]\n", memory_error.c_str());
             return metalErrorMemoryAllocation;
         }
-        if (memory_budget.per_device_budget <= mandatory_per_device) {
+        if (browservault_has_scrypt &&
+            memory_budget.per_device_budget <= mandatory_per_device) {
             fprintf(stderr,
                 "[!] Error: -wallet-mem leaves no room for one %s scrypt job [!]\n",
                 mode_lc);
@@ -50392,7 +50618,7 @@ metalError_t processMetalBrowserVault()
     metalError_t st = metalSuccess;
     bool wallet_progress_active = false;
     uint64_t wallet_working_set_bytes = 0ull;
-    if (bip38_mode || substrate_mode) {
+    if (bip38_mode || substrate_mode || copay_mode) {
         modeinfra::ModeProgress& progress = modeinfra::global_mode_progress();
         progress.begin(mode_name, modeinfra::ProgressUnit::Kdf,
                        modeinfra::ProgressPhase::Build);
@@ -50520,7 +50746,7 @@ metalError_t processMetalBrowserVault()
                 static_cast<double>(scratch_bytes) / 1048576.0,
                 static_cast<unsigned long long>(concurrency));
         }
-        if (bip38_mode || substrate_mode) {
+        if (bip38_mode || substrate_mode || copay_mode) {
             const uint64_t fixed_bytes =
                 static_cast<uint64_t>(targets.size()) * sizeof(BrowserVaultDeviceTarget) +
                 static_cast<uint64_t>(groups.size()) * sizeof(BrowserVaultGroup) +
@@ -50538,7 +50764,7 @@ metalError_t processMetalBrowserVault()
     }
 
     {
-        if (bip38_mode || substrate_mode) {
+        if (bip38_mode || substrate_mode || copay_mode) {
             modeinfra::ModeProgress& progress = modeinfra::global_mode_progress();
             progress.set_allocated_working_set(wallet_working_set_bytes);
             progress.set_phase(modeinfra::ProgressPhase::Search);

@@ -180,6 +180,76 @@ __attribute__((noinline)) static void wallet_pbkdf2_sha256_32(const thread uchar
     }
 }
 
+// SJCL v1 Copay/BitPay backups use AES-128-CCM with an eight-byte tag,
+// no associated data, a 13-byte nonce and L=2. Authenticate the complete
+// plaintext stream so a hit is never based on a JSON/plaintext heuristic.
+__attribute__((noinline)) static bool wallet_aes128_ccm_l2_tag8_verify(
+    const thread uchar key32[32],
+    const device uchar* nonce,
+    uint nonce_len,
+    const device uchar* ciphertext,
+    uint ciphertext_len,
+    const device uchar* expected_tag) {
+    if (nonce == nullptr || ciphertext == nullptr || expected_tag == nullptr ||
+        nonce_len != 13u || ciphertext_len == 0u || ciphertext_len > 65535u) {
+        return false;
+    }
+
+    uint round_keys[44];
+    provider_aes_expand_key128(key32, round_keys);
+
+    uchar block[16];
+    uchar mac[16];
+    block[0] = 0x19u; // M=8, no AAD, L=2.
+    for (uint i = 0u; i < 13u; ++i) {
+        block[1u + i] = nonce[i];
+    }
+    block[14] = uchar(ciphertext_len >> 8u);
+    block[15] = uchar(ciphertext_len);
+    provider_aes_encrypt_block128(round_keys, block, mac);
+
+    const uint blocks = (ciphertext_len + 15u) >> 4u;
+    for (uint block_index = 0u; block_index < blocks; ++block_index) {
+        uchar counter_block[16];
+        uchar stream[16];
+        const uint counter = block_index + 1u;
+        counter_block[0] = 0x01u;
+        for (uint i = 0u; i < 13u; ++i) {
+            counter_block[1u + i] = nonce[i];
+        }
+        counter_block[14] = uchar(counter >> 8u);
+        counter_block[15] = uchar(counter);
+        provider_aes_encrypt_block128(round_keys, counter_block, stream);
+
+        const uint offset = block_index << 4u;
+        const uint remaining = ciphertext_len - offset;
+        const uint take = min(remaining, 16u);
+        for (uint i = 0u; i < 16u; ++i) {
+            const uchar plaintext = i < take
+                ? uchar(ciphertext[offset + i] ^ stream[i])
+                : uchar(0u);
+            block[i] = uchar(mac[i] ^ plaintext);
+        }
+        provider_aes_encrypt_block128(round_keys, block, mac);
+    }
+
+    uchar counter0[16];
+    uchar s0[16];
+    counter0[0] = 0x01u;
+    for (uint i = 0u; i < 13u; ++i) {
+        counter0[1u + i] = nonce[i];
+    }
+    counter0[14] = 0u;
+    counter0[15] = 0u;
+    provider_aes_encrypt_block128(round_keys, counter0, s0);
+
+    uchar diff = 0u;
+    for (uint i = 0u; i < 8u; ++i) {
+        diff = uchar(diff | uchar(mac[i] ^ s0[i] ^ expected_tag[i]));
+    }
+    return diff == 0u;
+}
+
 static inline void wallet_gcm_xor16(thread uchar a[16], const thread uchar* b) {
     for (int i = 0; i < 16; ++i) {
         a[i] = uchar(a[i] ^ b[i]);

@@ -203,6 +203,22 @@ Wave 11 adds authenticated Substrate keyring recovery:
 - only the common `SpeedThreadFunc` prints live `KDF/s` and `Verify/s`.
   `KDF/s` counts completed password/KDF-group jobs, never target count.
 
+Wave 12 adds authenticated Copay/BitPay backup recovery:
+
+- `-copaywallet` loads one or more versioned SJCL JSON backups directly or
+  scans a directory, rejecting unsupported parameters before Metal work;
+- the supported production profile is the Copay/BitPay SJCL default:
+  PBKDF2-HMAC-SHA256 with 10,000 iterations, AES-128-CCM, a 64-bit tag,
+  empty associated data, and the exact SJCL 13-byte nonce clamp;
+- backups with identical salt and iteration count share one KDF result, while
+  compact ciphertext storage and target windows keep large artifact sets
+  within `-wallet-mem`;
+- every reported password has passed the complete AES-CCM authentication tag
+  comparison on Metal; malformed or merely decryptable plaintext is never
+  accepted;
+- only the common `SpeedThreadFunc` prints live `KDF/s` and `Verify/s`, and
+  neither rate is inflated by the number of artifacts.
+
 #### v15
 
 The July 25 update extends both interval-DLP modes for very large target
@@ -2574,6 +2590,39 @@ Result:
 
 `VAULT:<sha256>` is an artifact fingerprint, not decrypted vault content.
 
+#### `-copaywallet`
+
+This mode recovers passwords for encrypted Copay and BitPay wallet backups
+created with the standard SJCL JSON format. Pass one or more files directly
+after the mode, or use `-f DIR` to recursively scan `.json` and extensionless
+files.
+
+The loader requires explicit `v`, `iter`, `ks`, `ts`, `mode`, `cipher`,
+`adata`, `salt`, `iv`, and `ct` fields. The supported profile is SJCL version
+1 with PBKDF2-HMAC-SHA256, AES-128-CCM, a 64-bit authentication tag, empty
+associated data, and the exact SJCL nonce clamp. Unknown versions, altered
+key/tag sizes, non-empty associated data, malformed Base64, oversized
+ciphertexts, and unsupported ciphers are rejected before GPU work.
+
+Metal derives the key and verifies the complete CCM tag. Targets sharing the
+same KDF parameters and salt reuse a single PBKDF2 result. `-wallet-mem`
+controls the unified-memory working set, `-device` selects Metal devices, and
+the common `SpeedThreadFunc` is the only live printer of completed `KDF/s` and
+actual `Verify/s`.
+
+```bash
+./METAL_CRYPTO_TOOLKIT -copaywallet wallet-backup.json \
+  -i passwords.txt -wallet-mem auto -save
+
+./METAL_CRYPTO_TOOLKIT -copaywallet -f copay_backups \
+  -mask "?a?a?a?a?a?a?a?a" -wallet-mem all -device 0 \
+  -save -o copay_found.txt
+```
+
+The result identifies the source, recovered password, authenticated backup
+fingerprint, and exact profile. This mode does not parse arbitrary modern
+BitPay application databases or non-SJCL exports.
+
 #### `-substratewallet`
 
 This mode recovers passwords for versioned Polkadot/Substrate keyring JSON
@@ -3348,6 +3397,22 @@ tune выбрал 256 потоков на Metal threadgroup: на нагрузк
   working set unified memory;
 - live `KDF/s` и `Verify/s` печатает только общий `SpeedThreadFunc`; количество
   целей не умножает `KDF/s`.
+
+Волна 12 добавляет аутентифицированное восстановление backup Copay/BitPay:
+
+- `-copaywallet` загружает один или несколько versioned SJCL JSON backup
+  напрямую либо сканирует каталог, отклоняя неподдерживаемые параметры до
+  запуска Metal;
+- production-профиль точно повторяет стандарт Copay/BitPay SJCL:
+  PBKDF2-HMAC-SHA256 с 10 000 итераций, AES-128-CCM, 64-битным tag, пустым
+  associated data и точным 13-байтовым clamp nonce из SJCL;
+- backup с одинаковыми salt и числом итераций разделяют результат KDF, а
+  компактное хранение ciphertext и окна целей удерживают большие наборы в
+  пределах `-wallet-mem`;
+- каждый выведенный пароль прошёл полное сравнение authentication tag AES-CCM
+  на Metal; повреждённый или просто правдоподобный plaintext не принимается;
+- live `KDF/s` и `Verify/s` печатает только общий `SpeedThreadFunc`, без
+  искусственного умножения показателей на число artifacts.
 
 #### v15
 
@@ -5740,6 +5805,38 @@ $bitcoin$<mkey_len>$<mkey_hex>$<salt_len>$<salt_hex>$<iterations>$<ckey_len>$<ck
 ```
 
 `VAULT:<sha256>` — отпечаток цели, а не расшифрованное содержимое хранилища.
+
+#### `-copaywallet`
+
+Режим восстанавливает пароли для зашифрованных backup Copay и BitPay в
+стандартном JSON-формате SJCL. Один или несколько файлов задаются сразу после
+режима; `-f DIR` рекурсивно просматривает `.json` и файлы без расширения.
+
+Loader требует явные поля `v`, `iter`, `ks`, `ts`, `mode`, `cipher`, `adata`,
+`salt`, `iv` и `ct`. Поддерживается SJCL версии 1 с PBKDF2-HMAC-SHA256,
+AES-128-CCM, 64-битным authentication tag, пустым associated data и точным
+clamp nonce из SJCL. Неизвестные версии, изменённые размеры key/tag,
+непустой associated data, некорректный Base64, слишком длинный ciphertext и
+другие cipher отклоняются до GPU.
+
+Metal получает ключ и полностью проверяет CCM tag. Цели с одинаковыми
+KDF-параметрами и salt используют один результат PBKDF2. `-wallet-mem`
+ограничивает working set unified memory, `-device` выбирает Metal-устройства,
+а единственным live-потоком завершённых `KDF/s` и фактических `Verify/s`
+остаётся общий `SpeedThreadFunc`.
+
+```bash
+./METAL_CRYPTO_TOOLKIT -copaywallet wallet-backup.json \
+  -i passwords.txt -wallet-mem auto -save
+
+./METAL_CRYPTO_TOOLKIT -copaywallet -f copay_backups \
+  -mask "?a?a?a?a?a?a?a?a" -wallet-mem all -device 0 \
+  -save -o copay_found.txt
+```
+
+Результат содержит источник, восстановленный пароль, fingerprint
+аутентифицированного backup и точный профиль. Режим не предназначен для
+произвольных современных баз приложения BitPay или export не в формате SJCL.
 
 #### `-substratewallet`
 
