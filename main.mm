@@ -2473,10 +2473,10 @@ static void printBsgsSpeed(double operation_speed,
 
 char* __strlwr(char* str);
 
-static const int PRNG32_GEN_MAX = 331;
-static const int PRNG64_GEN_MAX = 220;
-static const int PRNG32_MODE_MAX = 246;
-static const int PRNG64_MODE_MAX = 217;
+static const int PRNG32_GEN_MAX = 489;
+static const int PRNG64_GEN_MAX = 223;
+static const int PRNG32_MODE_MAX = 762;
+static const int PRNG64_MODE_MAX = 218;
 
 static_assert(PRNG32_GEN_MAX == kPrng32GeneratedGenMax, "PRNG32 generated allowlist gen max mismatch");
 static_assert(PRNG32_MODE_MAX == kPrng32GeneratedModeMax, "PRNG32 generated allowlist mode max mismatch");
@@ -2486,6 +2486,11 @@ static_assert(PRNG64_MODE_MAX == kPrng64GeneratedModeMax, "PRNG64 generated allo
 static bool prng32_mode_in_generated_ranges(int gen, int mode) {
     if (gen < 1 || gen > PRNG32_GEN_MAX || mode < 1 || mode > PRNG32_MODE_MAX) {
         return false;
+    }
+    // Appended Ill Bloom profiles expose the complete PRNG32 extraction
+    // catalog, including the exhaustive output-sign masks.
+    if (gen >= 332 && gen <= 489) {
+        return mode >= 1 && mode <= 762;
     }
     const int offset = kPrng32AllowedRangeOffset[gen];
     const int count = kPrng32AllowedRangeCount[gen];
@@ -2500,6 +2505,12 @@ static bool prng32_mode_in_generated_ranges(int gen, int mode) {
 
 static bool prng64_mode_in_generated_ranges(int gen, int mode) {
     if (gen < 1 || gen > PRNG64_GEN_MAX || mode < 1 || mode > PRNG64_MODE_MAX) {
+        return false;
+    }
+    if (gen >= 221 && gen <= 223) {
+        return mode >= 1 && mode <= 218;
+    }
+    if (gen > 220) {
         return false;
     }
     const int offset = kPrng64AllowedRangeOffset[gen];
@@ -2588,6 +2599,61 @@ static bool validate_prng_selection_ranges() {
 
     return validate_prng_values_in_range(Gens, 1, gen_max, "-gen", backend_name) &&
            validate_prng_values_in_range(PrngModes, 1, mode_max, "-mode", backend_name);
+}
+
+static bool validate_or_clamp_illbloom_packed64_seed_range() {
+    if (!prng64_gen || Gens.empty() || PrngModes.empty()) {
+        return true;
+    }
+
+    for (int gen : Gens) {
+        if (gen < 221 || gen > 223) {
+            return true;
+        }
+    }
+
+    uint64_t maximum_index = 0ull;
+    bool have_supported_profile = false;
+    for (int gen : Gens) {
+        if (gen == 221) {
+            for (int entropy_len : PrngBytes) {
+                if (entropy_len <= 0) {
+                    continue;
+                }
+                maximum_index = (std::max)(maximum_index, (1ull << 48) - 1ull);
+                have_supported_profile = true;
+            }
+        }
+        else if (gen == 222) {
+            maximum_index = (std::max)(maximum_index, (120ull << 32) - 1ull);
+            have_supported_profile = true;
+        }
+        else {
+            maximum_index = (std::max)(maximum_index, (1ull << 40) - 1ull);
+            have_supported_profile = true;
+        }
+    }
+
+    if (!have_supported_profile) {
+        std::cerr << "[!] Error: packed Ill Bloom PRNG64 requires a positive -byte value [!]" << std::endl;
+        return false;
+    }
+    if (start_seed64 > maximum_index) {
+        fprintf(stderr,
+            "[!] Error: packed Ill Bloom PRNG64 start index %016llx exceeds maximum %016llx [!]\n",
+            static_cast<unsigned long long>(start_seed64),
+            static_cast<unsigned long long>(maximum_index));
+        return false;
+    }
+    if (end_seed64 > maximum_index) {
+        fprintf(stderr,
+            "[!] Packed Ill Bloom PRNG64: clamping end index %016llx -> %016llx [!]\n",
+            static_cast<unsigned long long>(end_seed64),
+            static_cast<unsigned long long>(maximum_index));
+        end_seed64 = maximum_index;
+        end_seed_arg64 = maximum_index;
+    }
+    return true;
 }
 
 class AtomicCounter64 {
@@ -10100,8 +10166,8 @@ static const char* kLegacyDetailedHelp = R"HELP(
 [!] 32-bit backend: -s 00000000, -e FFFFFFFF.
 [!] 64-bit backend: -s 0000000000000000, -e FFFFFFFFFFFFFFFF.
 [!] Supported catalog ranges:
-[!] 32-bit backend: -gen 1-331, -mode 1-246.
-[!] 64-bit backend: -gen 1-219, -mode 1-216.
+[!] 32-bit backend: -gen 1-489, -mode 1-762.
+[!] 64-bit backend: -gen 1-223, -mode 1-218.
 [!] if -gen not set: all supported gens.
 [!] if -mode not set: all supported modes.
 [!] if -shift not set: 0.
@@ -12704,6 +12770,10 @@ int main(int argc, char** argv)
     }
 
     if (!validate_prng_selection_ranges())
+    {
+        return 1;
+    }
+    if (!validate_or_clamp_illbloom_packed64_seed_range())
     {
         return 1;
     }
@@ -16221,6 +16291,18 @@ bool readArgs(int argc, char** argv) {
                 printf("[!]\t  329 - MilkSadLCG48271And255_32 (Milk Sad LCG48271 direct key rand()&0xFF; use -mode 11 -byte 32 -priv).\n");
                 printf("[!]\t  330 - PolkadotWasmAsmjsZeroChaCha20Bip39_32 (zero-seeded Rust ChaCha20 BIP39 stream; use -mode 22 -byte 16 -entropy).\n");
                 printf("[!]\t  331 - BlueWalletIsaacHdV3_32 (BlueWallet v3.0.0 isaac@0.0.5 HD/BIP39 entropy; use -mode 11 -byte 32 -entropy).\n");
+                printf("[!]\t  332 - IllBloomCryptoJS319MwcRawNegative32 (CryptoJS 3.1.9 MWC, fixed negative signs; use -mode 247).\n");
+                printf("[!]\t  333 - IllBloomCryptoJS319MwcRawPositive32 (CryptoJS 3.1.9 MWC, fixed positive signs; use -mode 247).\n");
+                printf("[!]\t  334 - IllBloomCryptoJS319MwcJscLogical32 (JSC WeakRandom logical-shift runtime; use -mode 247).\n");
+                printf("[!]\t  335 - IllBloomCryptoJS319MwcJscJitArithmetic32 (historical JSC JIT arithmetic-shift thunk; use -mode 247).\n");
+                printf("[!]\t  336 - IllBloomCryptoJS319MwcJscLegacyGameRand32 (pre-2015 JSC GameRand; use -mode 247).\n");
+                printf("[!]\t  337 - IllBloomReactNativeCryptoJs312JscLogical32 (RN CryptoJS 3.1.2 direct words; use -mode 247/249).\n");
+                printf("[!]\t  338 - IllBloomReactNativeCryptoJs312JscJitArithmetic32 (RN direct words with arithmetic shifts; use -mode 247/249).\n");
+                printf("[!]\t  339 - IllBloomReactNativeCryptoJs312JscLegacyGameRand32 (RN direct words with GameRand; use -mode 247/249).\n");
+                printf("[!]\t  340-467 - IllBloomCryptoJS319MwcRawChainMask32: rcache sign mask=(GEN-340), 0..127; pair with -mode 251-762.\n");
+                printf("[!]\t  468-479 - CryptoJS/RN JSC logical/arithmetic, warm/no-warm and full64/low53 phase variants.\n");
+                printf("[!]\t  480-481 - CryptoJS/RN Hermes pre-Nov-2023 minstd_rand + generate_canonical profiles.\n");
+                printf("[!]\t  482-489 - CryptoJS/RN V8 cached/no-cache historical and modern source-exact profiles.\n");
                 printf("[!] Note: mass -gen/-mode runs use a per-generator mode allowlist and auto-skip known low-value combinations.\n");
                 printf("[!] -mode NUMBERS\t 1-%d\n", PRNG32_MODE_MAX);
                 printf("[!]\t    1 - canonical mode 1: extract byte #1 (LSB) from 32-bit output.\n");
@@ -16469,6 +16551,19 @@ bool readArgs(int argc, char** argv) {
                 printf("[!]\t  244 - canonical mode 277: Node.js crypto.randomInt(2048)-style 48-bit rejection lane.\n");
                 printf("[!]\t  245 - canonical mode 279: Strict BIP39 reservoir lane: raw low byte of 11-bit indices.\n");
                 printf("[!]\t  246 - canonical mode 280: Reserved compatibility slot (no dedicated mode branch in current PRNG implementation; avoid for deterministic profiling).\n");
+                printf("[!]\t  247 - Ill Bloom CryptoJS WordArray packing: B3,B2,B1,B0 (big-endian, four bytes per draw).\n");
+                printf("[!]\t  248 - Ill Bloom compatibility packing: B0,B1,B2,B3 (little-endian, four bytes per draw).\n");
+                printf("[!]\t  249 - Ill Bloom Math.floor(Math.random()*256) path: high byte, one draw per entropy byte.\n");
+                printf("[!]\t  250 - Ill Bloom low-byte/words.words conversion variant: low byte, one draw per entropy byte.\n");
+                printf("[!]\t  251-506 - Ill Bloom output-word sign mask, CryptoJS big-endian; mask=(MODE-251), 0..255.\n");
+                printf("[!]\t  507-762 - Ill Bloom output-word sign mask, little-endian; mask=(MODE-507), 0..255.\n");
+                printf("[!] Gens 332-489 accept all PRNG32 modes 1-762; no Ill Bloom gen/mode pairs are pruned.\n");
+                printf("[!] Exhaustive mask ranges by entropy size (BE; add 256 to the mode range for LE):\n");
+                printf("[!]\t  -byte 16: -gen 340-347 -mode 251-266 (128 sign streams per packing).\n");
+                printf("[!]\t  -byte 20: -gen 340-355 -mode 251-282 (512 sign streams per packing).\n");
+                printf("[!]\t  -byte 24: -gen 340-371 -mode 251-314 (2048 sign streams per packing).\n");
+                printf("[!]\t  -byte 28: -gen 340-403 -mode 251-378 (8192 sign streams per packing).\n");
+                printf("[!]\t  -byte 32: -gen 340-467 -mode 251-506 (32768 sign streams per packing).\n");
                 exit(0);
             }
 
@@ -16695,6 +16790,9 @@ bool readArgs(int argc, char** argv) {
                 printf("[!]\t  218 - RandstormJscWeakRandomRaw64 (Randstorm raw Math.random pool stream (4x16 -> uint64)).\n");
                 printf("[!]\t  219 - RandstormLcg32Raw64 (Randstorm raw Math.random pool stream (4x16 -> uint64)).\n");
                 printf("[!]\t  220 - JavaUtilRandomNextBytes64 (java.util.Random.nextBytes byte order; use -mode 14 -byte 20 for TezosJ BIP39 entropy).\n");
+                printf("[!]\t  221 - IllBloomRawWordPacked64: fixed chain/output sign masks plus BE/LE in high index bits; modes 1-218.\n");
+                printf("[!]\t  222 - IllBloomRuntimePacked64: gens 332-339 and 468-489 x modes 247-250 (120 profiles); modes 1-218.\n");
+                printf("[!]\t  223 - IllBloomRawByteCompatPacked64: gens 340-467 x high/low byte modes 249-250 (256 profiles); modes 1-218.\n");
                 printf("[!] Note: mass -gen/-mode runs use a per-generator mode allowlist and auto-skip known low-value combinations.\n");
                 printf("[!] -mode NUMBERS\t 1-%d\n", PRNG64_MODE_MAX);
                 printf("[!]\t    1 - canonical mode 1: extract byte #1 (LSB) from 64-bit output.\n");
@@ -16914,6 +17012,14 @@ bool readArgs(int argc, char** argv) {
                 printf("[!]\t  215 - canonical mode 269: Strict BIP39 reservoir lane: raw low byte of 11-bit indices.\n");
                 printf("[!]\t  216 - canonical mode 270: ethers v3/v4 weak randomBytes: 20 XOR rounds over Math.random()*256 high-byte lane.\n");
                 printf("[!]\t  217 - special mode: MVW 32-byte nested Keccak or RN getRandomValues 16-byte Math.random32 entropy.\n");
+                printf("[!]\t  218 - Ill Bloom packed source-exact direct entropy stream (gens 221-223).\n");
+                printf("[!] Packed gens also accept modes 1-217, applying ordinary PRNG64 byte/word extraction.\n");
+                printf("[!] Packed mode 217 remains the ordinary masked-2048 lane; RN/MVW special handling is limited to gens 216-219.\n");
+                printf("[!] -shift skips complete logical uint64 outputs for packed gens.\n");
+                printf("[!] Packed index layout: low 32 bits are the seed; high bits select the profile/signs.\n");
+                printf("[!]\t  gen 221: bits 0..6=chain mask, 7..14=output mask, 15=endian; max 0000ffffffffffff.\n");
+                printf("[!]\t  gen 222: profile 0..119; max 00000077ffffffff.\n");
+                printf("[!]\t  gen 223: profile 0..255; max 000000ffffffffff.\n");
                 exit(0);
             }
 

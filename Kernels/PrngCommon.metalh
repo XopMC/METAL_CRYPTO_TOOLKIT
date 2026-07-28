@@ -444,7 +444,8 @@ static constant int PRNG64_CANONICAL_MODE_MAP[] = {
 };
 
 static inline int prng64_canonicalize_mode(int mode) {
-    if (mode == 216) {
+    // Public mode 216 arrives at the kernel as internal mode 215.
+    if (mode == 215) {
         return 270;
     }
     const int count = int(sizeof(PRNG64_CANONICAL_MODE_MAP) / sizeof(PRNG64_CANONICAL_MODE_MAP[0]));
@@ -629,12 +630,23 @@ static inline bool prng64_is_unique_len_aware(thread const uchar* data, int len)
 }
 
 static constant int PRNG32_CANONICAL_MODE_MAP[] = {
-    0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99, 100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 113, 114, 115, 116, 117, 118, 119, 120, 121, 122, 123, 124, 125, 126, 127, 128, 129, 131, 132, 133, 134, 138, 139, 140, 141, 142, 143, 144, 145, 146, 147, 148, 149, 151, 152, 154, 155, 156, 159, 161, 162, 163, 164, 165, 166, 167, 169, 174, 175, 176, 178, 179, 180, 181, 187, 189, 190, 191, 192, 193, 195, 196, 197, 199, 200, 201, 202, 204, 205, 206, 207, 208, 210, 211, 214, 215, 216, 217, 218, 219, 220, 221, 222, 223, 224, 225, 226, 227, 228, 229, 230, 231, 232, 233, 234, 235, 236, 237, 238, 239, 240, 241, 242, 243, 244, 245, 246, 247, 248, 249, 250, 251, 252, 253, 254, 255, 256, 257, 258, 259, 260, 265, 266, 267, 268, 269, 270, 272, 273, 274, 276, 278, 279
+    0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99, 100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 113, 114, 115, 116, 117, 118, 119, 120, 121, 122, 123, 124, 125, 126, 127, 128, 129, 131, 132, 133, 134, 138, 139, 140, 141, 142, 143, 144, 145, 146, 147, 148, 149, 151, 152, 154, 155, 156, 159, 161, 162, 163, 164, 165, 166, 167, 169, 174, 175, 176, 178, 179, 180, 181, 187, 189, 190, 191, 192, 193, 195, 196, 197, 199, 200, 201, 202, 204, 205, 206, 207, 208, 210, 211, 214, 215, 216, 217, 218, 219, 220, 221, 222, 223, 224, 225, 226, 227, 228, 229, 230, 231, 232, 233, 234, 235, 236, 237, 238, 239, 240, 241, 242, 243, 244, 245, 246, 247, 248, 249, 250, 251, 252, 253, 254, 255, 256, 257, 258, 259, 260, 265, 266, 267, 268, 269, 270, 272, 273, 274, 276, 278, 279,
+    // Ill Bloom compatibility aliases appended to the public mode catalog.
+    89, 10, 0, 1
 };
 
 static inline int prng32_canonicalize_mode(int mode) {
     const int count = int(sizeof(PRNG32_CANONICAL_MODE_MAP) / sizeof(PRNG32_CANONICAL_MODE_MAP[0]));
-    return (mode >= 0 && mode < count) ? PRNG32_CANONICAL_MODE_MAP[mode] : -1;
+    if (mode >= 0 && mode < count) {
+        return PRNG32_CANONICAL_MODE_MAP[mode];
+    }
+    // Public modes 251-762 encode the returned-word sign mask for both the
+    // CryptoJS big-endian WordArray order and its little-endian compatibility
+    // order. Keep the 512 aliases arithmetic instead of adding a large table.
+    if (mode >= 250 && mode < 762) {
+        return 280 + (mode - 250);
+    }
+    return -1;
 }
 
 static inline bool prng32_is_unique_len_aware(thread const uchar* data, int len) {
@@ -6999,6 +7011,35 @@ static inline void prng32_generate_entropy_shared(thread Gen32& gen,
                 entropy[i] = (uchar)(idx & 0xFFu);
             }
         }
+        else if (mode >= 280 && mode < 792)
+        {
+            // Exhaustive CryptoJS 3.1.x output-sign masks:
+            // 280..535 are big-endian WordArray packing, 536..791 are the
+            // little-endian compatibility order. A set bit selects the
+            // positive Math.random branch; a clear bit selects negation.
+            const int encoded = mode - 280;
+            const bool big_endian = encoded < 256;
+            const uint output_sign_mask = uint(encoded & 255);
+            int byte_index = 0;
+            uint word_index = 0u;
+#pragma unroll 1
+            while (byte_index < local_len) {
+                uint word = gen.next();
+                if (((output_sign_mask >> (word_index & 7u)) & 1u) == 0u) {
+                    word = 0u - word;
+                }
+                ++word_index;
+                if (big_endian) {
+                    for (int byte = 3; byte >= 0 && byte_index < local_len; --byte) {
+                        entropy[byte_index++] = uchar(word >> uint(byte * 8));
+                    }
+                } else {
+                    for (int byte = 0; byte < 4 && byte_index < local_len; ++byte) {
+                        entropy[byte_index++] = uchar(word >> uint(byte * 8));
+                    }
+                }
+            }
+        }
     }
     else if (mode >= 10)
     {
@@ -11957,6 +11998,510 @@ public:
     }
 };
 
+// Ill Bloom compatibility profiles ported from CUDA using integer
+// representations of the historical binary64 fractions. Metal has no native
+// double type, so each provider exposes exactly the two observations used by
+// CryptoJS: ToInt32(Math.random()*2^32) and Math.random()>0.5.
+template <bool ArithmeticShift, bool Warmup, bool Full64>
+class Prng32IllBloomJscXorShift {
+    ulong low;
+    ulong high;
+
+    static ulong shift_right(ulong value, int shift) {
+        if (!ArithmeticShift || (value & 0x8000000000000000ul) == 0ul) {
+            return value >> uint(shift);
+        }
+        return (value >> uint(shift)) | (~0ul << uint(64 - shift));
+    }
+
+    ulong advance() {
+        ulong x = low;
+        const ulong y = high;
+        low = y;
+        x ^= x << 23u;
+        x ^= shift_right(x, 17);
+        x ^= y ^ shift_right(y, 26);
+        high = x;
+        return high + low;
+    }
+
+    static ulong rounded_full64(ulong value) {
+        return prng_round_u64_to_metal_double_integer(value);
+    }
+
+public:
+    explicit Prng32IllBloomJscXorShift(uint seed) {
+        const ulong state = seed ? ulong(seed) : 1ul;
+        low = state;
+        high = state;
+        if (Warmup) {
+            (void)advance();
+        }
+    }
+
+    uint next_scaled_u32() {
+        const ulong value = advance();
+        if (Full64) {
+            return uint(rounded_full64(value) >> 32u);
+        }
+        return uint((value & ((1ul << 53u) - 1ul)) >> 21u);
+    }
+
+    bool next_gt_half() {
+        const ulong value = advance();
+        if (Full64) {
+            const ulong rounded = rounded_full64(value);
+            return (rounded == 0ul && value != 0ul) ||
+                   rounded > (1ul << 63u);
+        }
+        return (value & ((1ul << 53u) - 1ul)) > (1ul << 52u);
+    }
+};
+
+using Prng32IllBloomJscLogical =
+    Prng32IllBloomJscXorShift<false, true, false>;
+using Prng32IllBloomJscArithmetic =
+    Prng32IllBloomJscXorShift<true, true, false>;
+using Prng32IllBloomJscLogicalNoWarmFull64 =
+    Prng32IllBloomJscXorShift<false, false, true>;
+using Prng32IllBloomJscLogicalNoWarmLow53 =
+    Prng32IllBloomJscXorShift<false, false, false>;
+using Prng32IllBloomJscLogicalWarmFull64 =
+    Prng32IllBloomJscXorShift<false, true, true>;
+using Prng32IllBloomJscArithmeticNoWarmFull64 =
+    Prng32IllBloomJscXorShift<true, false, true>;
+using Prng32IllBloomJscArithmeticNoWarmLow53 =
+    Prng32IllBloomJscXorShift<true, false, false>;
+using Prng32IllBloomJscArithmeticWarmFull64 =
+    Prng32IllBloomJscXorShift<true, true, true>;
+
+class Prng32IllBloomJscLegacyGameRand {
+    uint low;
+    uint high;
+
+    uint advance() {
+        high = ((high << 16u) | (high >> 16u)) + low;
+        low += high;
+        return high;
+    }
+
+public:
+    explicit Prng32IllBloomJscLegacyGameRand(uint seed)
+        : low(seed ^ 0x49616e42u), high(seed) {}
+
+    uint next_scaled_u32() { return advance(); }
+    bool next_gt_half() { return advance() > 0x80000000u; }
+};
+
+class Prng32IllBloomHermesMinstd {
+    uint state;
+
+    uint next_engine() {
+        // Schrage's method is exactly (state * 48271) mod (2^31 - 1),
+        // but keeps the runtime AGX backend away from widening the operation
+        // to an unsupported i128 multiply/remainder sequence.
+        const uint hi = state / 44488u;
+        const uint lo = state - hi * 44488u;
+        int next = int(lo * 48271u) - int(hi * 3399u);
+        if (next <= 0) next += 2147483647;
+        state = uint(next);
+        return state;
+    }
+
+    ulong next_rounded_numerator() {
+        const uint range = 2147483646u;
+        const uint low = next_engine() - 1u;
+        const uint high = next_engine() - 1u;
+        // Match the two positive binary64 operations in
+        // low + high * range without using 128-bit arithmetic, which the AGX
+        // backend cannot legalize in a runtime Metal pipeline.
+        const ulong exact_product =
+            (ulong(mulhi(high, range)) << 32u) | ulong(high * range);
+        const ulong product =
+            prng_round_u64_to_metal_double_integer(exact_product);
+        return prng_round_u64_to_metal_double_integer(product + ulong(low));
+    }
+
+    static ulong rounded_denominator() {
+        // binary64 round-to-nearest-even of 2147483646^2.
+        return 0x3ffffffe00000000ul;
+    }
+
+    static uint scaled_u32(ulong numerator, ulong denominator) {
+        if (numerator == 0ul) return 0u;
+
+        // Long division computes floor((numerator / denominator) * 2^32)
+        // using a 62-bit remainder. The final test reproduces binary64
+        // division rounding only when it can cross the next integer boundary.
+        ulong remainder = numerator;
+        uint value = 0u;
+#pragma unroll
+        for (int bit = 0; bit < 32; ++bit) {
+            remainder <<= 1u;
+            value <<= 1u;
+            if (remainder >= denominator) {
+                remainder -= denominator;
+                value |= 1u;
+            }
+        }
+
+        const int numerator_bits = prng_floor_log2_u64(numerator) + 1;
+        const int denominator_bits = prng_floor_log2_u64(denominator) + 1;
+        int exponent = numerator_bits - denominator_bits;
+        if (exponent == 0 && numerator < denominator) {
+            exponent = -1;
+        }
+        const int half_ulp_shift = 21 - exponent;
+        if (half_ulp_shift < 64) {
+            const ulong distance = denominator - remainder;
+            if (distance <= (denominator >> uint(half_ulp_shift))) {
+                ++value;
+            }
+        }
+        return value;
+    }
+
+public:
+    explicit Prng32IllBloomHermesMinstd(uint seed) {
+        state = seed % 2147483647u;
+        if (state == 0u) state = 1u;
+    }
+
+    uint next_scaled_u32() {
+        return scaled_u32(next_rounded_numerator(), rounded_denominator());
+    }
+
+    bool next_gt_half() {
+        const ulong numerator = next_rounded_numerator();
+        const ulong denominator = rounded_denominator();
+        const ulong doubled = numerator << 1u;
+        if (doubled <= denominator) {
+            return false;
+        }
+        // A value within half an ULP above 0.5 rounds back to exactly 0.5,
+        // and JavaScript's strict comparison must remain false.
+        const ulong delta = doubled - denominator;
+        return delta > (denominator >> 53u);
+    }
+};
+
+static inline ulong prng32_illbloom_v8_murmur_hash3(ulong value) {
+    value ^= value >> 33u;
+    value *= 0xff51afd7ed558ccdul;
+    value ^= value >> 33u;
+    value *= 0xc4ceb9fe1a85ec53ul;
+    value ^= value >> 33u;
+    return value;
+}
+
+static inline void prng32_illbloom_v8_xorshift128(thread ulong& state0,
+                                                  thread ulong& state1) {
+    ulong s1 = state0;
+    const ulong s0 = state1;
+    state0 = s0;
+    s1 ^= s1 << 23u;
+    s1 ^= s1 >> 17u;
+    s1 ^= s0;
+    s1 ^= s0 >> 26u;
+    state1 = s1;
+}
+
+static inline ulong prng32_illbloom_unxorshift_right(ulong value, int shift) {
+    ulong result = value;
+    for (int applied = shift; applied < 64; applied += shift) {
+        result ^= value >> uint(applied);
+    }
+    return result;
+}
+
+static inline ulong prng32_illbloom_unxorshift_left(ulong value, int shift) {
+    ulong result = value;
+    for (int applied = shift; applied < 64; applied += shift) {
+        result ^= value << uint(applied);
+    }
+    return result;
+}
+
+static inline void prng32_illbloom_v8_xorshift128_inverse(
+    thread ulong& state0,
+    thread ulong& state1) {
+    const ulong old_state1 = state0;
+    ulong mixed = state1 ^ old_state1 ^ (old_state1 >> 26u);
+    mixed = prng32_illbloom_unxorshift_right(mixed, 17);
+    const ulong old_state0 = prng32_illbloom_unxorshift_left(mixed, 23);
+    state0 = old_state0;
+    state1 = old_state1;
+}
+
+template <bool High53FromSum>
+class Prng32IllBloomV8Cached {
+    ulong persisted0;
+    ulong persisted1;
+    ulong cursor0;
+    ulong cursor1;
+    int remaining;
+
+    void refill() {
+        for (int i = 0; i < 64; ++i) {
+            prng32_illbloom_v8_xorshift128(persisted0, persisted1);
+        }
+        cursor0 = persisted0;
+        cursor1 = persisted1;
+        remaining = 64;
+    }
+
+    ulong next_fraction() {
+        if (remaining == 0) refill();
+        const ulong fraction = High53FromSum
+            ? ((cursor0 + cursor1) >> 11u)
+            : (cursor0 >> 12u);
+        prng32_illbloom_v8_xorshift128_inverse(cursor0, cursor1);
+        --remaining;
+        return fraction;
+    }
+
+public:
+    explicit Prng32IllBloomV8Cached(uint seed) : remaining(0) {
+        const ulong seed64 = ulong(seed);
+        persisted0 = prng32_illbloom_v8_murmur_hash3(seed64);
+        persisted1 = prng32_illbloom_v8_murmur_hash3(~seed64);
+        if ((persisted0 | persisted1) == 0ul) persisted1 = 1ul;
+        cursor0 = persisted0;
+        cursor1 = persisted1;
+    }
+
+    uint next_scaled_u32() {
+        const ulong fraction = next_fraction();
+        return uint(fraction >> (High53FromSum ? 21u : 20u));
+    }
+
+    bool next_gt_half() {
+        const ulong fraction = next_fraction();
+        return fraction > (1ul << (High53FromSum ? 52u : 51u));
+    }
+};
+
+using Prng32IllBloomV8Cached2018High52 =
+    Prng32IllBloomV8Cached<false>;
+using Prng32IllBloomV8CachedModernHigh53 =
+    Prng32IllBloomV8Cached<true>;
+
+template <bool High52State0>
+class Prng32IllBloomV8NoCache {
+    ulong state0;
+    ulong state1;
+
+    ulong next_fraction() {
+        prng32_illbloom_v8_xorshift128(state0, state1);
+        return High52State0
+            ? (state0 >> 12u)
+            : ((state0 + state1) & 0x000ffffffffffffful);
+    }
+
+public:
+    explicit Prng32IllBloomV8NoCache(uint seed) {
+        const ulong seed64 = ulong(seed);
+        state0 = prng32_illbloom_v8_murmur_hash3(seed64);
+        state1 = High52State0
+            ? prng32_illbloom_v8_murmur_hash3(~seed64)
+            : prng32_illbloom_v8_murmur_hash3(~state0);
+        if ((state0 | state1) == 0ul) state1 = 1ul;
+    }
+
+    uint next_scaled_u32() { return uint(next_fraction() >> 20u); }
+    bool next_gt_half() { return next_fraction() > (1ul << 51u); }
+};
+
+using Prng32IllBloomV8NoCacheLegacyLow52 =
+    Prng32IllBloomV8NoCache<false>;
+using Prng32IllBloomV8NoCacheHigh52 =
+    Prng32IllBloomV8NoCache<true>;
+
+static inline ulong prng32_illbloom_mwc_draw_scaled(thread uint& m_z,
+                                                    thread uint& m_w) {
+    const uint z_hi =
+        (m_z >> 16u) | ((m_z & 0x80000000u) ? 0xffff0000u : 0u);
+    const uint w_hi =
+        (m_w >> 16u) | ((m_w & 0x80000000u) ? 0xffff0000u : 0u);
+    m_z = 0x9069u * (m_z & 0xffffu) + z_hi;
+    m_w = 0x4650u * (m_w & 0xffffu) + w_hi;
+    // CryptoJS first reinterprets the sum as signed int32, then adds 0.5
+    // after division by 2^32. In fixed-point form that is a wrapping uint32
+    // bias, not a 64-bit addition.
+    return ulong(uint((m_z << 16u) + m_w) + 0x80000000u);
+}
+
+static inline uint prng32_illbloom_signed_scaled_to_u32(bool negative,
+                                                        ulong scaled) {
+    return uint(negative ? (0ul - scaled) : scaled);
+}
+
+class Prng32IllBloomRawChainMask {
+    uint first_seed;
+    uint chain_sign_mask;
+    uint word_index;
+    ulong rcache_scaled;
+    bool rcache_negative;
+    bool first_word;
+
+public:
+    Prng32IllBloomRawChainMask(uint seed, uint chain_mask)
+        : first_seed(seed),
+          chain_sign_mask(chain_mask),
+          word_index(0u),
+          rcache_scaled(0ul),
+          rcache_negative(false),
+          first_word(true) {}
+
+    uint next() {
+        const uint seed_word = first_word
+            ? first_seed
+            : prng32_illbloom_signed_scaled_to_u32(
+                  rcache_negative, rcache_scaled);
+        first_word = false;
+        uint m_w = seed_word;
+        uint m_z = 0x3ade68b1u;
+        const ulong first = prng32_illbloom_mwc_draw_scaled(m_z, m_w);
+        rcache_negative =
+            ((chain_sign_mask >> (word_index & 7u)) & 1u) == 0u;
+        rcache_scaled = prng_round_u64_to_metal_double_integer(
+            first * 0x3ade67b7ul);
+        const ulong second = prng32_illbloom_mwc_draw_scaled(m_z, m_w);
+        ++word_index;
+        return uint(second);
+    }
+};
+
+template <bool PositiveSigns>
+class Prng32IllBloomRawFixedSign {
+    uint first_seed;
+    ulong rcache_scaled;
+    bool first_word;
+
+public:
+    explicit Prng32IllBloomRawFixedSign(uint seed)
+        : first_seed(seed), rcache_scaled(0ul), first_word(true) {}
+
+    uint next() {
+        const uint seed_word = first_word
+            ? first_seed
+            : prng32_illbloom_signed_scaled_to_u32(
+                  !PositiveSigns, rcache_scaled);
+        first_word = false;
+        uint m_w = seed_word;
+        uint m_z = 0x3ade68b1u;
+        const ulong first = prng32_illbloom_mwc_draw_scaled(m_z, m_w);
+        rcache_scaled = prng_round_u64_to_metal_double_integer(
+            first * 0x3ade67b7ul);
+        const ulong second = prng32_illbloom_mwc_draw_scaled(m_z, m_w);
+        return prng32_illbloom_signed_scaled_to_u32(
+            !PositiveSigns, second);
+    }
+};
+
+using Prng32IllBloomRawNegative =
+    Prng32IllBloomRawFixedSign<false>;
+using Prng32IllBloomRawPositive =
+    Prng32IllBloomRawFixedSign<true>;
+
+template <typename MathRandomProvider>
+class Prng32IllBloomCryptoJs319 {
+    MathRandomProvider js;
+    ulong rcache_scaled;
+    bool rcache_negative;
+    bool have_rcache;
+
+public:
+    explicit Prng32IllBloomCryptoJs319(uint seed)
+        : js(seed),
+          rcache_scaled(0ul),
+          rcache_negative(false),
+          have_rcache(false) {}
+
+    uint next() {
+        const bool use_cache = have_rcache && rcache_scaled != 0ul;
+        const uint seed_word = use_cache
+            ? prng32_illbloom_signed_scaled_to_u32(
+                  rcache_negative, rcache_scaled)
+            : js.next_scaled_u32();
+        uint m_w = seed_word;
+        uint m_z = 0x3ade68b1u;
+        const ulong first = prng32_illbloom_mwc_draw_scaled(m_z, m_w);
+        rcache_negative = !js.next_gt_half();
+        rcache_scaled = prng_round_u64_to_metal_double_integer(
+            first * 0x3ade67b7ul);
+        have_rcache = true;
+        const ulong second = prng32_illbloom_mwc_draw_scaled(m_z, m_w);
+        return prng32_illbloom_signed_scaled_to_u32(
+            !js.next_gt_half(), second);
+    }
+};
+
+template <typename MathRandomProvider>
+class Prng32IllBloomReactNative312 {
+    MathRandomProvider js;
+public:
+    explicit Prng32IllBloomReactNative312(uint seed) : js(seed) {}
+    uint next() { return js.next_scaled_u32(); }
+};
+
+using Prng32IllBloomCryptoJscLogical =
+    Prng32IllBloomCryptoJs319<Prng32IllBloomJscLogical>;
+using Prng32IllBloomCryptoJscArithmetic =
+    Prng32IllBloomCryptoJs319<Prng32IllBloomJscArithmetic>;
+using Prng32IllBloomCryptoJscLegacy =
+    Prng32IllBloomCryptoJs319<Prng32IllBloomJscLegacyGameRand>;
+using Prng32IllBloomRnJscLogical =
+    Prng32IllBloomReactNative312<Prng32IllBloomJscLogical>;
+using Prng32IllBloomRnJscArithmetic =
+    Prng32IllBloomReactNative312<Prng32IllBloomJscArithmetic>;
+using Prng32IllBloomRnJscLegacy =
+    Prng32IllBloomReactNative312<Prng32IllBloomJscLegacyGameRand>;
+using Prng32IllBloomCryptoJscLogicalNoWarmFull64 =
+    Prng32IllBloomCryptoJs319<Prng32IllBloomJscLogicalNoWarmFull64>;
+using Prng32IllBloomCryptoJscLogicalNoWarmLow53 =
+    Prng32IllBloomCryptoJs319<Prng32IllBloomJscLogicalNoWarmLow53>;
+using Prng32IllBloomCryptoJscLogicalWarmFull64 =
+    Prng32IllBloomCryptoJs319<Prng32IllBloomJscLogicalWarmFull64>;
+using Prng32IllBloomCryptoJscArithmeticNoWarmFull64 =
+    Prng32IllBloomCryptoJs319<Prng32IllBloomJscArithmeticNoWarmFull64>;
+using Prng32IllBloomCryptoJscArithmeticNoWarmLow53 =
+    Prng32IllBloomCryptoJs319<Prng32IllBloomJscArithmeticNoWarmLow53>;
+using Prng32IllBloomCryptoJscArithmeticWarmFull64 =
+    Prng32IllBloomCryptoJs319<Prng32IllBloomJscArithmeticWarmFull64>;
+using Prng32IllBloomRnJscLogicalNoWarmFull64 =
+    Prng32IllBloomReactNative312<Prng32IllBloomJscLogicalNoWarmFull64>;
+using Prng32IllBloomRnJscLogicalNoWarmLow53 =
+    Prng32IllBloomReactNative312<Prng32IllBloomJscLogicalNoWarmLow53>;
+using Prng32IllBloomRnJscLogicalWarmFull64 =
+    Prng32IllBloomReactNative312<Prng32IllBloomJscLogicalWarmFull64>;
+using Prng32IllBloomRnJscArithmeticNoWarmFull64 =
+    Prng32IllBloomReactNative312<Prng32IllBloomJscArithmeticNoWarmFull64>;
+using Prng32IllBloomRnJscArithmeticNoWarmLow53 =
+    Prng32IllBloomReactNative312<Prng32IllBloomJscArithmeticNoWarmLow53>;
+using Prng32IllBloomRnJscArithmeticWarmFull64 =
+    Prng32IllBloomReactNative312<Prng32IllBloomJscArithmeticWarmFull64>;
+using Prng32IllBloomCryptoHermes =
+    Prng32IllBloomCryptoJs319<Prng32IllBloomHermesMinstd>;
+using Prng32IllBloomRnHermes =
+    Prng32IllBloomReactNative312<Prng32IllBloomHermesMinstd>;
+using Prng32IllBloomCryptoV8Cached2018 =
+    Prng32IllBloomCryptoJs319<Prng32IllBloomV8Cached2018High52>;
+using Prng32IllBloomRnV8Cached2018 =
+    Prng32IllBloomReactNative312<Prng32IllBloomV8Cached2018High52>;
+using Prng32IllBloomCryptoV8NoCacheLegacy =
+    Prng32IllBloomCryptoJs319<Prng32IllBloomV8NoCacheLegacyLow52>;
+using Prng32IllBloomRnV8NoCacheLegacy =
+    Prng32IllBloomReactNative312<Prng32IllBloomV8NoCacheLegacyLow52>;
+using Prng32IllBloomCryptoV8NoCacheHigh =
+    Prng32IllBloomCryptoJs319<Prng32IllBloomV8NoCacheHigh52>;
+using Prng32IllBloomRnV8NoCacheHigh =
+    Prng32IllBloomReactNative312<Prng32IllBloomV8NoCacheHigh52>;
+using Prng32IllBloomCryptoV8CachedModern =
+    Prng32IllBloomCryptoJs319<Prng32IllBloomV8CachedModernHigh53>;
+using Prng32IllBloomRnV8CachedModern =
+    Prng32IllBloomReactNative312<Prng32IllBloomV8CachedModernHigh53>;
+
 class Prng32SHR3 {
     uint state;
 public:
@@ -11969,6 +12514,64 @@ public:
     }
 };
 
+static inline bool prng32_illbloom_raw_chain_fill(
+    int entropy_len,
+    thread uchar* entropy,
+    uint seed,
+    int mode,
+    ulong skip32,
+    uint chain_sign_mask) {
+    Prng32IllBloomRawChainMask gen(seed, chain_sign_mask);
+    prng32_generate_entropy_shared(gen, entropy_len, entropy, mode, skip32);
+    return entropy_len > 0;
+}
+
+static inline bool prng32_illbloom_entropy_fill(
+    int entropy_len,
+    thread uchar* entropy,
+    uint seed,
+    int mode,
+    int gen,
+    ulong skip32) {
+    if (gen >= 339 && gen <= 466) {
+        return prng32_illbloom_raw_chain_fill(
+            entropy_len, entropy, seed, mode, skip32, uint(gen - 339));
+    }
+    switch (gen) {
+        case 331: return prng32_generate_entropy_no_filter<Prng32IllBloomRawNegative>(seed, entropy_len, entropy, mode, skip32);
+        case 332: return prng32_generate_entropy_no_filter<Prng32IllBloomRawPositive>(seed, entropy_len, entropy, mode, skip32);
+        case 333: return prng32_generate_entropy_no_filter<Prng32IllBloomCryptoJscLogical>(seed, entropy_len, entropy, mode, skip32);
+        case 334: return prng32_generate_entropy_no_filter<Prng32IllBloomCryptoJscArithmetic>(seed, entropy_len, entropy, mode, skip32);
+        case 335: return prng32_generate_entropy_no_filter<Prng32IllBloomCryptoJscLegacy>(seed, entropy_len, entropy, mode, skip32);
+        case 336: return prng32_generate_entropy_no_filter<Prng32IllBloomRnJscLogical>(seed, entropy_len, entropy, mode, skip32);
+        case 337: return prng32_generate_entropy_no_filter<Prng32IllBloomRnJscArithmetic>(seed, entropy_len, entropy, mode, skip32);
+        case 338: return prng32_generate_entropy_no_filter<Prng32IllBloomRnJscLegacy>(seed, entropy_len, entropy, mode, skip32);
+        case 467: return prng32_generate_entropy_no_filter<Prng32IllBloomCryptoJscLogicalNoWarmFull64>(seed, entropy_len, entropy, mode, skip32);
+        case 468: return prng32_generate_entropy_no_filter<Prng32IllBloomCryptoJscLogicalNoWarmLow53>(seed, entropy_len, entropy, mode, skip32);
+        case 469: return prng32_generate_entropy_no_filter<Prng32IllBloomCryptoJscLogicalWarmFull64>(seed, entropy_len, entropy, mode, skip32);
+        case 470: return prng32_generate_entropy_no_filter<Prng32IllBloomCryptoJscArithmeticNoWarmFull64>(seed, entropy_len, entropy, mode, skip32);
+        case 471: return prng32_generate_entropy_no_filter<Prng32IllBloomCryptoJscArithmeticNoWarmLow53>(seed, entropy_len, entropy, mode, skip32);
+        case 472: return prng32_generate_entropy_no_filter<Prng32IllBloomCryptoJscArithmeticWarmFull64>(seed, entropy_len, entropy, mode, skip32);
+        case 473: return prng32_generate_entropy_no_filter<Prng32IllBloomRnJscLogicalNoWarmFull64>(seed, entropy_len, entropy, mode, skip32);
+        case 474: return prng32_generate_entropy_no_filter<Prng32IllBloomRnJscLogicalNoWarmLow53>(seed, entropy_len, entropy, mode, skip32);
+        case 475: return prng32_generate_entropy_no_filter<Prng32IllBloomRnJscLogicalWarmFull64>(seed, entropy_len, entropy, mode, skip32);
+        case 476: return prng32_generate_entropy_no_filter<Prng32IllBloomRnJscArithmeticNoWarmFull64>(seed, entropy_len, entropy, mode, skip32);
+        case 477: return prng32_generate_entropy_no_filter<Prng32IllBloomRnJscArithmeticNoWarmLow53>(seed, entropy_len, entropy, mode, skip32);
+        case 478: return prng32_generate_entropy_no_filter<Prng32IllBloomRnJscArithmeticWarmFull64>(seed, entropy_len, entropy, mode, skip32);
+        case 479: return prng32_generate_entropy_no_filter<Prng32IllBloomCryptoHermes>(seed, entropy_len, entropy, mode, skip32);
+        case 480: return prng32_generate_entropy_no_filter<Prng32IllBloomRnHermes>(seed, entropy_len, entropy, mode, skip32);
+        case 481: return prng32_generate_entropy_no_filter<Prng32IllBloomCryptoV8Cached2018>(seed, entropy_len, entropy, mode, skip32);
+        case 482: return prng32_generate_entropy_no_filter<Prng32IllBloomRnV8Cached2018>(seed, entropy_len, entropy, mode, skip32);
+        case 483: return prng32_generate_entropy_no_filter<Prng32IllBloomCryptoV8NoCacheLegacy>(seed, entropy_len, entropy, mode, skip32);
+        case 484: return prng32_generate_entropy_no_filter<Prng32IllBloomRnV8NoCacheLegacy>(seed, entropy_len, entropy, mode, skip32);
+        case 485: return prng32_generate_entropy_no_filter<Prng32IllBloomCryptoV8NoCacheHigh>(seed, entropy_len, entropy, mode, skip32);
+        case 486: return prng32_generate_entropy_no_filter<Prng32IllBloomRnV8NoCacheHigh>(seed, entropy_len, entropy, mode, skip32);
+        case 487: return prng32_generate_entropy_no_filter<Prng32IllBloomCryptoV8CachedModern>(seed, entropy_len, entropy, mode, skip32);
+        case 488: return prng32_generate_entropy_no_filter<Prng32IllBloomRnV8CachedModern>(seed, entropy_len, entropy, mode, skip32);
+        default: return false;
+    }
+}
+
 static inline bool prng32_entropy_fill(int entropy_len,
                                        thread uchar* entropy,
                                        uint seed_l,
@@ -11977,6 +12580,11 @@ static inline bool prng32_entropy_fill(int entropy_len,
                                        ulong skip32) {
     if (entropy_len <= 0 || entropy_len > 512) {
         return false;
+    }
+    // Public gens 332..489 are internal 331..488.
+    if (gen >= 331 && gen <= 488) {
+        return prng32_illbloom_entropy_fill(
+            entropy_len, entropy, seed_l, mode, gen, skip32);
     }
     switch (gen) {
         case 0:
@@ -12642,8 +13250,6 @@ case 81:
             return prng32_generate_entropy_and_check<Prng32PolkadotWasmAsmjsZeroChaCha20Bip39_32>(seed_l, entropy_len, entropy, mode, skip32);
         case 330:
             return prng32_generate_entropy_no_filter<Prng32BlueWalletIsaacHdV3_32>(seed_l, entropy_len, entropy, mode, skip32);
-
-
         default:
             return false;
     }
@@ -22286,7 +22892,221 @@ public:
     }
 };
 
-// Switch entries for prng64_entropy_fill main switch, before case 211.
+template <typename Gen32>
+class Prng64IllBloomRuntimeAdapter {
+    Gen32 gen;
+    int legacy_mode;
+
+    ulong projected_byte_word(bool high_byte) {
+        ulong value = 0ul;
+#pragma unroll
+        for (int i = 0; i < 8; ++i) {
+            const uint word = gen.next();
+            const uchar byte = high_byte ? uchar(word >> 24u) : uchar(word);
+            value = (value << 8u) | ulong(byte);
+        }
+        return value;
+    }
+
+public:
+    Prng64IllBloomRuntimeAdapter(uint seed, int source_mode)
+        : gen(seed), legacy_mode(source_mode) {}
+
+    bool direct_is_little_endian() const { return legacy_mode == 248; }
+
+    ulong next() {
+        if (legacy_mode == 247) {
+            const uint first = gen.next();
+            const uint second = gen.next();
+            return (ulong(first) << 32u) | ulong(second);
+        }
+        if (legacy_mode == 248) {
+            const uint first = gen.next();
+            const uint second = gen.next();
+            return (ulong(second) << 32u) | ulong(first);
+        }
+        return projected_byte_word(legacy_mode == 249);
+    }
+};
+
+class Prng64IllBloomRawWordAdapter {
+    Prng32IllBloomRawChainMask gen;
+    uint output_sign_mask;
+    uint word_index;
+    bool little_endian;
+
+    uint signed_next() {
+        uint word = gen.next();
+        if (((output_sign_mask >> (word_index & 7u)) & 1u) == 0u) {
+            word = 0u - word;
+        }
+        ++word_index;
+        return word;
+    }
+
+public:
+    Prng64IllBloomRawWordAdapter(uint seed,
+                                 uint chain_sign_mask,
+                                 uint output_mask,
+                                 bool use_little_endian)
+        : gen(seed, chain_sign_mask),
+          output_sign_mask(output_mask),
+          word_index(0u),
+          little_endian(use_little_endian) {}
+
+    bool direct_is_little_endian() const { return little_endian; }
+
+    ulong next() {
+        const uint first = signed_next();
+        const uint second = signed_next();
+        return little_endian
+            ? (ulong(second) << 32u) | ulong(first)
+            : (ulong(first) << 32u) | ulong(second);
+    }
+};
+
+class Prng64IllBloomRawByteAdapter {
+    Prng32IllBloomRawChainMask gen;
+    bool high_byte;
+
+public:
+    Prng64IllBloomRawByteAdapter(uint seed,
+                                 uint chain_sign_mask,
+                                 bool use_high_byte)
+        : gen(seed, chain_sign_mask), high_byte(use_high_byte) {}
+
+    bool direct_is_little_endian() const { return false; }
+
+    ulong next() {
+        ulong value = 0ul;
+#pragma unroll
+        for (int i = 0; i < 8; ++i) {
+            const uint word = gen.next();
+            const uchar byte = high_byte ? uchar(word >> 24u) : uchar(word);
+            value = (value << 8u) | ulong(byte);
+        }
+        return value;
+    }
+};
+
+template <typename Adapter>
+static inline bool prng64_illbloom_fill_adapter(
+    thread Adapter& adapter,
+    int entropy_len,
+    thread uchar* entropy,
+    int mode,
+    ulong skip64) {
+    if (entropy_len <= 0) return false;
+
+    // Public mode 218 (internal 217) emits the source-exact byte stream.
+    if (mode == 217) {
+        for (ulong i = 0ul; i < skip64; ++i) {
+            (void)adapter.next();
+        }
+        int out = 0;
+        while (out < entropy_len) {
+            const ulong value = adapter.next();
+            uchar bytes[8];
+            if (adapter.direct_is_little_endian()) {
+                prng64_store64_le(bytes, value);
+            } else {
+                prng64_store64_be(bytes, value);
+            }
+            for (int i = 0; i < 8 && out < entropy_len; ++i) {
+                entropy[out++] = bytes[i];
+            }
+        }
+        return true;
+    }
+
+    // Public mode 217 is a gen-specific RN/MVW branch for legacy gens. For
+    // packed gens it means the ordinary masked-2048 lane, aliased by mode 171.
+    const int extraction_mode = mode == 216 ? 170 : mode;
+    prng64_generate_entropy_shared(
+        adapter, entropy_len, entropy, extraction_mode, skip64);
+    return true;
+}
+
+template <typename Gen32>
+static inline bool prng64_illbloom_runtime_fill(
+    int entropy_len,
+    thread uchar* entropy,
+    uint seed,
+    int mode,
+    ulong skip64,
+    int legacy_mode) {
+    Prng64IllBloomRuntimeAdapter<Gen32> adapter(seed, legacy_mode);
+    return prng64_illbloom_fill_adapter(
+        adapter, entropy_len, entropy, mode, skip64);
+}
+
+static inline bool prng64_illbloom_packed_fill(
+    int entropy_len,
+    thread uchar* entropy,
+    ulong packed_index,
+    int mode,
+    int packed_family,
+    ulong skip64) {
+    const uint seed = uint(packed_index);
+    const ulong selector = packed_index >> 32u;
+
+    if (packed_family == 0) {
+        if (selector >= 65536ul) return false;
+        const uint chain_mask = uint(selector & 127ul);
+        const uint output_mask = uint((selector >> 7u) & 255ul);
+        const bool little_endian = ((selector >> 15u) & 1ul) != 0ul;
+        Prng64IllBloomRawWordAdapter adapter(
+            seed, chain_mask, output_mask, little_endian);
+        return prng64_illbloom_fill_adapter(
+            adapter, entropy_len, entropy, mode, skip64);
+    }
+
+    if (packed_family == 2) {
+        if (selector >= 256ul) return false;
+        const uint chain_mask = uint(selector & 127ul);
+        const bool high_byte = (selector >> 7u) == 0ul;
+        Prng64IllBloomRawByteAdapter adapter(seed, chain_mask, high_byte);
+        return prng64_illbloom_fill_adapter(
+            adapter, entropy_len, entropy, mode, skip64);
+    }
+
+    if (packed_family != 1 || selector >= 120ul) return false;
+    const int profile = int(selector >> 2u);
+    const int legacy_mode = 247 + int(selector & 3ul);
+    switch (profile) {
+        case 0: return prng64_illbloom_runtime_fill<Prng32IllBloomRawNegative>(entropy_len, entropy, seed, mode, skip64, legacy_mode);
+        case 1: return prng64_illbloom_runtime_fill<Prng32IllBloomRawPositive>(entropy_len, entropy, seed, mode, skip64, legacy_mode);
+        case 2: return prng64_illbloom_runtime_fill<Prng32IllBloomCryptoJscLogical>(entropy_len, entropy, seed, mode, skip64, legacy_mode);
+        case 3: return prng64_illbloom_runtime_fill<Prng32IllBloomCryptoJscArithmetic>(entropy_len, entropy, seed, mode, skip64, legacy_mode);
+        case 4: return prng64_illbloom_runtime_fill<Prng32IllBloomCryptoJscLegacy>(entropy_len, entropy, seed, mode, skip64, legacy_mode);
+        case 5: return prng64_illbloom_runtime_fill<Prng32IllBloomRnJscLogical>(entropy_len, entropy, seed, mode, skip64, legacy_mode);
+        case 6: return prng64_illbloom_runtime_fill<Prng32IllBloomRnJscArithmetic>(entropy_len, entropy, seed, mode, skip64, legacy_mode);
+        case 7: return prng64_illbloom_runtime_fill<Prng32IllBloomRnJscLegacy>(entropy_len, entropy, seed, mode, skip64, legacy_mode);
+        case 8: return prng64_illbloom_runtime_fill<Prng32IllBloomCryptoJscLogicalNoWarmFull64>(entropy_len, entropy, seed, mode, skip64, legacy_mode);
+        case 9: return prng64_illbloom_runtime_fill<Prng32IllBloomCryptoJscLogicalNoWarmLow53>(entropy_len, entropy, seed, mode, skip64, legacy_mode);
+        case 10: return prng64_illbloom_runtime_fill<Prng32IllBloomCryptoJscLogicalWarmFull64>(entropy_len, entropy, seed, mode, skip64, legacy_mode);
+        case 11: return prng64_illbloom_runtime_fill<Prng32IllBloomCryptoJscArithmeticNoWarmFull64>(entropy_len, entropy, seed, mode, skip64, legacy_mode);
+        case 12: return prng64_illbloom_runtime_fill<Prng32IllBloomCryptoJscArithmeticNoWarmLow53>(entropy_len, entropy, seed, mode, skip64, legacy_mode);
+        case 13: return prng64_illbloom_runtime_fill<Prng32IllBloomCryptoJscArithmeticWarmFull64>(entropy_len, entropy, seed, mode, skip64, legacy_mode);
+        case 14: return prng64_illbloom_runtime_fill<Prng32IllBloomRnJscLogicalNoWarmFull64>(entropy_len, entropy, seed, mode, skip64, legacy_mode);
+        case 15: return prng64_illbloom_runtime_fill<Prng32IllBloomRnJscLogicalNoWarmLow53>(entropy_len, entropy, seed, mode, skip64, legacy_mode);
+        case 16: return prng64_illbloom_runtime_fill<Prng32IllBloomRnJscLogicalWarmFull64>(entropy_len, entropy, seed, mode, skip64, legacy_mode);
+        case 17: return prng64_illbloom_runtime_fill<Prng32IllBloomRnJscArithmeticNoWarmFull64>(entropy_len, entropy, seed, mode, skip64, legacy_mode);
+        case 18: return prng64_illbloom_runtime_fill<Prng32IllBloomRnJscArithmeticNoWarmLow53>(entropy_len, entropy, seed, mode, skip64, legacy_mode);
+        case 19: return prng64_illbloom_runtime_fill<Prng32IllBloomRnJscArithmeticWarmFull64>(entropy_len, entropy, seed, mode, skip64, legacy_mode);
+        case 20: return prng64_illbloom_runtime_fill<Prng32IllBloomCryptoHermes>(entropy_len, entropy, seed, mode, skip64, legacy_mode);
+        case 21: return prng64_illbloom_runtime_fill<Prng32IllBloomRnHermes>(entropy_len, entropy, seed, mode, skip64, legacy_mode);
+        case 22: return prng64_illbloom_runtime_fill<Prng32IllBloomCryptoV8Cached2018>(entropy_len, entropy, seed, mode, skip64, legacy_mode);
+        case 23: return prng64_illbloom_runtime_fill<Prng32IllBloomRnV8Cached2018>(entropy_len, entropy, seed, mode, skip64, legacy_mode);
+        case 24: return prng64_illbloom_runtime_fill<Prng32IllBloomCryptoV8NoCacheLegacy>(entropy_len, entropy, seed, mode, skip64, legacy_mode);
+        case 25: return prng64_illbloom_runtime_fill<Prng32IllBloomRnV8NoCacheLegacy>(entropy_len, entropy, seed, mode, skip64, legacy_mode);
+        case 26: return prng64_illbloom_runtime_fill<Prng32IllBloomCryptoV8NoCacheHigh>(entropy_len, entropy, seed, mode, skip64, legacy_mode);
+        case 27: return prng64_illbloom_runtime_fill<Prng32IllBloomRnV8NoCacheHigh>(entropy_len, entropy, seed, mode, skip64, legacy_mode);
+        case 28: return prng64_illbloom_runtime_fill<Prng32IllBloomCryptoV8CachedModern>(entropy_len, entropy, seed, mode, skip64, legacy_mode);
+        case 29: return prng64_illbloom_runtime_fill<Prng32IllBloomRnV8CachedModern>(entropy_len, entropy, seed, mode, skip64, legacy_mode);
+        default: return false;
+    }
+}
 
 static inline bool prng64_entropy_fill(int entropy_len,
                                        thread uchar* entropy,
@@ -22297,21 +23117,27 @@ static inline bool prng64_entropy_fill(int entropy_len,
     if (entropy_len <= 0 || entropy_len > 512) {
         return false;
     }
-    if (mode == 217) {
+    // Public gens 221..223 are internal 220..222.
+    if (gen >= 220 && gen <= 222) {
+        return prng64_illbloom_packed_fill(
+            entropy_len, entropy, seed_l, mode, gen - 220, skip64);
+    }
+    // Public mode 217 is internal 216.
+    if (mode == 216) {
         switch (gen) {
-            case 216:
+            case 215:
                 return (entropy_len == 32)
                     ? prng64_mvw_web3_mathrandom_account_private<Prng64RandstormV8_2015Profile>(entropy_len, entropy, seed_l, skip64)
                     : prng64_rn_getrandomvalues_mathrandom32_fill<Prng64RandstormV8_2015Profile>(entropy_len, entropy, seed_l, skip64);
-            case 217:
+            case 216:
                 return (entropy_len == 32)
                     ? prng64_mvw_web3_mathrandom_account_private<Prng64RandstormSpiderMonkeyLcg48Profile>(entropy_len, entropy, seed_l, skip64)
                     : prng64_rn_getrandomvalues_mathrandom32_fill<Prng64RandstormSpiderMonkeyLcg48Profile>(entropy_len, entropy, seed_l, skip64);
-            case 218:
+            case 217:
                 return (entropy_len == 32)
                     ? prng64_mvw_web3_mathrandom_account_private<Prng64RandstormJscWeakRandomProfile>(entropy_len, entropy, seed_l, skip64)
                     : prng64_rn_getrandomvalues_mathrandom32_fill<Prng64RandstormJscWeakRandomProfile>(entropy_len, entropy, seed_l, skip64);
-            case 219:
+            case 218:
                 return (entropy_len == 32)
                     ? prng64_mvw_web3_mathrandom_account_private<Prng64RandstormLcg32Profile>(entropy_len, entropy, seed_l, skip64)
                     : prng64_rn_getrandomvalues_mathrandom32_fill<Prng64RandstormLcg32Profile>(entropy_len, entropy, seed_l, skip64);
@@ -22738,33 +23564,31 @@ case 81:
         case 208:
             return prng64_generate_entropy_and_check<Prng64LCG_Borland_Rand64>(seed_l, entropy_len, entropy, mode, skip64);
         case 209:
-            return prng64_generate_entropy_and_check<Prng64LCG_ANSI_C_Rand64>(seed_l, entropy_len, entropy, mode, skip64);
-        case 210:
             return prng64_generate_entropy_and_check<Prng64CLCG2_64>(seed_l, entropy_len, entropy, mode, skip64);
 
         case 82:
             return prng64_generate_entropy_and_check<Prng64AlphaWalletTinyMT32>(seed_l, entropy_len, entropy, mode, skip64);
         case 83:
             return prng64_generate_entropy_and_check<Prng64RandstormMWC1616Arc4>(seed_l, entropy_len, entropy, mode, skip64);
-        case 211:
+        case 210:
             return prng64_generate_entropy_and_check<Prng64RandstormExactArc4Profile<Prng64RandstormV8_2011Profile>>(seed_l, entropy_len, entropy, mode, skip64);
-        case 212:
+        case 211:
             return prng64_generate_entropy_and_check<Prng64RandstormExactArc4Profile<Prng64RandstormV8_2015Profile>>(seed_l, entropy_len, entropy, mode, skip64);
-        case 213:
+        case 212:
             return prng64_generate_entropy_and_check<Prng64RandstormExactArc4Profile<Prng64RandstormSpiderMonkeyLcg48Profile>>(seed_l, entropy_len, entropy, mode, skip64);
-        case 214:
+        case 213:
             return prng64_generate_entropy_and_check<Prng64RandstormExactArc4Profile<Prng64RandstormJscWeakRandomProfile>>(seed_l, entropy_len, entropy, mode, skip64);
-        case 215:
+        case 214:
             return prng64_generate_entropy_and_check<Prng64RandstormV8_2011Profile>(seed_l, entropy_len, entropy, mode, skip64);
-        case 216:
+        case 215:
             return prng64_generate_entropy_and_check<Prng64RandstormV8_2015Profile>(seed_l, entropy_len, entropy, mode, skip64);
-        case 217:
+        case 216:
             return prng64_generate_entropy_and_check<Prng64RandstormSpiderMonkeyLcg48Profile>(seed_l, entropy_len, entropy, mode, skip64);
-        case 218:
+        case 217:
             return prng64_generate_entropy_and_check<Prng64RandstormJscWeakRandomProfile>(seed_l, entropy_len, entropy, mode, skip64);
-        case 219:
+        case 218:
             return prng64_generate_entropy_and_check<Prng64RandstormLcg32Profile>(seed_l, entropy_len, entropy, mode, skip64);
-        case 220:
+        case 219:
             return prng64_generate_entropy_and_check<Prng64JavaUtilRandomNextBytes>(seed_l, entropy_len, entropy, mode, skip64);
         default:
             return false;

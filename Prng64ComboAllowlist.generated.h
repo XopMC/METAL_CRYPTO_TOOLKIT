@@ -3,8 +3,9 @@
 
 struct Prng64ModeRange { int first; int last; };
 
-static constexpr int kPrng64GeneratedGenMax = 220;
-static constexpr int kPrng64GeneratedModeMax = 217;
+// IDs 221-223 and modes through 218 are handled arithmetically by main.mm.
+static constexpr int kPrng64GeneratedGenMax = 223;
+static constexpr int kPrng64GeneratedModeMax = 218;
 
 static constexpr Prng64ModeRange kPrng64AllowedRanges[] = {
     {1, 87},

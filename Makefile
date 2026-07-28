@@ -86,8 +86,11 @@ METAL_HELPER_HEADERS := $(shell find lib sr25519-donna-32bit big_int fastpbkdf2 
 METAL_HEADERS := KernelState.metalh $(sort $(wildcard Kernels/*.metalh) $(METAL_HELPER_HEADERS))
 METAL_AIRS := $(METAL_SRCS:%.metal=$(BUILD_DIR)/%.air)
 METAL_DEPS := $(METAL_AIRS:.air=.d)
+ILLBLOOM_TEST_AIR := $(BUILD_DIR)/tests/illbloom_prng_vectors.air
+ILLBLOOM_TEST_METALLIB := $(BUILD_DIR)/tests/illbloom_prng_vectors.metallib
+ILLBLOOM_TEST_BIN := $(BUILD_DIR)/tests/illbloom_prng_metal_test
 
-.PHONY: all host clean metal-toolchain-check tools tools-clean
+.PHONY: all host clean metal-toolchain-check tools tools-clean illbloom-prng-test
 
 all: $(TARGET) $(ROOT_TARGET)
 
@@ -98,6 +101,9 @@ tools:
 
 tools-clean:
 	$(MAKE) -C tools clean
+
+illbloom-prng-test: $(ILLBLOOM_TEST_BIN) $(ILLBLOOM_TEST_METALLIB)
+	$(ILLBLOOM_TEST_BIN) $(ILLBLOOM_TEST_METALLIB)
 
 $(TARGET): $(HOST_OBJS) $(CPP_OBJS) $(C_OBJS) $(METALLIB) | $(BIN_DIR)
 	$(CXX) $(CXXFLAGS) $(HOST_OBJS) $(CPP_OBJS) $(C_OBJS) -o $@ $(LDFLAGS) $(EMBED_METALLIB_LDFLAGS)
@@ -125,6 +131,19 @@ $(BUILD_DIR)/%.air: %.metal | $(BUILD_DIR)
 	$(METAL) -std=metal3.1 -DMETAL_VANITY_GROUP_SIZE=$(VANITY_GROUP_SIZE) \
 		-I. -MMD -MP -MF $(@:.air=.d) -MT $@ -c $< -o $@
 
+$(ILLBLOOM_TEST_AIR): tests/illbloom_prng_vectors.metal $(METAL_HEADERS) | $(BUILD_DIR)
+	@mkdir -p $(dir $@)
+	$(METAL) -std=metal3.1 -DMETAL_VANITY_GROUP_SIZE=$(VANITY_GROUP_SIZE) \
+		-I. -MMD -MP -MF $(@:.air=.d) -MT $@ -c $< -o $@
+
+$(ILLBLOOM_TEST_METALLIB): $(ILLBLOOM_TEST_AIR)
+	@$(MAKE) --no-print-directory metal-toolchain-check
+	$(METALLIB_TOOL) $< -o $@
+
+$(ILLBLOOM_TEST_BIN): tests/illbloom_prng_metal_test.mm | $(BUILD_DIR)
+	@mkdir -p $(dir $@)
+	$(CXX) $(OBJCXXFLAGS) $< -o $@ $(LDFLAGS)
+
 $(METALLIB): $(METAL_AIRS)
 	@$(MAKE) --no-print-directory metal-toolchain-check
 	$(METALLIB_TOOL) $(METAL_AIRS) -o $@
@@ -145,4 +164,4 @@ $(BUILD_DIR) $(BIN_DIR):
 clean:
 	rm -rf $(BUILD_DIR) $(BIN_DIR) $(ROOT_TARGET)
 
--include $(DEPS) $(METAL_DEPS)
+-include $(DEPS) $(METAL_DEPS) $(ILLBLOOM_TEST_AIR:.air=.d)

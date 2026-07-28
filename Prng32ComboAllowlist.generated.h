@@ -3,8 +3,9 @@
 
 struct Prng32ModeRange { int first; int last; };
 
-static constexpr int kPrng32GeneratedGenMax = 331;
-static constexpr int kPrng32GeneratedModeMax = 246;
+// Appended Ill Bloom IDs are handled arithmetically by main.mm.
+static constexpr int kPrng32GeneratedGenMax = 489;
+static constexpr int kPrng32GeneratedModeMax = 762;
 
 static constexpr Prng32ModeRange kPrng32AllowedRanges[] = {
     {1, 100},
