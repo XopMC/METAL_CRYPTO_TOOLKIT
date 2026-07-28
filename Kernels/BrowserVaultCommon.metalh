@@ -5,6 +5,10 @@
 #include "GPUHash.metalh"
 #include "PrngCommon.metalh"
 #include "ElectrumWalletCommon.metalh"
+#if defined(METAL_CRYPTO_BROWSER_VAULT_SUBSTRATE)
+#include "../sr25519-donna-32bit/ed25519-donna/ed25519.metalh"
+#include "../sr25519-donna-32bit/sr25519.metalh"
+#endif
 
 #define ETHPRESALE_MAX_ENCSEED_LEN 608u
 #define WALLET_MODE_ETHPRESALE 11u
@@ -1144,6 +1148,159 @@ __attribute__((noinline)) static bool wallet_xsalsa20poly1305_secretbox_verify(c
     }
     return diff == 0u;
 }
+
+#if defined(METAL_CRYPTO_BROWSER_VAULT_SUBSTRATE)
+static inline bool wallet_substrate_equal_thread_device(
+    const thread uchar* left,
+    const device uchar* right,
+    uint length) {
+    uchar diff = 0u;
+    for (uint i = 0u; i < length; ++i) {
+        diff = uchar(diff | uchar(left[i] ^ right[i]));
+    }
+    return diff == 0u;
+}
+
+static inline bool wallet_substrate_pkcs8_header_ok(
+    const thread uchar* plaintext) {
+    const uchar header[16] = {
+        0x30u, 0x53u, 0x02u, 0x01u, 0x01u, 0x30u, 0x05u, 0x06u,
+        0x03u, 0x2bu, 0x65u, 0x70u, 0x04u, 0x22u, 0x04u, 0x20u
+    };
+    uchar diff = 0u;
+    for (uint i = 0u; i < 16u; ++i) {
+        diff = uchar(diff | uchar(plaintext[i] ^ header[i]));
+    }
+    return diff == 0u;
+}
+
+static inline bool wallet_substrate_pkcs8_divider_ok(
+    const thread uchar* plaintext,
+    uint offset) {
+    const uchar divider[5] = { 0xa1u, 0x23u, 0x03u, 0x21u, 0x00u };
+    uchar diff = 0u;
+    for (uint i = 0u; i < 5u; ++i) {
+        diff = uchar(diff | uchar(plaintext[offset + i] ^ divider[i]));
+    }
+    return diff == 0u;
+}
+
+__attribute__((noinline)) static bool wallet_substrate_secretbox_pkcs8_verify(
+    const constant secp256k1_ge_storage* precPtr,
+    ulong precPitch,
+    const thread uchar key32[32],
+    const device BrowserVaultDeviceTarget& target,
+    const device uchar* ciphertext) {
+    if (target.iv_len != 24u ||
+        target.ciphertext_len < 85u ||
+        target.ciphertext_len > 117u ||
+        (target.expected_public_len != 32u &&
+         target.expected_public_len != 33u) ||
+        !wallet_xsalsa20poly1305_secretbox_verify(
+            key32, target.iv, target.tag, ciphertext,
+            target.ciphertext_len)) {
+        return false;
+    }
+
+    uchar subkey[32];
+    uchar stream[64];
+    uchar plaintext[117];
+    wallet_hsalsa20(subkey, target.iv, key32);
+    wallet_salsa20_block(stream, subkey, target.iv + 16, 0ul);
+    const uint length = target.ciphertext_len;
+    for (uint i = 0u; i < length; ++i) {
+        if (i == 32u || (i > 32u && ((i - 32u) & 63u) == 0u)) {
+            const ulong block_counter =
+                1ul + ulong((i - 32u) >> 6u);
+            wallet_salsa20_block(
+                stream, subkey, target.iv + 16, block_counter);
+        }
+        const uint stream_offset =
+            i < 32u ? 32u + i : ((i - 32u) & 63u);
+        plaintext[i] = uchar(ciphertext[i] ^ stream[stream_offset]);
+    }
+
+    if (!wallet_substrate_pkcs8_header_ok(plaintext)) {
+        return false;
+    }
+    uint secret_len = 64u;
+    uint divider_offset = 80u;
+    if (length < 117u ||
+        !wallet_substrate_pkcs8_divider_ok(
+            plaintext, divider_offset)) {
+        secret_len = 32u;
+        divider_offset = 48u;
+        if (length < 85u ||
+            !wallet_substrate_pkcs8_divider_ok(
+                plaintext, divider_offset)) {
+            return false;
+        }
+    }
+    const uint public_offset = divider_offset + 5u;
+    if (public_offset + target.expected_public_len != length ||
+        !wallet_substrate_equal_thread_device(
+            plaintext + public_offset,
+            target.expected_public,
+            target.expected_public_len)) {
+        return false;
+    }
+
+    if (target.key_kind == SUBSTRATEWALLET_KEY_SR25519) {
+        if (target.expected_public_len != 32u) {
+            return false;
+        }
+        uchar derived[32] = {};
+        if (secret_len == 64u) {
+            uchar scalar[64] = {};
+            for (uint i = 0u; i < 32u; ++i) {
+                scalar[i] = plaintext[16u + i];
+            }
+            divide_scalar_bytes_by_cofactor(scalar, 32u);
+            private_key_to_public_key(derived, scalar);
+        } else {
+            sr25519_public_from_seed(derived, plaintext + 16u);
+        }
+        return wallet_substrate_equal_thread_device(
+            derived, target.expected_public, 32u);
+    }
+
+    if (target.key_kind == SUBSTRATEWALLET_KEY_ED25519) {
+        if (target.expected_public_len != 32u) {
+            return false;
+        }
+        uchar derived[32] = {};
+        ed25519_publickey(plaintext + 16u, derived);
+        return wallet_substrate_equal_thread_device(
+            derived, target.expected_public, 32u);
+    }
+
+    if (target.key_kind == SUBSTRATEWALLET_KEY_ECDSA) {
+        if (secret_len != 32u ||
+            target.expected_public_len != 33u ||
+            precPtr == nullptr) {
+            return false;
+        }
+        uchar public_key65[65] = {};
+        public_key65[0] = 0x04u;
+        if (secp256k1_ec_pubkey_create(
+                reinterpret_cast<thread secp256k1_pubkey*>(
+                    public_key65 + 1u),
+                plaintext + 16u,
+                precPtr,
+                size_t(precPitch)) == 0) {
+            return false;
+        }
+        uchar compressed[33] = {};
+        compressed[0] = uchar(0x02u | (public_key65[64] & 1u));
+        for (uint i = 0u; i < 32u; ++i) {
+            compressed[i + 1u] = public_key65[i + 1u];
+        }
+        return wallet_substrate_equal_thread_device(
+            compressed, target.expected_public, 33u);
+    }
+    return false;
+}
+#endif
 
 static inline void wallet_emit_browservault_result(device bool* isResult,
                                                    device bool* buffResult,

@@ -389,6 +389,7 @@ static bool KEYSTORE_MODE = false;
 static bool WALLETDAT_MODE = false;
 static bool WALLETJS_MODE = false;
 static bool BROWSERVAULT_MODE = false;
+static bool SUBSTRATEWALLET_MODE = false;
 static bool ELECTRUMWALLET_MODE = false;
 static bool EXODUSSECO_MODE = false;
 static bool BITCOINJWALLET_MODE = false;
@@ -408,7 +409,8 @@ static bool WALLETSCAN_MODE = false;
 
 static inline bool is_browserlike_wallet_mode()
 {
-    return BROWSERVAULT_MODE || BLOCKCHAINWALLET_MODE || MULTIBITWALLET_MODE ||
+    return BROWSERVAULT_MODE || SUBSTRATEWALLET_MODE ||
+        BLOCKCHAINWALLET_MODE || MULTIBITWALLET_MODE ||
         BIP38_MODE || ETHPRESALE_MODE || BISQWALLET_MODE || DOGECHAINWALLET_MODE ||
         STELLARWALLET_MODE || ANDROIDWALLET_MODE;
 }
@@ -8098,6 +8100,7 @@ enum class HelpTopic {
     WalletDat,
     WalletJs,
     BrowserVault,
+    SubstrateWallet,
     BlockchainWallet,
     MultiBitWallet,
     Bip38,
@@ -10235,6 +10238,7 @@ static HelpTopic detect_help_topic(int argc, char** argv) {
         if (is_help_topic_arg(arg, "-walletdat")) return HelpTopic::WalletDat;
         if (is_help_topic_arg(arg, "-walletjs")) return HelpTopic::WalletJs;
         if (is_help_topic_arg(arg, "-browservault")) return HelpTopic::BrowserVault;
+        if (is_help_topic_arg(arg, "-substratewallet")) return HelpTopic::SubstrateWallet;
         if (is_help_topic_arg(arg, "-blockchainwallet")) return HelpTopic::BlockchainWallet;
         if (is_help_topic_arg(arg, "-multibitwallet")) return HelpTopic::MultiBitWallet;
         if (is_help_topic_arg(arg, "-bip38")) return HelpTopic::Bip38;
@@ -10292,6 +10296,7 @@ static const char* help_topic_command(HelpTopic topic) {
     case HelpTopic::WalletDat: return "-walletdat";
     case HelpTopic::WalletJs: return "-walletjs";
     case HelpTopic::BrowserVault: return "-browservault";
+    case HelpTopic::SubstrateWallet: return "-substratewallet";
     case HelpTopic::BlockchainWallet: return "-blockchainwallet";
     case HelpTopic::MultiBitWallet: return "-multibitwallet";
     case HelpTopic::Bip38: return "-bip38";
@@ -10382,6 +10387,7 @@ static void printHelpShort() {
 [!] -keystore                     Ethereum JSON V3 password recovery.
 [!] -walletdat                    Bitcoin Core wallet.dat password recovery.
 [!] -browservault                 Browser extension vault recovery.
+[!] -substratewallet              Substrate/Polkadot JSON PKCS8 recovery.
 [!] -electrumwallet               Electrum wallet password recovery.
 [!] -exodusseco                   Exodus SECO container recovery.
 [!] -bitcoinjwallet               bitcoinj/MultiDoge/Coinomi wallet recovery.
@@ -11410,6 +11416,7 @@ static bool helpTopicUsesWalletPasswordCommonSection(HelpTopic topic) {
     case HelpTopic::Keystore:
     case HelpTopic::WalletDat:
     case HelpTopic::BrowserVault:
+    case HelpTopic::SubstrateWallet:
     case HelpTopic::BlockchainWallet:
     case HelpTopic::MultiBitWallet:
     case HelpTopic::Bip38:
@@ -11431,6 +11438,7 @@ static bool helpTopicUsesWalletPasswordCommonSection(HelpTopic topic) {
 static bool helpTopicUsesWalletScryptMemSection(HelpTopic topic) {
     switch (topic) {
     case HelpTopic::BrowserVault:
+    case HelpTopic::SubstrateWallet:
     case HelpTopic::BlockchainWallet:
     case HelpTopic::BisqWallet:
     case HelpTopic::DogechainWallet:
@@ -11554,6 +11562,71 @@ static void printHelpPassThreadSection() {
 )HELP");
 }
 
+static void printHelpSubstrateWalletSection() {
+    puts(R"HELP([!] MAIN MODE: -substratewallet  (Substrate / Polkadot JSON wallet recovery)
+[!] ======================================================================
+[!] Purpose:
+[!] Recover passwords for versioned Substrate keyring JSON/PKCS8 wallets.
+[!] A result is emitted only after authenticated decryption, exact PKCS8
+[!] header/divider validation, secret-to-public regeneration, and identity match.
+[!]
+[!] Inputs:
+[!] -substratewallet FILE1 ...     Load one or more keyring JSON files.
+[!] -substratewallet -f DIR        Recursively scan .json/no-extension files.
+[!] Required JSON fields are address, encoded, encoding.content/type/version.
+[!] Duplicate encrypted wallets are computed once.
+[!]
+[!] Supported profiles:
+[!] v3: scrypt parameters embedded in encoded, then XSalsa20-Poly1305.
+[!] v2: legacy zero-padded/truncated 32-byte password key, then secretbox.
+[!] Curves: sr25519, ed25519 and secp256k1 ECDSA.
+[!] Unknown versions, encodings, curves, invalid SS58 checksums and malformed
+[!] scrypt parameters are rejected before GPU work.
+[!]
+[!] Password candidates:
+[!] -i FILE                         Dictionary/password list, repeatable.
+[!] -hex                            Dictionary lines are exact hex bytes.
+[!] -mask MASK / -mask-file FILE    GPU mask candidates.
+[!] -cs1/-cs2/-cs3/-cs4 CHARS       Custom mask charsets.
+[!] -start HEX [-end HEX]           Raw byte range, length-major, up to 127 bytes.
+[!] -n N                            Optional active KDF/window cap.
+[!]
+[!] GPU / memory:
+[!] -wallet-mem auto|all|NN%|SIZE   Hard unified-memory working-set budget.
+[!]                                 auto uses <=50% of the free recommended set;
+[!]                                 all leaves a 512 MiB runtime reserve.
+[!] -wallet-scrypt-mem MiB          Optional stricter scrypt scratch cap/device.
+[!] -device LIST                    Split candidate ordinals without gaps/overlap.
+[!] Targets with identical profile/salt/KDF parameters share one grouped KDF.
+[!] Large target sets use compact metadata and a pooled ciphertext allocation.
+[!]
+[!] Statistics:
+[!] SpeedThreadFunc is the only statistics printer.
+[!] KDF/s counts completed password/KDF-group jobs after Metal completion.
+[!] Verify/s counts actual target verifications; target count is never used as
+[!] an artificial speed multiplier. Working set, targets, solved, readback and
+[!] found counts are reported by the common ModeProgress line.
+[!]
+[!] Output:
+[!] SUBSTRATEWALLET:<file>:PASSWORD:<password>:VAULT:<sha256>:
+[!] PROFILE:<substrate-v3-scrypt-pkcs8|substrate-v2-legacy-pkcs8>
+[!]
+[!] Examples:
+[!] ./METAL_CRYPTO_TOOLKIT -substratewallet account.json \
+[!]   -i passwords.txt -wallet-mem auto -save
+[!] ./METAL_CRYPTO_TOOLKIT -substratewallet -f wallets \
+[!]   -mask "?a?a?a?a?a?a?a?a" -wallet-mem all -device 0 \
+[!]   -save -o substrate_found.txt
+[!] ./METAL_CRYPTO_TOOLKIT -substratewallet account.json \
+[!]   -i password-bytes.hex -hex -wallet-scrypt-mem 4096 -save
+[!]
+[!] Limitations:
+[!] Only version 2/3 PKCS8 + XSalsa20-Poly1305 keyring JSON is accepted.
+[!] Hardware/remote signers and watch-only public records have no password secret.
+[!] Runtime errors return nonzero; a completed search with no match is successful.
+)HELP");
+}
+
 static void printHelpModeSection(HelpTopic topic) {
     switch (topic) {
     case HelpTopic::Keystore:
@@ -11564,6 +11637,9 @@ static void printHelpModeSection(HelpTopic topic) {
         break;
     case HelpTopic::BrowserVault:
         printHelpRange("[!] MAIN MODE: -browservault", "[!] MAIN MODE: -exodusseco");
+        break;
+    case HelpTopic::SubstrateWallet:
+        printHelpSubstrateWalletSection();
         break;
     case HelpTopic::StellarWallet:
         printHelpStellarWalletSection();
@@ -15147,6 +15223,15 @@ bool readArgs(int argc, char** argv) {
             }
             continue;
         }
+        if (strcmp(argv[a], "-substratewallet") == 0) {
+            SUBSTRATEWALLET_MODE = true;
+            a++;
+            while (a < argc && !wallet_is_flag_token(argv[a])) {
+                wallet_artifact_files.push_back(string(argv[a]));
+                a++;
+            }
+            continue;
+        }
         if (strcmp(argv[a], "-blockchainwallet") == 0) {
             BLOCKCHAINWALLET_MODE = true;
             a++;
@@ -18296,6 +18381,7 @@ bool readArgs(int argc, char** argv) {
         (WALLETDAT_MODE ? 1 : 0) +
         (WALLETJS_MODE ? 1 : 0) +
         (BROWSERVAULT_MODE ? 1 : 0) +
+        (SUBSTRATEWALLET_MODE ? 1 : 0) +
         (BLOCKCHAINWALLET_MODE ? 1 : 0) +
         (MULTIBITWALLET_MODE ? 1 : 0) +
         (BIP38_MODE ? 1 : 0) +
@@ -18388,8 +18474,9 @@ bool readArgs(int argc, char** argv) {
         std::cerr << "[!] Error: -wallet-scrypt-mem is valid only with scrypt wallet modes [!]" << std::endl;
         return false;
     }
-    if (wallet_memory_explicit && !BIP38_MODE && !MNEMONIC_SCRAMBLE_MODE) {
-        std::cerr << "[!] Error: -wallet-mem is not enabled for this wallet mode yet; it is supported by -bip38 and -mnemonic -scramble [!]" << std::endl;
+    if (wallet_memory_explicit && !BIP38_MODE && !SUBSTRATEWALLET_MODE &&
+        !MNEMONIC_SCRAMBLE_MODE) {
+        std::cerr << "[!] Error: -wallet-mem is not enabled for this wallet mode yet; it is supported by -bip38, -substratewallet and -mnemonic -scramble [!]" << std::endl;
         return false;
     }
     if ((!mnemonic_scramble_pattern.empty() ||
@@ -24799,6 +24886,74 @@ static bool wallet_json_get_u32_from(const std::string& json, const std::string&
     return true;
 }
 
+static bool wallet_json_get_object(
+    const std::string& json,
+    const std::string& key,
+    std::string& out)
+{
+    const std::string pat = "\"" + key + "\"";
+    size_t p = json.find(pat);
+    if (p == std::string::npos) {
+        return false;
+    }
+    p = json.find(':', p + pat.size());
+    if (p == std::string::npos) {
+        return false;
+    }
+    ++p;
+    while (p < json.size() &&
+           std::isspace(static_cast<unsigned char>(json[p]))) {
+        ++p;
+    }
+    if (p >= json.size() || json[p] != '{') {
+        return false;
+    }
+    const size_t begin = p;
+    uint32_t depth = 0u;
+    bool in_string = false;
+    bool escaped = false;
+    for (; p < json.size(); ++p) {
+        const char c = json[p];
+        if (in_string) {
+            if (escaped) {
+                escaped = false;
+            }
+            else if (c == '\\') {
+                escaped = true;
+            }
+            else if (c == '"') {
+                in_string = false;
+            }
+            continue;
+        }
+        if (c == '"') {
+            in_string = true;
+        }
+        else if (c == '{') {
+            ++depth;
+        }
+        else if (c == '}') {
+            if (depth == 0u) {
+                return false;
+            }
+            --depth;
+            if (depth == 0u) {
+                out.assign(json, begin, p - begin + 1u);
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+static bool wallet_json_has_exact_string_token(
+    const std::string& json,
+    const char* token)
+{
+    return json.find(std::string("\"") + token + "\"") !=
+        std::string::npos;
+}
+
 static bool wallet_has_ext(const std::string& path, const std::vector<std::string>& exts) {
     const std::string l = wallet_lower_copy(path);
     const size_t slash = l.find_last_of('/');
@@ -26708,6 +26863,246 @@ static bool wallet_parse_browservault_file(const std::string& path,
     return false;
 }
 
+static uint32_t wallet_substrate_load_le32(const uint8_t* bytes)
+{
+    return static_cast<uint32_t>(bytes[0]) |
+        (static_cast<uint32_t>(bytes[1]) << 8u) |
+        (static_cast<uint32_t>(bytes[2]) << 16u) |
+        (static_cast<uint32_t>(bytes[3]) << 24u);
+}
+
+static bool wallet_substrate_decode_identity(
+    const std::string& address,
+    const uint32_t key_kind,
+    std::vector<uint8_t>& public_key,
+    std::string& err)
+{
+    public_key.clear();
+    if (address.size() >= 2u && address[0] == '0' &&
+        (address[1] == 'x' || address[1] == 'X')) {
+        if (!wallet_hex_to_bytes(address, public_key, err)) {
+            err = "invalid hex identity: " + err;
+            return false;
+        }
+    }
+    else {
+        std::vector<uint8_t> decoded;
+        if (!wallet_base58_to_bytes(address, decoded, err)) {
+            err = "invalid SS58 identity: " + err;
+            return false;
+        }
+        if (decoded.size() != 35u && decoded.size() != 36u) {
+            err = "unsupported SS58 identity length";
+            return false;
+        }
+        const size_t prefix_len = decoded.size() - 34u;
+        const size_t body_len = prefix_len + 32u;
+        std::vector<uint8_t> framed;
+        static constexpr char kSs58Prefix[] = "SS58PRE";
+        framed.reserve(sizeof(kSs58Prefix) - 1u + body_len);
+        framed.insert(
+            framed.end(),
+            kSs58Prefix,
+            kSs58Prefix + sizeof(kSs58Prefix) - 1u);
+        framed.insert(
+            framed.end(), decoded.begin(), decoded.begin() + body_len);
+        uint8_t checksum[64] = {};
+        blake2b(framed.data(), framed.size(), checksum, sizeof(checksum));
+        if (decoded[body_len] != checksum[0] ||
+            decoded[body_len + 1u] != checksum[1]) {
+            err = "SS58 checksum mismatch";
+            return false;
+        }
+        public_key.assign(
+            decoded.begin() + static_cast<std::ptrdiff_t>(prefix_len),
+            decoded.begin() + static_cast<std::ptrdiff_t>(body_len));
+    }
+    const size_t expected =
+        key_kind == SUBSTRATEWALLET_KEY_ECDSA ? 33u : 32u;
+    if (public_key.size() != expected) {
+        std::ostringstream message;
+        message << "identity has " << public_key.size()
+                << " public-key bytes, expected " << expected;
+        err = message.str();
+        return false;
+    }
+    if (key_kind == SUBSTRATEWALLET_KEY_ECDSA &&
+        public_key[0] != 0x02u && public_key[0] != 0x03u) {
+        err = "ECDSA identity must be a compressed secp256k1 public key";
+        return false;
+    }
+    return true;
+}
+
+static bool wallet_parse_substratewallet_file(
+    const std::string& path,
+    std::vector<BrowserVaultHostTarget>& targets,
+    std::unordered_set<std::string>& seen,
+    std::string& err)
+{
+    std::string json;
+    if (!mac_read_text_file(path, json, err)) {
+        return false;
+    }
+    std::string encoded_text;
+    std::string address;
+    if (!wallet_json_get_string(json, "encoded", encoded_text) ||
+        !wallet_json_get_string(json, "address", address)) {
+        err = "missing Substrate JSON encoded/address field";
+        return false;
+    }
+    std::string encoding;
+    if (!wallet_json_get_object(json, "encoding", encoding) ||
+        !wallet_json_has_exact_string_token(encoding, "pkcs8") ||
+        !wallet_json_has_exact_string_token(
+            encoding, "xsalsa20-poly1305")) {
+        err = "unsupported Substrate JSON encoding";
+        return false;
+    }
+
+    uint32_t key_kind = 0u;
+    const bool has_sr25519 =
+        wallet_json_has_exact_string_token(encoding, "sr25519");
+    const bool has_ed25519 =
+        wallet_json_has_exact_string_token(encoding, "ed25519");
+    const bool has_ecdsa =
+        wallet_json_has_exact_string_token(encoding, "ecdsa");
+    if (static_cast<uint32_t>(has_sr25519) +
+            static_cast<uint32_t>(has_ed25519) +
+            static_cast<uint32_t>(has_ecdsa) != 1u) {
+        err = "Substrate JSON encoding must name exactly one supported curve";
+        return false;
+    }
+    if (has_sr25519) {
+        key_kind = SUBSTRATEWALLET_KEY_SR25519;
+    }
+    else if (has_ed25519) {
+        key_kind = SUBSTRATEWALLET_KEY_ED25519;
+    }
+    else if (has_ecdsa) {
+        key_kind = SUBSTRATEWALLET_KEY_ECDSA;
+    }
+
+    std::string version_text;
+    uint32_t version = 0u;
+    if (wallet_json_get_string(encoding, "version", version_text)) {
+        char* end = nullptr;
+        const unsigned long value =
+            std::strtoul(version_text.c_str(), &end, 10);
+        if (end == version_text.c_str() || *end != '\0' ||
+            value > static_cast<unsigned long>(UINT32_MAX)) {
+            err = "invalid Substrate JSON version";
+            return false;
+        }
+        version = static_cast<uint32_t>(value);
+    }
+    else if (!wallet_json_get_u32(encoding, "version", version)) {
+        err = "missing Substrate JSON version";
+        return false;
+    }
+    if (version != 2u && version != 3u) {
+        err = "only Substrate JSON versions 2 and 3 are supported";
+        return false;
+    }
+
+    std::vector<uint8_t> encoded;
+    std::string decode_error;
+    const bool encoded_is_hex =
+        encoded_text.size() >= 2u && encoded_text[0] == '0' &&
+        (encoded_text[1] == 'x' || encoded_text[1] == 'X');
+    const bool decoded_ok = encoded_is_hex
+        ? wallet_hex_to_bytes(encoded_text, encoded, decode_error)
+        : wallet_base64_to_bytes(encoded_text, encoded, decode_error);
+    if (!decoded_ok || encoded.empty()) {
+        err = "invalid Substrate JSON encoded payload: " + decode_error;
+        return false;
+    }
+    std::vector<uint8_t> expected_public;
+    if (!wallet_substrate_decode_identity(
+            address, key_kind, expected_public, err)) {
+        return false;
+    }
+
+    BrowserVaultHostTarget target;
+    target.file = path;
+    target.dev.key_kind = key_kind;
+    target.dev.expected_public_len =
+        static_cast<uint32_t>(expected_public.size());
+    memcpy(
+        target.dev.expected_public,
+        expected_public.data(),
+        expected_public.size());
+    target.dev.iterations = 1u;
+    target.dev.iv_len = 24u;
+
+    std::vector<uint8_t> salt;
+    if (version == 3u) {
+        if (!wallet_json_has_exact_string_token(encoding, "scrypt") ||
+            encoded.size() < 44u + 24u + 16u + 85u) {
+            err = "invalid Substrate v3 scrypt/secretbox payload length";
+            return false;
+        }
+        salt.assign(encoded.begin(), encoded.begin() + 32);
+        target.dev.profile =
+            BROWSERVAULT_PROFILE_SUBSTRATE_SCRYPT_PKCS8;
+        target.dev.scrypt_n =
+            wallet_substrate_load_le32(encoded.data() + 32u);
+        target.dev.scrypt_p =
+            wallet_substrate_load_le32(encoded.data() + 36u);
+        target.dev.scrypt_r =
+            wallet_substrate_load_le32(encoded.data() + 40u);
+        if (target.dev.scrypt_n < 2u ||
+            (target.dev.scrypt_n & (target.dev.scrypt_n - 1u)) != 0u ||
+            target.dev.scrypt_n > (1u << 20u) ||
+            target.dev.scrypt_r == 0u || target.dev.scrypt_r > 32u ||
+            target.dev.scrypt_p == 0u || target.dev.scrypt_p > 32u) {
+            err = "unsupported Substrate v3 scrypt parameters";
+            return false;
+        }
+        target.dev.salt_len = 32u;
+        memcpy(target.dev.salt, salt.data(), salt.size());
+        memcpy(target.dev.iv, encoded.data() + 44u, 24u);
+        memcpy(target.dev.tag, encoded.data() + 68u, 16u);
+        target.ciphertext.assign(encoded.begin() + 84, encoded.end());
+    }
+    else {
+        if (wallet_json_has_exact_string_token(encoding, "scrypt") ||
+            encoded.size() < 24u + 16u + 85u) {
+            err = "invalid Substrate v2 legacy secretbox payload";
+            return false;
+        }
+        target.dev.profile =
+            BROWSERVAULT_PROFILE_SUBSTRATE_LEGACY_PKCS8;
+        target.dev.salt_len = 0u;
+        memcpy(target.dev.iv, encoded.data(), 24u);
+        memcpy(target.dev.tag, encoded.data() + 24u, 16u);
+        target.ciphertext.assign(encoded.begin() + 40, encoded.end());
+    }
+    if (target.ciphertext.size() < 85u ||
+        target.ciphertext.size() > 117u) {
+        err = "unsupported Substrate PKCS8 plaintext length";
+        return false;
+    }
+    target.dev.ciphertext_len =
+        static_cast<uint32_t>(target.ciphertext.size());
+    wallet_browser_vault_hash(
+        encoded,
+        std::vector<uint8_t>(
+            target.dev.iv, target.dev.iv + target.dev.iv_len),
+        salt,
+        version,
+        target.dev.profile,
+        target.dev.vault_hash);
+    const std::string key(
+        reinterpret_cast<const char*>(target.dev.vault_hash), 32u);
+    if (!seen.insert(key).second) {
+        err = "duplicate Substrate wallet";
+        return false;
+    }
+    targets.push_back(std::move(target));
+    return true;
+}
+
 static bool wallet_parse_stellar_hash_token(
     const std::string& token_raw,
     const std::string& source,
@@ -28602,6 +28997,30 @@ static BrowserVaultLoadFileResult wallet_load_one_browservault_file(const std::s
     result.skipped = !result.loaded;
     if (result.skipped && result.err.empty()) {
         result.err = "no usable browser vault targets";
+    }
+    return result;
+}
+
+static BrowserVaultLoadFileResult wallet_load_one_substratewallet_file(
+    const std::string& path)
+{
+    BrowserVaultLoadFileResult result;
+    result.path = path;
+    if (!mac_is_regular_file(path)) {
+        result.skipped = true;
+        result.err = "not a regular file";
+        return result;
+    }
+    std::unordered_set<std::string> local_seen;
+    if (!wallet_parse_substratewallet_file(
+            path, result.targets, local_seen, result.err)) {
+        result.skipped = true;
+        return result;
+    }
+    result.loaded = !result.targets.empty();
+    result.skipped = !result.loaded;
+    if (result.skipped && result.err.empty()) {
+        result.err = "no usable Substrate wallet target";
     }
     return result;
 }
@@ -31547,6 +31966,7 @@ static void wallet_release_browservault_device_state(BrowserVaultDeviceState& st
     if (state.solved_flags) metalFree(state.solved_flags);
     if (state.mask_spec) metalFree(state.mask_spec);
     if (state.range_spec) metalFree(state.range_spec);
+    if (state.scrypt_scratch) metalFree(state.scrypt_scratch);
     if (state.pass_data) metalFree(state.pass_data);
     if (state.pass_lens) metalFree(state.pass_lens);
     state = BrowserVaultDeviceState{};
@@ -31733,6 +32153,7 @@ static void wallet_build_browservault_groups(
         }
         groups.push_back(group);
         if (group.profile == BROWSERVAULT_PROFILE_PHANTOM_SECRETBOX_SCRYPT ||
+            group.profile == BROWSERVAULT_PROFILE_SUBSTRATE_SCRYPT_PKCS8 ||
             group.profile == BROWSERVAULT_PROFILE_MULTIBIT_HD_SCRYPT_AES ||
             group.profile == BROWSERVAULT_PROFILE_MULTIBIT_CLASSIC_SCRYPT_AES ||
             group.profile == BROWSERVAULT_PROFILE_BISQ_SCRYPT_AES ||
@@ -31859,13 +32280,13 @@ static metalError_t wallet_flush_browservault_results(
     return metalMemset(p_wallet_count, 0, sizeof(unsigned long long));
 }
 
-static void wallet_update_bip38_progress(
+static void wallet_update_browser_mode_progress(
     const std::vector<uint8_t>& solved_files,
     const uint64_t completed_kdfs,
     const uint64_t completed_verifications,
     const uint64_t readback_ns)
 {
-    if (!BIP38_MODE) {
+    if (!BIP38_MODE && !SUBSTRATEWALLET_MODE) {
         return;
     }
     uint64_t solved = 0ull;
@@ -32108,9 +32529,9 @@ static metalError_t wallet_launch_browservault_generated(
                     }
                 } while (overflowed && !all_solved);
                 counterTotal += sub_count * static_cast<uint64_t>(group_target_count);
-                wallet_update_bip38_progress(
+                wallet_update_browser_mode_progress(
                     solved_files,
-                    sub_count * static_cast<uint64_t>(group_target_count),
+                    sub_count * static_cast<uint64_t>(group_sub_count),
                     sub_count * static_cast<uint64_t>(group_target_count),
                     readback_ns);
             }
@@ -32218,9 +32639,9 @@ static metalError_t wallet_launch_browservault_dict_batch(
                     }
                 } while (overflowed && !all_solved);
                 counterTotal += sub_count * static_cast<uint64_t>(group_target_count);
-                wallet_update_bip38_progress(
+                wallet_update_browser_mode_progress(
                     solved_files,
-                    sub_count * static_cast<uint64_t>(group_target_count),
+                    sub_count * static_cast<uint64_t>(group_sub_count),
                     sub_count * static_cast<uint64_t>(group_target_count),
                     readback_ns);
             }
@@ -49602,6 +50023,7 @@ Done:
 
 metalError_t processMetalBrowserVault()
 {
+    const bool substrate_mode = SUBSTRATEWALLET_MODE;
     const bool stellar_mode = STELLARWALLET_MODE;
     const bool blockchain_mode = BLOCKCHAINWALLET_MODE;
     const bool multibit_mode = MULTIBITWALLET_MODE;
@@ -49610,15 +50032,17 @@ metalError_t processMetalBrowserVault()
     const bool ethpresale_mode = ETHPRESALE_MODE;
     const bool bisq_mode = BISQWALLET_MODE;
     const bool android_mode = ANDROIDWALLET_MODE;
-    const char* mode_name = bip38_mode ? "BIP38" : (ethpresale_mode ? "ETHPRESALE" : (bisq_mode ? "BISQWALLET" : (dogechain_mode ? "DOGECHAINWALLET" : (android_mode ? "ANDROIDWALLET" : (multibit_mode ? "MULTIBITWALLET" : (blockchain_mode ? "BLOCKCHAINWALLET" : (stellar_mode ? "STELLARWALLET" : "BROWSERVAULT")))))));
-    const char* mode_lc = bip38_mode ? "bip38" : (ethpresale_mode ? "ethpresale" : (bisq_mode ? "bisqwallet" : (dogechain_mode ? "dogechainwallet" : (android_mode ? "androidwallet" : (multibit_mode ? "multibitwallet" : (blockchain_mode ? "blockchainwallet" : (stellar_mode ? "stellarwallet" : "browservault")))))));
+    const char* mode_name = substrate_mode ? "SUBSTRATEWALLET" : (bip38_mode ? "BIP38" : (ethpresale_mode ? "ETHPRESALE" : (bisq_mode ? "BISQWALLET" : (dogechain_mode ? "DOGECHAINWALLET" : (android_mode ? "ANDROIDWALLET" : (multibit_mode ? "MULTIBITWALLET" : (blockchain_mode ? "BLOCKCHAINWALLET" : (stellar_mode ? "STELLARWALLET" : "BROWSERVAULT"))))))));
+    const char* mode_lc = substrate_mode ? "substratewallet" : (bip38_mode ? "bip38" : (ethpresale_mode ? "ethpresale" : (bisq_mode ? "bisqwallet" : (dogechain_mode ? "dogechainwallet" : (android_mode ? "androidwallet" : (multibit_mode ? "multibitwallet" : (blockchain_mode ? "blockchainwallet" : (stellar_mode ? "stellarwallet" : "browservault"))))))));
     const std::vector<std::string> scan_exts = (blockchain_mode || dogechain_mode || ethpresale_mode || bip38_mode || bisq_mode || android_mode)
         ? std::vector<std::string>{ ".txt", ".hash", ".json", ".wallet", "" }
         : (multibit_mode
             ? std::vector<std::string>{ ".txt", ".hash", ".key", ".wallet", "" }
+        : (substrate_mode
+            ? std::vector<std::string>{ ".json", "" }
         : (stellar_mode
             ? std::vector<std::string>{ ".txt", ".hash", ".stellar", "" }
-            : std::vector<std::string>{ ".ldb", ".log", ".json", ".txt", "" }));
+            : std::vector<std::string>{ ".ldb", ".log", ".json", ".txt", "" })));
 
     std::vector<std::string> files = wallet_artifact_files;
     for (const auto& dir : wallet_artifact_dirs) {
@@ -49635,7 +50059,11 @@ metalError_t processMetalBrowserVault()
     size_t skipped_files = 0u;
     size_t warnings = 0u;
     std::vector<BrowserVaultLoadFileResult> load_results;
-    if (blockchain_mode) {
+    if (substrate_mode) {
+        wallet_parallel_load_files(files, mode_lc, load_results,
+                                   wallet_load_one_substratewallet_file);
+    }
+    else if (blockchain_mode) {
         wallet_parallel_load_files(files, mode_lc, load_results, wallet_load_one_blockchainwallet_file);
     }
     else if (multibit_mode) {
@@ -49723,6 +50151,8 @@ metalError_t processMetalBrowserVault()
     size_t metamask_targets = 0u;
     size_t phantom_pbkdf2_targets = 0u;
     size_t phantom_scrypt_targets = 0u;
+    size_t substrate_scrypt_targets = 0u;
+    size_t substrate_legacy_targets = 0u;
     size_t atomic_cryptojs_targets = 0u;
     size_t stellar_targets = 0u;
     size_t blockchain_targets = 0u;
@@ -49754,6 +50184,23 @@ metalError_t processMetalBrowserVault()
                 block_size * static_cast<uint64_t>(t.dev.scrypt_n) +
                 block_size * static_cast<uint64_t>(t.dev.scrypt_p) + 4ull + block_size);
             max_scrypt_scratch_stride = std::max<uint64_t>(max_scrypt_scratch_stride, stride);
+        }
+        else if (t.dev.profile ==
+                 BROWSERVAULT_PROFILE_SUBSTRATE_SCRYPT_PKCS8) {
+            ++substrate_scrypt_targets;
+            browservault_has_scrypt = true;
+            const uint64_t block_size =
+                128ull * static_cast<uint64_t>(t.dev.scrypt_r);
+            const uint64_t stride = wallet_scrypt_align_stride(
+                block_size * static_cast<uint64_t>(t.dev.scrypt_n) +
+                block_size * static_cast<uint64_t>(t.dev.scrypt_p) +
+                4ull + block_size);
+            max_scrypt_scratch_stride =
+                std::max<uint64_t>(max_scrypt_scratch_stride, stride);
+        }
+        else if (t.dev.profile ==
+                 BROWSERVAULT_PROFILE_SUBSTRATE_LEGACY_PKCS8) {
+            ++substrate_legacy_targets;
         }
         else if (t.dev.profile == BROWSERVAULT_PROFILE_ATOMIC_CRYPTOJS_AES) {
             ++atomic_cryptojs_targets;
@@ -49819,6 +50266,7 @@ metalError_t processMetalBrowserVault()
     scratch_by_group.reserve(groups.size());
     for (const BrowserVaultGroup& group : groups) {
         if (group.profile == BROWSERVAULT_PROFILE_PHANTOM_SECRETBOX_SCRYPT ||
+            group.profile == BROWSERVAULT_PROFILE_SUBSTRATE_SCRYPT_PKCS8 ||
             group.profile == BROWSERVAULT_PROFILE_MULTIBIT_HD_SCRYPT_AES ||
             group.profile == BROWSERVAULT_PROFILE_MULTIBIT_CLASSIC_SCRYPT_AES ||
             group.profile == BROWSERVAULT_PROFILE_BISQ_SCRYPT_AES ||
@@ -49851,8 +50299,8 @@ metalError_t processMetalBrowserVault()
     printf("[!] starting %s mode [!]\n", mode_name);
     printf("[!] loaded %s targets: %zu [!]\n", mode_lc, targets.size());
     counterWalletActiveTargets = static_cast<uint64_t>(targets.size());
-    printf("[!] %s profiles: metamask=%zu phantom_pbkdf2=%zu phantom_scrypt=%zu atomic_cryptojs=%zu stellar=%zu blockchain=%zu multibit_md5=%zu multibit_hd=%zu multibit_scrypt=%zu bisq=%zu bip38_non_ec=%zu bip38_ec=%zu dogechain=%zu android_backup=%zu ethpresale=%zu [!]\n",
-        mode_lc, metamask_targets, phantom_pbkdf2_targets, phantom_scrypt_targets, atomic_cryptojs_targets, stellar_targets, blockchain_targets,
+    printf("[!] %s profiles: metamask=%zu phantom_pbkdf2=%zu phantom_scrypt=%zu substrate_v3=%zu substrate_v2=%zu atomic_cryptojs=%zu stellar=%zu blockchain=%zu multibit_md5=%zu multibit_hd=%zu multibit_scrypt=%zu bisq=%zu bip38_non_ec=%zu bip38_ec=%zu dogechain=%zu android_backup=%zu ethpresale=%zu [!]\n",
+        mode_lc, metamask_targets, phantom_pbkdf2_targets, phantom_scrypt_targets, substrate_scrypt_targets, substrate_legacy_targets, atomic_cryptojs_targets, stellar_targets, blockchain_targets,
         multibit_classic_md5_targets, multibit_hd_scrypt_targets, multibit_classic_scrypt_targets, bisq_targets, bip38_non_ec_targets, bip38_ec_targets, dogechain_targets, android_backup_targets, ethpresale_targets);
     printf("[!] %s KDF groups: %zu [saved %.2fx KDF work, singletons=%zu, max_group=%u] [!]\n",
         mode_lc,
@@ -49875,7 +50323,8 @@ metalError_t processMetalBrowserVault()
     }
 
     uint64_t wallet_scratch_hard_cap = std::numeric_limits<uint64_t>::max();
-    if (browservault_has_scrypt && (bip38_mode || wallet_memory_explicit)) {
+    if (browservault_has_scrypt &&
+        (bip38_mode || substrate_mode || wallet_memory_explicit)) {
         std::vector<modeinfra::MemoryDeviceInfo> memory_devices;
         memory_devices.reserve(g_gpu_contexts.size());
         for (const GpuRuntimeContext& context : g_gpu_contexts) {
@@ -49941,16 +50390,16 @@ metalError_t processMetalBrowserVault()
     bool all_solved = false;
     std::vector<BrowserVaultDeviceState> states(g_gpu_contexts.size());
     metalError_t st = metalSuccess;
-    bool bip38_progress_active = false;
-    uint64_t bip38_working_set_bytes = 0ull;
-    if (bip38_mode) {
+    bool wallet_progress_active = false;
+    uint64_t wallet_working_set_bytes = 0ull;
+    if (bip38_mode || substrate_mode) {
         modeinfra::ModeProgress& progress = modeinfra::global_mode_progress();
-        progress.begin("BIP38", modeinfra::ProgressUnit::Kdf,
+        progress.begin(mode_name, modeinfra::ProgressUnit::Kdf,
                        modeinfra::ProgressPhase::Build);
         progress.set_targets(static_cast<uint64_t>(target_files.size()),
                              static_cast<uint64_t>(target_files.size()),
                              0ull);
-        bip38_progress_active = true;
+        wallet_progress_active = true;
     }
     for (size_t gi = 0; gi < g_gpu_contexts.size(); ++gi) {
         if (!activate_gpu_context(g_gpu_contexts[gi])) { st = metalErrorInvalidDevice; goto Done; }
@@ -50004,6 +50453,12 @@ metalError_t processMetalBrowserVault()
                 scratch_bytes = std::min<uint64_t>(
                     hard_cap,
                     std::max<uint64_t>(max_scrypt_scratch_stride, preferred));
+            }
+            if (substrate_mode &&
+                !wallet_scrypt_scratch_budget_explicit &&
+                wallet_memory_explicit &&
+                wallet_memory_spec.kind != modeinfra::MemoryKind::Auto) {
+                scratch_bytes = hard_cap;
             }
             const bool bisq_auto_large_stride_cap =
                 bisq_mode && !wallet_scrypt_scratch_budget_explicit &&
@@ -50065,27 +50520,27 @@ metalError_t processMetalBrowserVault()
                 static_cast<double>(scratch_bytes) / 1048576.0,
                 static_cast<unsigned long long>(concurrency));
         }
-        if (bip38_mode) {
+        if (bip38_mode || substrate_mode) {
             const uint64_t fixed_bytes =
                 static_cast<uint64_t>(targets.size()) * sizeof(BrowserVaultDeviceTarget) +
                 static_cast<uint64_t>(groups.size()) * sizeof(BrowserVaultGroup) +
                 std::max<uint64_t>(1ull, static_cast<uint64_t>(ciphertext_pool.size())) +
                 std::max<uint64_t>(1ull, static_cast<uint64_t>(target_files.size()));
             const uint64_t device_bytes = fixed_bytes + states[gi].scrypt_scratch_bytes;
-            if (bip38_working_set_bytes >
+            if (wallet_working_set_bytes >
                 std::numeric_limits<uint64_t>::max() - device_bytes) {
-                bip38_working_set_bytes = std::numeric_limits<uint64_t>::max();
+                wallet_working_set_bytes = std::numeric_limits<uint64_t>::max();
             }
             else {
-                bip38_working_set_bytes += device_bytes;
+                wallet_working_set_bytes += device_bytes;
             }
         }
     }
 
     {
-        if (bip38_mode) {
+        if (bip38_mode || substrate_mode) {
             modeinfra::ModeProgress& progress = modeinfra::global_mode_progress();
-            progress.set_allocated_working_set(bip38_working_set_bytes);
+            progress.set_allocated_working_set(wallet_working_set_bytes);
             progress.set_phase(modeinfra::ProgressPhase::Search);
         }
         const uint64_t wallet_generated_launch_chunk = use_n_count && n_number > 0 ? n_number : static_cast<uint64_t>(BLOCK_NUMBER) * BLOCK_THREADS;
@@ -50194,8 +50649,9 @@ metalError_t processMetalBrowserVault()
     }
 
 Done:
-    if (bip38_progress_active) {
-        wallet_update_bip38_progress(solved_files, 0ull, 0ull, 0ull);
+    if (wallet_progress_active) {
+        wallet_update_browser_mode_progress(
+            solved_files, 0ull, 0ull, 0ull);
         modeinfra::global_mode_progress().end();
     }
     for (size_t gi = 0; gi < g_gpu_contexts.size(); ++gi) {

@@ -41,6 +41,12 @@ using namespace metal;
 #define BROWSERVAULT_PROFILE_BIP38_NON_EC 28u
 #define BROWSERVAULT_PROFILE_ANDROID_BACKUP_PBKDF2_SHA1_AES_CBC 29u
 #define BROWSERVAULT_PROFILE_BIP38_EC 30u
+#define BROWSERVAULT_PROFILE_SUBSTRATE_SCRYPT_PKCS8 31u
+#define BROWSERVAULT_PROFILE_SUBSTRATE_LEGACY_PKCS8 32u
+
+#define SUBSTRATEWALLET_KEY_SR25519 1u
+#define SUBSTRATEWALLET_KEY_ED25519 2u
+#define SUBSTRATEWALLET_KEY_ECDSA 3u
 
 static inline bool wallet_mul_overflows_u64_by_u32(ulong x, uint y) {
     const ulong yy = ulong(y);
@@ -105,6 +111,10 @@ struct BrowserVaultDeviceTarget {
     uchar iv[32];
     uchar tag[16];
     uchar vault_hash[32];
+    uint key_kind;
+    uint expected_public_len;
+    uchar expected_public[33];
+    uchar reserved_substrate[7];
 };
 
 struct BrowserVaultGroup {

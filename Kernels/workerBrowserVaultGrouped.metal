@@ -1,3 +1,4 @@
+#define METAL_CRYPTO_BROWSER_VAULT_SUBSTRATE 1
 #include "WorkerKeystoreCommon.metalh"
 
 #ifndef ENABLE_BIP38_BROWSER_GPU
@@ -546,7 +547,11 @@ kernel void workerBrowserVaultGrouped(device bool* isResult [[buffer(0)]],
             continue;
         }
         if (group.target_count == 0u || group.salt_len > WALLET_MAX_SALT_LEN ||
-            (group.salt_len == 0u && group_profile != BROWSERVAULT_PROFILE_ETHPRESALE_PBKDF2_AES_CBC)) {
+            (group.salt_len == 0u &&
+             group_profile !=
+                 BROWSERVAULT_PROFILE_ETHPRESALE_PBKDF2_AES_CBC &&
+             group_profile !=
+                 BROWSERVAULT_PROFILE_SUBSTRATE_LEGACY_PKCS8)) {
             continue;
         }
 
@@ -562,6 +567,7 @@ kernel void workerBrowserVaultGrouped(device bool* isResult [[buffer(0)]],
         thread uchar atomic_iv16[16];
         bool atomic_key_ready = false;
         if (group_profile == BROWSERVAULT_PROFILE_PHANTOM_SECRETBOX_SCRYPT ||
+            group_profile == BROWSERVAULT_PROFILE_SUBSTRATE_SCRYPT_PKCS8 ||
             group_profile == BROWSERVAULT_PROFILE_MULTIBIT_HD_SCRYPT_AES ||
             group_profile == BROWSERVAULT_PROFILE_MULTIBIT_CLASSIC_SCRYPT_AES ||
             group_profile == BROWSERVAULT_PROFILE_BISQ_SCRYPT_AES) {
@@ -582,6 +588,11 @@ kernel void workerBrowserVaultGrouped(device bool* isResult [[buffer(0)]],
                     group.scrypt_p, scrypt_scratch, scrypt_scratch_stride,
                     ulong(tid), key32)) {
                 continue;
+            }
+        } else if (group_profile ==
+                   BROWSERVAULT_PROFILE_SUBSTRATE_LEGACY_PKCS8) {
+            for (uint i = 0u; i < 32u; ++i) {
+                key32[i] = i < pass_len ? pass_local[i] : 0u;
             }
         } else if (group_profile == BROWSERVAULT_PROFILE_ATOMIC_CRYPTOJS_AES) {
             if (group.salt_len != 8u) {
@@ -718,6 +729,13 @@ kernel void workerBrowserVaultGrouped(device bool* isResult [[buffer(0)]],
             } else if (target_profile == BROWSERVAULT_PROFILE_BISQ_SCRYPT_AES) {
                 ok = wallet_aes256_cbc_check_multibit_classic_scrypt(key32, target.iv,
                                                                      ciphertext, target.ciphertext_len);
+            } else if (
+                target_profile ==
+                    BROWSERVAULT_PROFILE_SUBSTRATE_SCRYPT_PKCS8 ||
+                target_profile ==
+                    BROWSERVAULT_PROFILE_SUBSTRATE_LEGACY_PKCS8) {
+                ok = wallet_substrate_secretbox_pkcs8_verify(
+                    precPtr, precPitch, key32, target, ciphertext);
             } else {
                 ok = wallet_xsalsa20poly1305_secretbox_verify(key32, target.iv, target.tag,
                                                               ciphertext, target.ciphertext_len);

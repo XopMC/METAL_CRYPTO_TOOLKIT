@@ -187,6 +187,22 @@ Wave 10 extends the ordinary fast `-brain` path:
 - expanded candidates retain the established exact target filters, found
   format, multi-device dispatch, and the single common `SpeedThreadFunc`.
 
+Wave 11 adds authenticated Substrate keyring recovery:
+
+- `-substratewallet` loads version 2/3 Polkadot/Substrate keyring JSON and
+  validates its PKCS8, curve, SS58/hex identity, encoded layout, and scrypt
+  parameters before launching Metal;
+- version 3 uses grouped scrypt followed by XSalsa20-Poly1305; version 2 uses
+  the exact legacy 32-byte password-key rule;
+- authenticated plaintext is accepted only after PKCS8 header/divider checks,
+  an exact stored-public-key match, and independent secret-to-public
+  regeneration for sr25519, ed25519, or secp256k1 ECDSA;
+- targets sharing curve-independent KDF parameters reuse one scrypt result,
+  ciphertexts are kept in a compact pool, and `-wallet-mem`/`-wallet-scrypt-mem`
+  bound the actual unified-memory working set;
+- only the common `SpeedThreadFunc` prints live `KDF/s` and `Verify/s`.
+  `KDF/s` counts completed password/KDF-group jobs, never target count.
+
 #### v15
 
 The July 25 update extends both interval-DLP modes for very large target
@@ -2476,7 +2492,7 @@ Artifact controls:
 | `-f DIR` | recursively find extensions accepted by that wallet mode |
 | `-wallet-load-only` | parse, validate, group, and report targets, then exit before checking passwords |
 | `-wallet-dry-run` | alias for `-wallet-load-only` |
-| `-wallet-mem auto\|all\|NN%\|SIZE` | unified wallet working-set budget for v16 modes that explicitly advertise it; Wave 1 enables it for BIP38 |
+| `-wallet-mem auto\|all\|NN%\|SIZE` | unified wallet working-set budget for v16 modes that explicitly advertise it; enabled for BIP38, Substrate wallets, and mnemonic scramble |
 | `-wallet-scrypt-mem MiB` | scratch-memory cap for modes that actually use scrypt/KdfRomix |
 
 `-wallet-mem auto` uses at most half of the currently free recommended Metal working set. `all` uses the remaining recommended set minus a 512 MiB runtime reserve; percentages are relative to the current free set. On Apple Silicon, host-visible tables and every Metal-device replica consume the same unified-memory pool. The automatic scrypt scratch target starts at 16384 MiB; BIP38 uses a measured 32768 MiB target when no explicit scrypt cap is supplied. When the total input size of the regular GPU filters reaches 8 GiB, the target falls back to 4096 MiB. The final allocation is also bounded by `-wallet-mem`, available unified memory, and the scratch size of one job. An explicit `-wallet-scrypt-mem` is a strict cap and fails if one job cannot fit.
@@ -2557,6 +2573,52 @@ Result:
 ```
 
 `VAULT:<sha256>` is an artifact fingerprint, not decrypted vault content.
+
+#### `-substratewallet`
+
+This mode recovers passwords for versioned Polkadot/Substrate keyring JSON
+exports. Pass one or more files directly after the mode, or use `-f DIR` to
+scan `.json` and extensionless files. The loader accepts only authenticated
+PKCS8 records using:
+
+- version 3: embedded scrypt parameters plus XSalsa20-Poly1305;
+- version 2: legacy password bytes truncated or right-zero-padded to 32 bytes,
+  plus XSalsa20-Poly1305.
+
+The `encoding.content` field must explicitly name `pkcs8` and exactly one of
+`sr25519`, `ed25519`, or `ecdsa`. The identity may be a checksummed SS58
+AccountId32 or a `0x` public key; ECDSA uses a compressed 33-byte secp256k1
+key. Unknown versions, invalid checksums, malformed scrypt parameters, and
+unsupported encodings are rejected before GPU work.
+
+Metal performs the complete verification. A password is reported only when
+the Poly1305 tag, PKCS8 header/divider, embedded public key, exported identity,
+and public key regenerated from the decrypted secret all agree. Targets with
+identical scrypt parameters and salt share one KDF result. The common
+`SpeedThreadFunc` reports completed `KDF/s` and actual `Verify/s`; target count
+does not multiply `KDF/s`.
+
+```bash
+./METAL_CRYPTO_TOOLKIT -substratewallet account.json \
+  -i passwords.txt -wallet-mem auto -save
+
+./METAL_CRYPTO_TOOLKIT -substratewallet -f keyring_exports \
+  -mask "?a?a?a?a?a?a?a?a" -wallet-mem all -device 0 \
+  -save -o substrate_found.txt
+
+./METAL_CRYPTO_TOOLKIT -substratewallet account.json \
+  -i exact-password-bytes.hex -hex -wallet-scrypt-mem 4096 -save
+```
+
+Result:
+
+```text
+SUBSTRATEWALLET:<source>:PASSWORD:<password>:VAULT:<sha256>:PROFILE:<substrate-v3-scrypt-pkcs8|substrate-v2-legacy-pkcs8>
+```
+
+`VAULT` is a stable encrypted-artifact fingerprint, not decrypted secret
+material. Hardware/remote signers, watch-only records, unencrypted exports,
+and keyring JSON versions other than 2/3 are not password-recovery targets.
 
 #### `-electrumwallet`
 
@@ -3270,6 +3332,22 @@ tune выбрал 256 потоков на Metal threadgroup: на нагрузк
   явно учитываются вместо тихого усечения;
 - расширенные кандидаты сохраняют точные фильтры целей, формат результатов,
   multi-device dispatch и единственный общий `SpeedThreadFunc`.
+
+Волна 11 добавляет аутентифицированное восстановление Substrate keyring:
+
+- `-substratewallet` загружает JSON Polkadot/Substrate версий 2/3 и до запуска
+  Metal проверяет PKCS8, curve, SS58/hex identity, структуру encoded и параметры
+  scrypt;
+- версия 3 использует сгруппированный scrypt и XSalsa20-Poly1305, версия 2 —
+  точное legacy-правило 32-байтового ключа из пароля;
+- plaintext принимается только после проверки Poly1305, заголовка/разделителя
+  PKCS8, встроенного public key и независимого восстановления public key из
+  секрета для sr25519, ed25519 или secp256k1 ECDSA;
+- цели с одинаковыми KDF-параметрами делят один scrypt, ciphertext хранится
+  компактным пулом, а `-wallet-mem`/`-wallet-scrypt-mem` ограничивают реальный
+  working set unified memory;
+- live `KDF/s` и `Verify/s` печатает только общий `SpeedThreadFunc`; количество
+  целей не умножает `KDF/s`.
 
 #### v15
 
@@ -5577,7 +5655,7 @@ WALLETJS:<profile>:SOURCE:<source>:PRIV:<64_hex>:<TYPE>:<value>
 | `-f DIR` | рекурсивно ищет расширения, подходящие выбранному формату |
 | `-wallet-load-only` | разбирает, проверяет и группирует цели, затем завершает работу до перебора |
 | `-wallet-dry-run` | другое имя `-wallet-load-only` |
-| `-wallet-mem auto\|all\|NN%\|SIZE` | бюджет unified memory для v16-режимов, где он указан явно; в Волне 1 включён для BIP38 |
+| `-wallet-mem auto\|all\|NN%\|SIZE` | бюджет unified memory для v16-режимов, где он указан явно; включён для BIP38, Substrate wallet и mnemonic scramble |
 | `-wallet-scrypt-mem MiB` | ограничивает промежуточную память только в режимах, где реально используется scrypt/KdfRomix |
 
 `-wallet-mem auto` использует не более половины текущего свободного recommended Metal working set. `all` использует остаток за вычетом 512 МиБ для runtime; процент считается от текущей свободной памяти. На Apple Silicon host-visible таблицы и реплики на Metal-устройствах расходуют один пул unified memory. Автоматический предел памяти для scrypt сначала ориентируется на 16384 МиБ; BIP38 без явного scrypt-cap использует измеренный ориентир 32768 МиБ. Когда суммарный размер входных данных обычных GPU-фильтров достигает 8 ГиБ, ориентир снижается до 4096 МиБ. Итоговый буфер дополнительно ограничивается `-wallet-mem`, свободной объединенной памятью и размером одного задания. Явный `-wallet-scrypt-mem` является строгим пределом и завершает запуск ошибкой, если не помещается одно задание.
@@ -5662,6 +5740,52 @@ $bitcoin$<mkey_len>$<mkey_hex>$<salt_len>$<salt_hex>$<iterations>$<ckey_len>$<ck
 ```
 
 `VAULT:<sha256>` — отпечаток цели, а не расшифрованное содержимое хранилища.
+
+#### `-substratewallet`
+
+Режим восстанавливает пароли для экспортированных JSON-файлов keyring
+Polkadot/Substrate. Один или несколько файлов можно указать сразу после режима;
+`-f DIR` рекурсивно ищет `.json` и файлы без расширения. Принимаются только
+аутентифицированные записи PKCS8:
+
+- версия 3: встроенные параметры scrypt и XSalsa20-Poly1305;
+- версия 2: legacy-ключ из байтов пароля, обрезанный или дополненный нулями
+  справа до 32 байт, и XSalsa20-Poly1305.
+
+`encoding.content` должен явно содержать `pkcs8` и ровно одну curve:
+`sr25519`, `ed25519` или `ecdsa`. Identity задаётся checksummed SS58
+AccountId32 либо public key с `0x`; ECDSA использует compressed 33-byte
+secp256k1 key. Неизвестные версии, неверные checksum, некорректные параметры
+scrypt и неподдерживаемые encoding отклоняются до GPU.
+
+Metal выполняет полную проверку. Пароль выводится, только если одновременно
+совпали Poly1305 tag, header/divider PKCS8, встроенный public key, экспортированная
+identity и public key, независимо восстановленный из расшифрованного секрета.
+Цели с одинаковыми salt/KDF-параметрами используют один результат scrypt.
+Общий `SpeedThreadFunc` показывает завершённые `KDF/s` и фактические
+`Verify/s`; число целей не умножает `KDF/s`.
+
+```bash
+./METAL_CRYPTO_TOOLKIT -substratewallet account.json \
+  -i passwords.txt -wallet-mem auto -save
+
+./METAL_CRYPTO_TOOLKIT -substratewallet -f keyring_exports \
+  -mask "?a?a?a?a?a?a?a?a" -wallet-mem all -device 0 \
+  -save -o substrate_found.txt
+
+./METAL_CRYPTO_TOOLKIT -substratewallet account.json \
+  -i exact-password-bytes.hex -hex -wallet-scrypt-mem 4096 -save
+```
+
+Результат:
+
+```text
+SUBSTRATEWALLET:<source>:PASSWORD:<password>:VAULT:<sha256>:PROFILE:<substrate-v3-scrypt-pkcs8|substrate-v2-legacy-pkcs8>
+```
+
+`VAULT` — стабильный отпечаток зашифрованного artifact, а не расшифрованный
+секрет. Hardware/remote signer, watch-only records, незашифрованные экспорты и
+версии keyring JSON, отличные от 2/3, не являются целями подбора пароля.
 
 #### `-electrumwallet`
 

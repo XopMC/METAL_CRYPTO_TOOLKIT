@@ -3816,6 +3816,8 @@ static inline const char* wallet_browser_profile_name(uint8_t profile) {
 	case BROWSERVAULT_PROFILE_BIP38_NON_EC: return "bip38-non-ec-scrypt-aes";
 	case BROWSERVAULT_PROFILE_BIP38_EC: return "bip38-ec-multiply-scrypt-aes";
 	case BROWSERVAULT_PROFILE_ANDROID_BACKUP_PBKDF2_SHA1_AES_CBC: return "android-backup-pbkdf2-sha1-aes-cbc";
+	case BROWSERVAULT_PROFILE_SUBSTRATE_SCRYPT_PKCS8: return "substrate-v3-scrypt-pkcs8";
+	case BROWSERVAULT_PROFILE_SUBSTRATE_LEGACY_PKCS8: return "substrate-v2-legacy-pkcs8";
 	default: return "unknown";
 	}
 }
@@ -3833,6 +3835,8 @@ static inline const char* wallet_browser_result_prefix(uint8_t profile) {
 	case BROWSERVAULT_PROFILE_BIP38_NON_EC: return "BIP38";
 	case BROWSERVAULT_PROFILE_BIP38_EC: return "BIP38";
 	case BROWSERVAULT_PROFILE_ANDROID_BACKUP_PBKDF2_SHA1_AES_CBC: return "ANDROIDWALLET";
+	case BROWSERVAULT_PROFILE_SUBSTRATE_SCRYPT_PKCS8: return "SUBSTRATEWALLET";
+	case BROWSERVAULT_PROFILE_SUBSTRATE_LEGACY_PKCS8: return "SUBSTRATEWALLET";
 	default: return "BROWSERVAULT";
 	}
 }

@@ -86,7 +86,15 @@ enum BrowserVaultProfileKind : uint8_t {
 	BROWSERVAULT_PROFILE_MULTIBIT_CLASSIC_SCRYPT_AES = 27,
 	BROWSERVAULT_PROFILE_BIP38_NON_EC = 28,
 	BROWSERVAULT_PROFILE_ANDROID_BACKUP_PBKDF2_SHA1_AES_CBC = 29,
-	BROWSERVAULT_PROFILE_BIP38_EC = 30
+	BROWSERVAULT_PROFILE_BIP38_EC = 30,
+	BROWSERVAULT_PROFILE_SUBSTRATE_SCRYPT_PKCS8 = 31,
+	BROWSERVAULT_PROFILE_SUBSTRATE_LEGACY_PKCS8 = 32
+};
+
+enum SubstrateWalletKeyKind : uint32_t {
+	SUBSTRATEWALLET_KEY_SR25519 = 1,
+	SUBSTRATEWALLET_KEY_ED25519 = 2,
+	SUBSTRATEWALLET_KEY_ECDSA = 3
 };
 
 struct WalletJsSpec {
@@ -186,6 +194,10 @@ struct BrowserVaultDeviceTarget {
 	uint8_t iv[32];
 	uint8_t tag[16];
 	uint8_t vault_hash[32];
+	uint32_t key_kind;
+	uint32_t expected_public_len;
+	uint8_t expected_public[33];
+	uint8_t reserved_substrate[7];
 };
 
 struct BrowserVaultGroup {
