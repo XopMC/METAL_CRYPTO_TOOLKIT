@@ -795,6 +795,119 @@ bool read_launch_value_arg(const MetalLaunchArg* args,
     return true;
 }
 
+struct PrngGenerationFunctionConstants {
+    bool specialized = false;
+    int entropyLen = 0;
+    int mode = 0;
+    int gen = 0;
+};
+
+bool prng_generation_arg_indices(const std::string& name,
+                                 size_t& entropyIndex,
+                                 size_t& modeIndex,
+                                 size_t& genIndex,
+                                 bool& fixedModeZero) {
+    fixedModeZero = false;
+    if (name == "worker_gen" ||
+        name == "workerSeed_gen" ||
+        name == "workerHmac_gen") {
+        entropyIndex = 11u;
+        modeIndex = 12u;
+        genIndex = 13u;
+        return true;
+    }
+    if (name == "workerBrain_gen") {
+        entropyIndex = 10u;
+        modeIndex = 11u;
+        genIndex = 12u;
+        return true;
+    }
+    if (name == "workerMINIKEYS_seed_collect_gen") {
+        entropyIndex = 3u;
+        modeIndex = 4u;
+        genIndex = 5u;
+        return true;
+    }
+    if (name == "workerArmory_gen") {
+        entropyIndex = 8u;
+        modeIndex = 9u;
+        genIndex = 10u;
+        return true;
+    }
+    if (name == "workerArmoryRoot_gen") {
+        entropyIndex = 12u;
+        modeIndex = 13u;
+        genIndex = 14u;
+        return true;
+    }
+    if (name == "workerOld_gen" || name == "workerOldSeed_gen") {
+        entropyIndex = 7u;
+        modeIndex = 8u;
+        genIndex = 9u;
+        return true;
+    }
+    if (name == "workerBip32_gen") {
+        entropyIndex = 13u;
+        modeIndex = 14u;
+        genIndex = 15u;
+        return true;
+    }
+    if (name == "workerDerThread_mkd_gen") {
+        entropyIndex = 1u;
+        modeIndex = 0u;
+        genIndex = 2u;
+        fixedModeZero = true;
+        return true;
+    }
+    return false;
+}
+
+PrngGenerationFunctionConstants make_prng_generation_function_constants(
+    const std::string& name,
+    const MetalLaunchArg* args,
+    const size_t count) {
+    PrngGenerationFunctionConstants c{};
+    size_t entropyIndex = 0u;
+    size_t modeIndex = 0u;
+    size_t genIndex = 0u;
+    bool fixedModeZero = false;
+    if (!prng_generation_arg_indices(
+            name, entropyIndex, modeIndex, genIndex, fixedModeZero)) {
+        return c;
+    }
+    int entropyLen = 0;
+    int mode = 0;
+    int gen = 0;
+    if (!read_launch_value_arg(args, count, entropyIndex, entropyLen) ||
+        !read_launch_value_arg(args, count, genIndex, gen) ||
+        (!fixedModeZero &&
+         !read_launch_value_arg(args, count, modeIndex, mode))) {
+        return c;
+    }
+    c.specialized = true;
+    c.entropyLen = entropyLen;
+    c.mode = mode;
+    c.gen = gen;
+    return c;
+}
+
+std::string prng_generation_function_constants_key(
+    const PrngGenerationFunctionConstants& c) {
+    return "prng-generation:" + std::to_string(c.entropyLen) + ":" +
+           std::to_string(c.mode) + ":" + std::to_string(c.gen);
+}
+
+void bind_prng_generation_function_constants(
+    MTLFunctionConstantValues* values,
+    const PrngGenerationFunctionConstants& c) {
+    int value = c.entropyLen;
+    [values setConstantValue:&value type:MTLDataTypeInt atIndex:93];
+    value = c.mode;
+    [values setConstantValue:&value type:MTLDataTypeInt atIndex:94];
+    value = c.gen;
+    [values setConstantValue:&value type:MTLDataTypeInt atIndex:95];
+}
+
 struct PrivGenFunctionConstants {
     WorkerFunctionConstants targets;
     bool prngSpecialized = false;
@@ -3009,6 +3122,28 @@ metalError_t metal_launch_impl(const char* function_name,
         pipelineKey = worker_function_constants_key(workerConstants);
         constants = [workerConstants](MTLFunctionConstantValues* values) {
             bind_worker_function_constants(values, workerConstants);
+        };
+    }
+    const PrngGenerationFunctionConstants prngGenerationConstants =
+        make_prng_generation_function_constants(name, args, count);
+    if (prngGenerationConstants.specialized) {
+        const std::string prngKey =
+            prng_generation_function_constants_key(prngGenerationConstants);
+        if (pipelineKey.empty()) {
+            pipelineKey = prngKey;
+        } else {
+            pipelineKey += ":";
+            pipelineKey += prngKey;
+        }
+        const std::function<void(MTLFunctionConstantValues*)> baseConstants =
+            constants;
+        constants = [baseConstants, prngGenerationConstants](
+                        MTLFunctionConstantValues* values) {
+            if (baseConstants) {
+                baseConstants(values);
+            }
+            bind_prng_generation_function_constants(
+                values, prngGenerationConstants);
         };
     }
     if (name == "workerPRIV_seq_128_edonly") {

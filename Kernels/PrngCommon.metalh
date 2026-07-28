@@ -5,6 +5,28 @@
 #include "GPUHash.metalh"
 #include "ProviderAes.metalh"
 
+constant int PRNG_FC_ENTROPY_LEN [[function_constant(93)]];
+constant int PRNG_FC_MODE [[function_constant(94)]];
+constant int PRNG_FC_GEN [[function_constant(95)]];
+
+static inline int prng_specialized_entropy_len(int runtime_value) {
+    return is_function_constant_defined(PRNG_FC_ENTROPY_LEN)
+        ? PRNG_FC_ENTROPY_LEN
+        : runtime_value;
+}
+
+static inline int prng_specialized_mode(int runtime_value) {
+    return is_function_constant_defined(PRNG_FC_MODE)
+        ? PRNG_FC_MODE
+        : runtime_value;
+}
+
+static inline int prng_specialized_gen(int runtime_value) {
+    return is_function_constant_defined(PRNG_FC_GEN)
+        ? PRNG_FC_GEN
+        : runtime_value;
+}
+
 inline ulong rng_splitmix64(thread ulong& seed) {
     ulong z = (seed += 0x9E3779B97F4A7C15ul);
     z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ul;
@@ -12578,6 +12600,9 @@ static inline bool prng32_entropy_fill(int entropy_len,
                                        int mode,
                                        int gen,
                                        ulong skip32) {
+    entropy_len = prng_specialized_entropy_len(entropy_len);
+    mode = prng_specialized_mode(mode);
+    gen = prng_specialized_gen(gen);
     if (entropy_len <= 0 || entropy_len > 512) {
         return false;
     }
@@ -23114,6 +23139,9 @@ static inline bool prng64_entropy_fill(int entropy_len,
                                        int mode,
                                        int gen,
                                        ulong skip64) {
+    entropy_len = prng_specialized_entropy_len(entropy_len);
+    mode = prng_specialized_mode(mode);
+    gen = prng_specialized_gen(gen);
     if (entropy_len <= 0 || entropy_len > 512) {
         return false;
     }
