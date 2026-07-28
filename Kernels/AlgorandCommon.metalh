@@ -1,0 +1,185 @@
+#ifndef METAL_CRYPTO_ALGORAND_COMMON_METALH
+#define METAL_CRYPTO_ALGORAND_COMMON_METALH
+
+#include "HashFunc.metalh"
+#include "../sr25519-donna-32bit/ed25519-donna/ed25519.metalh"
+
+using namespace metal;
+
+constant uint ALGORAND_FLAG_VALID = 1u;
+constant uint ALGORAND_FLAG_CHECKSUM_ANY = 2u;
+
+struct AlgorandCandidate {
+    ushort words[24];
+    ushort checksum_word;
+    ushort flags;
+    uint reserved0;
+    ulong ordinal[4];
+    ulong template_index;
+};
+
+struct AlgorandDerived {
+    uchar public_key[32];
+    uint checksum_word;
+    uint valid;
+};
+
+struct AlgorandTarget {
+    uchar public_key[32];
+    ulong prefix;
+    ulong source_index;
+};
+
+struct AlgorandHit {
+    ulong ordinal[4];
+    ulong template_index;
+    ulong target_index;
+    uchar public_key[32];
+    uint checksum_word;
+    uint reserved;
+};
+
+static inline ulong algorand_load_be64(const thread uchar* data) {
+    ulong value = 0ul;
+    for (uint i = 0u; i < 8u; ++i) {
+        value = (value << 8u) | ulong(data[i]);
+    }
+    return value;
+}
+
+static inline void algorand_sha512_256_32(
+    const thread uchar seed[32],
+    thread uchar digest[32]) {
+    ulong initial[8] = {
+        0x22312194FC2BF72Cul, 0x9F555FA3C84C64C2ul,
+        0x2393B86B6F53B151ul, 0x963877195940EABDul,
+        0x96283EE2A88EFFE3ul, 0xBE5E1E2553863992ul,
+        0x2B0199FC2C85B8AAul, 0x0EB72DDC81C52CA2ul
+    };
+    ulong words[16] = {};
+    words[0] = algorand_load_be64(seed + 0u);
+    words[1] = algorand_load_be64(seed + 8u);
+    words[2] = algorand_load_be64(seed + 16u);
+    words[3] = algorand_load_be64(seed + 24u);
+    words[4] = 0x8000000000000000ul;
+    words[15] = 256ul;
+    ulong state[8];
+    sha512_compress_words(initial, words, state);
+    for (uint word = 0u; word < 4u; ++word) {
+        for (uint byte = 0u; byte < 8u; ++byte) {
+            digest[word * 8u + byte] =
+                uchar(state[word] >> (56u - byte * 8u));
+        }
+    }
+}
+
+static inline void algorand_sha512_32(
+    const thread uchar seed[32],
+    thread uchar digest[64]) {
+    ulong initial[8] = {
+        0x6A09E667F3BCC908ul, 0xBB67AE8584CAA73Bul,
+        0x3C6EF372FE94F82Bul, 0xA54FF53A5F1D36F1ul,
+        0x510E527FADE682D1ul, 0x9B05688C2B3E6C1Ful,
+        0x1F83D9ABFB41BD6Bul, 0x5BE0CD19137E2179ul
+    };
+    ulong words[16] = {};
+    words[0] = algorand_load_be64(seed + 0u);
+    words[1] = algorand_load_be64(seed + 8u);
+    words[2] = algorand_load_be64(seed + 16u);
+    words[3] = algorand_load_be64(seed + 24u);
+    words[4] = 0x8000000000000000ul;
+    words[15] = 256ul;
+    ulong state[8];
+    sha512_compress_words(initial, words, state);
+    for (uint word = 0u; word < 8u; ++word) {
+        for (uint byte = 0u; byte < 8u; ++byte) {
+            digest[word * 8u + byte] =
+                uchar(state[word] >> (56u - byte * 8u));
+        }
+    }
+}
+
+static inline bool algorand_unpack_seed(
+    const thread ushort words[24],
+    thread uchar seed[32]) {
+    ulong accumulator = 0ul;
+    uint bits = 0u;
+    uint output = 0u;
+    uchar padding = 0u;
+    for (uint i = 0u; i < 24u; ++i) {
+        if (words[i] >= 2048u) return false;
+        accumulator |= ulong(words[i]) << bits;
+        bits += 11u;
+        while (bits >= 8u) {
+            const uchar value = uchar(accumulator & 0xfful);
+            if (output < 32u) seed[output] = value;
+            else padding = value;
+            ++output;
+            accumulator >>= 8u;
+            bits -= 8u;
+        }
+    }
+    return output == 33u && padding == 0u;
+}
+
+static inline bool algorand_derive_public_key(
+    const thread AlgorandCandidate& candidate,
+    thread uchar public_key[32],
+    thread uint& checksum_word) {
+    if ((candidate.flags & ALGORAND_FLAG_VALID) == 0u) return false;
+
+    uchar seed[32];
+    if (!algorand_unpack_seed(candidate.words, seed)) return false;
+
+    uchar checksum_digest[32];
+    algorand_sha512_256_32(seed, checksum_digest);
+    checksum_word =
+        (uint(checksum_digest[0]) |
+         (uint(checksum_digest[1]) << 8u)) & 0x7ffu;
+    if ((candidate.flags & ALGORAND_FLAG_CHECKSUM_ANY) == 0u &&
+        checksum_word != uint(candidate.checksum_word)) {
+        return false;
+    }
+
+    uchar expanded[64];
+    algorand_sha512_32(seed, expanded);
+    expanded[0] &= 248u;
+    expanded[31] &= 127u;
+    expanded[31] |= 64u;
+    cardano_ed25519_publickey_from_scalar(expanded, public_key);
+    return true;
+}
+
+static inline ulong algorand_prefix(const thread uchar value[32]) {
+    return algorand_load_be64(value);
+}
+
+static inline int algorand_compare_key(
+    const thread uchar value[32],
+    const device AlgorandTarget& target) {
+    for (uint i = 0u; i < 32u; ++i) {
+        if (value[i] < target.public_key[i]) return -1;
+        if (value[i] > target.public_key[i]) return 1;
+    }
+    return 0;
+}
+
+static inline int algorand_find_target(
+    const thread uchar value[32],
+    const device AlgorandTarget* targets,
+    uint count) {
+    const ulong prefix = algorand_prefix(value);
+    uint low = 0u;
+    uint high = count;
+    while (low < high) {
+        const uint middle = low + ((high - low) >> 1u);
+        if (targets[middle].prefix < prefix) low = middle + 1u;
+        else high = middle;
+    }
+    for (uint i = low; i < count && targets[i].prefix == prefix; ++i) {
+        if (algorand_compare_key(value, targets[i]) == 0) return int(i);
+    }
+    return -1;
+}
+
+#endif

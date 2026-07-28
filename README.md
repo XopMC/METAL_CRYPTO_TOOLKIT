@@ -303,6 +303,32 @@ Wave 17 adds version-aware Monero `.keys` password recovery:
   off after allocation failure, explicit `-n` remains strict, and the common
   `SpeedThreadFunc` alone reports completed `KDF/s` and real verification work.
 
+Wave 18 adds checksum-first Algorand mnemonic recovery:
+
+- `-algorand` accepts repeatable standard 25-word English phrases, inline
+  templates, or line-oriented files; a standalone `?` or `*` marks an unknown
+  whole word, and `-scramble` enumerates unique multiset permutations;
+- the checked U256 scheduler maps every unknown-word or permutation ordinal
+  exactly once, enforces the restricted final data word, and derives the
+  SHA-512/256 checksum word before the expensive Ed25519 operation;
+- repeatable 58-character Algorand addresses, raw 32-byte public keys, and
+  target files are checksum-validated, normalized, and deduplicated while
+  retaining every source occurrence;
+- a fused Metal derive/lookup path is selected when the complete target tile
+  is resident; larger target sets use split derivation and bounded target
+  tiles so Ed25519 work is reused rather than multiplied by target count;
+- every hit is independently reconstructed and checked with host
+  SHA-512/256, Ed25519, and canonical address encoding before output;
+- `-wallet-mem` bounds the unified-memory working set, overflowed hit batches
+  replay without double credit, and only the common `SpeedThreadFunc` reports
+  completed `Candidate/s`, primitive work, real `Verify/s`, target residency,
+  readback, and allocated memory.
+
+The Wave 18 fused pipeline passed the symmetric 4,194,304-candidate gate at
+0.466967 s median versus 0.524247/0.525286 s for the surrounding split
+baselines: **+12.27%/+12.49%**, with 0.906% population CV. The split path
+remains automatic for target sets larger than the resident tile.
+
 A cross-wave PRNG compatibility update tracks the current CUDA catalog:
 
 - `-prng` now includes Ill Bloom generators `332..489` and modes `247..762`,
@@ -2936,6 +2962,68 @@ Passwords are limited to 127 bytes. Hardware-device containers, custom
 background-password profiles, malformed envelopes, and unknown future
 versions are rejected rather than heuristically decrypted.
 
+#### `-algorand`
+
+This mode recovers standard Algorand 25-word English mnemonics. Supply one or
+more inline phrases/templates or line-oriented files with repeatable `-i`.
+Empty lines and `#` comments in files are ignored. A standalone `?` or `*`
+means one unknown whole word. Repeatable `-target` accepts a canonical
+58-character Algorand address, a raw 32-byte/64-hex Ed25519 public key, or a
+file whose first token on each non-comment line is a target.
+
+The first 24 words encode the 32-byte private seed plus one required zero
+padding byte. Consequently data word 24 has only indexes `0..7`. Word 25 is
+the first little-endian 11-bit chunk of `SHA-512/256(seed)` and is derived
+automatically when marked unknown. These structural checks run before the
+Ed25519 base-point multiplication.
+
+The official SDK vector can be checked as one finite candidate:
+
+```bash
+./METAL_CRYPTO_TOOLKIT -algorand \
+  -i "olympic cricket tower model share zone grid twist sponsor avoid eight apology patient party success claim famous rapid donor pledge bomb mystery security ability often" \
+  -target LZTU6HAK53WDO4MJR5Q4O37V2JFBS6J6FSI7UCCRMJR6HBLT5JBFX2XOWM \
+  -wallet-mem auto -n 1
+```
+
+Unknown data words form a checked mixed-radix U256 ordinal domain. `-start`
+and exclusive `-end` select an exact slice; `-end 2^256` denotes the otherwise
+unrepresentable upper boundary when all 24 data words are unknown. The
+following finite example checks all 2048 values of the first word:
+
+```bash
+./METAL_CRYPTO_TOOLKIT -algorand \
+  -i "? cricket tower model share zone grid twist sponsor avoid eight apology patient party success claim famous rapid donor pledge bomb mystery security ability ?" \
+  -target LZTU6HAK53WDO4MJR5Q4O37V2JFBS6J6FSI7UCCRMJR6HBLT5JBFX2XOWM \
+  -start 0 -end 2048 -wallet-mem all -n 2048
+```
+
+With `-scramble`, all 25 input words must be known. They are treated as a
+multiset, so repeated words do not create duplicate permutations. This zero
+seed vector has only 25 unique placements:
+
+```bash
+./METAL_CRYPTO_TOOLKIT -algorand \
+  -i "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon invest" \
+  -scramble \
+  -target HNVCPPGOW2SC2YVDVDICU3YNONSTEFLXDXREHJR2YBEKDC2Z3IUZSC6YGI \
+  -start 0 -end 25 -wallet-mem auto -n 25
+```
+
+`-wallet-mem auto|all|NN%|SIZE` limits the complete unified-memory working
+set; sizes accept MiB/GiB and `-n` adds a candidate-batch ceiling. A complete
+resident target tile uses the measured fused derive/lookup kernel. Larger
+sets are processed in bounded exact tiles while candidate derivation is
+reused. Duplicate targets are computed once and retain all source labels.
+
+Each found record contains its target and template sources, canonical address,
+complete mnemonic, 32-byte seed, and public key. The host independently
+repeats padding, SHA-512/256 checksum, Ed25519 derivation, and target matching.
+Only the common `SpeedThreadFunc` prints live `Candidate/s`; target count is
+not a speed multiplier. English standard mnemonics are the supported profile.
+U256 representation and GPU acceleration do not make arbitrarily large
+unknown-word or permutation domains practically searchable.
+
 #### `-substratewallet`
 
 This mode recovers passwords for versioned Polkadot/Substrate keyring JSON
@@ -3814,6 +3902,33 @@ EMIP-3:
   уменьшается после allocation failure, явный `-n` остаётся строгим, а
   завершённые `KDF/s` и реальную verification печатает только общий
   `SpeedThreadFunc`.
+
+Волна 18 добавляет checksum-first восстановление mnemonic Algorand:
+
+- `-algorand` принимает повторяемые стандартные английские фразы из 25 слов,
+  inline-шаблоны и построчные файлы; отдельный `?` или `*` обозначает
+  неизвестное целое слово, а `-scramble` перебирает уникальные перестановки
+  multiset без дублей;
+- checked U256 scheduler однозначно сопоставляет ordinal неизвестным словам
+  или перестановкам, проверяет ограниченный последний data word и получает
+  checksum SHA-512/256 до дорогой операции Ed25519;
+- повторяемые 58-символьные адреса Algorand, исходные 32-байтовые public keys
+  и файлы целей проверяются, нормализуются и дедуплицируются с сохранением
+  каждого source occurrence;
+- при полностью resident target tile автоматически используется fused Metal
+  derive/lookup, а большие наборы целей переходят на split derivation и
+  ограниченные окна, чтобы не повторять Ed25519 для каждой части списка;
+- каждый hit независимо восстанавливается и проверяется на host через
+  SHA-512/256, Ed25519 и каноническое кодирование адреса;
+- `-wallet-mem` ограничивает unified-memory working set, overflow hit batch
+  повторяется без двойного зачёта, а завершённые `Candidate/s`, primitive
+  work, реальные `Verify/s`, resident targets, readback и память печатает
+  только общий `SpeedThreadFunc`.
+
+Fused pipeline Волны 18 прошёл симметричный gate на 4 194 304 кандидатах:
+медиана 0.466967 с против 0.524247/0.525286 с у окружающих split-baseline,
+то есть **+12.27%/+12.49%** при population CV 0.906%. Split-путь остаётся
+автоматическим для наборов целей больше resident tile.
 
 Межволновое обновление PRNG синхронизирует каталог с текущей CUDA-версией:
 
@@ -6466,6 +6581,70 @@ memory; automatic lane count уменьшается после allocation failur
 используется как искусственный множитель. Пароли ограничены 127 байтами.
 Hardware-device контейнеры, custom background password, повреждённые envelope
 и неизвестные будущие версии отклоняются без эвристической расшифровки.
+
+#### `-algorand`
+
+Режим восстанавливает стандартные английские mnemonic Algorand из 25 слов.
+Одну или несколько фраз/шаблонов либо построчных файлов можно передавать
+повторяемым `-i`; пустые строки и `#`-комментарии в файлах игнорируются.
+Отдельный `?` или `*` означает одно неизвестное целое слово. Повторяемый
+`-target` принимает канонический 58-символьный адрес Algorand, исходный
+32-байтовый/64-hex public key Ed25519 или файл, где цель — первый токен каждой
+непустой строки.
+
+Первые 24 слова кодируют 32-байтовый private seed и один обязательный нулевой
+padding byte, поэтому data word 24 допускает только индексы `0..7`. Word 25 —
+первый little-endian 11-bit chunk от `SHA-512/256(seed)`; если он неизвестен,
+режим получает его автоматически. Эти структурные проверки выполняются до
+base-point multiplication Ed25519.
+
+Официальный вектор SDK проверяется как один конечный кандидат:
+
+```bash
+./METAL_CRYPTO_TOOLKIT -algorand \
+  -i "olympic cricket tower model share zone grid twist sponsor avoid eight apology patient party success claim famous rapid donor pledge bomb mystery security ability often" \
+  -target LZTU6HAK53WDO4MJR5Q4O37V2JFBS6J6FSI7UCCRMJR6HBLT5JBFX2XOWM \
+  -wallet-mem auto -n 1
+```
+
+Неизвестные data words образуют checked mixed-radix U256 domain. `-start` и
+исключающий `-end` выбирают точный срез; `-end 2^256` обозначает не
+представимую обычным U256 верхнюю границу, когда неизвестны все 24 data words.
+Следующий конечный пример проверяет все 2048 значений первого слова:
+
+```bash
+./METAL_CRYPTO_TOOLKIT -algorand \
+  -i "? cricket tower model share zone grid twist sponsor avoid eight apology patient party success claim famous rapid donor pledge bomb mystery security ability ?" \
+  -target LZTU6HAK53WDO4MJR5Q4O37V2JFBS6J6FSI7UCCRMJR6HBLT5JBFX2XOWM \
+  -start 0 -end 2048 -wallet-mem all -n 2048
+```
+
+С `-scramble` все 25 входных слов должны быть известны. Они считаются
+multiset, поэтому повторяющиеся слова не создают одинаковые перестановки.
+У zero-seed вектора всего 25 уникальных размещений:
+
+```bash
+./METAL_CRYPTO_TOOLKIT -algorand \
+  -i "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon invest" \
+  -scramble \
+  -target HNVCPPGOW2SC2YVDVDICU3YNONSTEFLXDXREHJR2YBEKDC2Z3IUZSC6YGI \
+  -start 0 -end 25 -wallet-mem auto -n 25
+```
+
+`-wallet-mem auto|all|NN%|SIZE` ограничивает весь working set unified memory;
+размеры принимают MiB/GiB, а `-n` дополнительно ограничивает candidate batch.
+Полностью resident target tile использует измеренно более быстрый fused
+derive/lookup kernel. Большие наборы обрабатываются точными ограниченными
+окнами с переиспользованием candidate derivation. Дубли целей вычисляются
+один раз, но сохраняют все source labels.
+
+Каждая найденная запись содержит источники target/template, канонический
+адрес, полную mnemonic, 32-байтовый seed и public key. Host независимо
+повторяет padding, checksum SHA-512/256, derivation Ed25519 и target matching.
+Live `Candidate/s` печатает только общий `SpeedThreadFunc`, а число целей не
+используется как множитель скорости. Поддерживается стандартный английский
+профиль mnemonic. U256-представление и GPU не делают произвольно большие
+пространства неизвестных слов или перестановок практически выполнимыми.
 
 #### `-substratewallet`
 
