@@ -15,7 +15,7 @@ static inline bool ms_add_u64(thread ulong value[4], ulong addend) {
     return carry == 0ul;
 }
 
-static inline int ms_compare(
+static inline int ms_compare_u256(
     const thread ulong left[4],
     const thread ulong right[4]) {
     for (int i = 3; i >= 0; --i) {
@@ -25,65 +25,82 @@ static inline int ms_compare(
     return 0;
 }
 
-static inline void ms_subtract(
-    thread ulong left[4],
-    const thread ulong right[4]) {
-    ulong borrow = 0ul;
-    for (uint i = 0u; i < 4u; ++i) {
-        const ulong with_borrow = right[i] + borrow;
-        const bool overflow = with_borrow < right[i];
-        const ulong current = left[i];
-        left[i] = current - with_borrow;
-        borrow = (overflow || current < with_borrow) ? 1ul : 0ul;
+struct MsU96 {
+    uint words[3];
+};
+
+static inline bool ms_u96_from_u256(
+    const thread ulong value[4],
+    thread MsU96& result) {
+    if (value[2] != 0ul || value[3] != 0ul ||
+        (value[1] >> 32u) != 0ul) {
+        return false;
+    }
+    result.words[0] = uint(value[0]);
+    result.words[1] = uint(value[0] >> 32u);
+    result.words[2] = uint(value[1]);
+    return true;
+}
+
+static inline int ms_compare_u96(
+    const thread MsU96& left,
+    const thread MsU96& right) {
+    for (int i = 2; i >= 0; --i) {
+        if (left.words[uint(i)] < right.words[uint(i)]) return -1;
+        if (left.words[uint(i)] > right.words[uint(i)]) return 1;
+    }
+    return 0;
+}
+
+static inline void ms_subtract_u96(
+    thread MsU96& left,
+    const thread MsU96& right) {
+    uint borrow = 0u;
+    for (uint i = 0u; i < 3u; ++i) {
+        const ulong subtrahend =
+            ulong(right.words[i]) + ulong(borrow);
+        const ulong current = ulong(left.words[i]);
+        left.words[i] = uint(current - subtrahend);
+        borrow = current < subtrahend ? 1u : 0u;
     }
 }
 
-static inline bool ms_mul_small(
-    const thread ulong value[4],
+static inline bool ms_mul_small_u96(
+    const thread MsU96& value,
     uint multiplier,
-    thread ulong result[4]) {
+    thread MsU96& result) {
     ulong carry = 0ul;
-    for (uint i = 0u; i < 4u; ++i) {
-        const ulong low = value[i] * ulong(multiplier);
-        const ulong high = mulhi(value[i], ulong(multiplier));
-        const ulong sum = low + carry;
-        const ulong add_carry = sum < low ? 1ul : 0ul;
-        result[i] = sum;
-        carry = high + add_carry;
+    for (uint i = 0u; i < 3u; ++i) {
+        const ulong product =
+            ulong(value.words[i]) * ulong(multiplier) + carry;
+        result.words[i] = uint(product);
+        carry = product >> 32u;
     }
     return carry == 0ul;
 }
 
-static inline void ms_div_small(
-    const thread ulong value[4],
+static inline void ms_div_small_u96(
+    const thread MsU96& value,
     uint divisor,
-    thread ulong quotient[4]) {
-    for (uint i = 0u; i < 4u; ++i) quotient[i] = 0ul;
+    thread MsU96& quotient) {
     ulong remainder = 0ul;
-    for (int limb = 3; limb >= 0; --limb) {
-        const ulong source = value[uint(limb)];
-        ulong q = 0ul;
-        for (int bit = 63; bit >= 0; --bit) {
-            remainder =
-                (remainder << 1u) |
-                ((source >> uint(bit)) & 1ul);
-            if (remainder >= ulong(divisor)) {
-                remainder -= ulong(divisor);
-                q |= 1ul << uint(bit);
-            }
-        }
-        quotient[uint(limb)] = q;
+    for (int i = 2; i >= 0; --i) {
+        const ulong dividend =
+            (remainder << 32u) | ulong(value.words[uint(i)]);
+        quotient.words[uint(i)] =
+            uint(dividend / ulong(divisor));
+        remainder = dividend % ulong(divisor);
     }
 }
 
-static inline bool ms_mul_div(
-    const thread ulong value[4],
+static inline bool ms_mul_div_u96(
+    const thread MsU96& value,
     uint multiplier,
     uint divisor,
-    thread ulong result[4]) {
-    ulong product[4];
-    if (!ms_mul_small(value, multiplier, product)) return false;
-    ms_div_small(product, divisor, result);
+    thread MsU96& result) {
+    MsU96 product;
+    if (!ms_mul_small_u96(value, multiplier, product)) return false;
+    ms_div_small_u96(product, divisor, result);
     return true;
 }
 
@@ -121,7 +138,13 @@ kernel void workerMnemonicScramble(
         total[i] = domain_size[i];
     }
     if (!ms_add_u64(rank, ulong(tid)) ||
-        ms_compare(rank, total) >= 0) {
+        ms_compare_u256(rank, total) >= 0) {
+        return;
+    }
+    MsU96 rank96;
+    MsU96 total96;
+    if (!ms_u96_from_u256(rank, rank96) ||
+        !ms_u96_from_u256(total, total96)) {
         return;
     }
 
@@ -142,12 +165,12 @@ kernel void workerMnemonicScramble(
         for (uint candidate = 0u; candidate < unique_count; ++candidate) {
             const uint multiplicity = uint(counts[candidate]);
             if (multiplicity == 0u) continue;
-            ulong branch[4];
-            if (!ms_mul_div(
-                    total, multiplicity, remaining, branch)) {
+            MsU96 branch;
+            if (!ms_mul_div_u96(
+                    total96, multiplicity, remaining, branch)) {
                 return;
             }
-            if (ms_compare(rank, branch) < 0) {
+            if (ms_compare_u96(rank96, branch) < 0) {
                 if ((allowed_masks[slot] &
                      (1u << candidate)) == 0u) {
                     return;
@@ -155,13 +178,11 @@ kernel void workerMnemonicScramble(
                 ids[position] = unique_ids[candidate];
                 counts[candidate] =
                     ushort(multiplicity - 1u);
-                for (uint i = 0u; i < 4u; ++i) {
-                    total[i] = branch[i];
-                }
+                total96 = branch;
                 selected = true;
                 break;
             }
-            ms_subtract(rank, branch);
+            ms_subtract_u96(rank96, branch);
         }
         if (!selected) return;
         --remaining;
