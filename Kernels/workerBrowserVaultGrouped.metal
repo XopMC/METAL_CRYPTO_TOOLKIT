@@ -6,6 +6,7 @@
 #endif
 
 #define WALLET_MODE_BIP38 15u
+#define BROWSERVAULT_PROFILE_TERRA_STATION_AES_CBC 34u
 
 constant uint browser_vault_profile_specialization [[function_constant(92)]];
 static constant uint BROWSERVAULT_PROFILE_DYNAMIC = 0xffffffffu;
@@ -501,6 +502,102 @@ static inline void wallet_emit_bip38_result(device bool* isResult,
     out.payload_len = 20u;
 }
 
+static inline bool wallet_terra_hash160_from_private(
+    const constant secp256k1_ge_storage* precPtr,
+    ulong precPitch,
+    const thread uchar priv32[32],
+    thread uchar out20[20]) {
+    uchar pubkey65[65];
+    ulong px[4];
+    ulong py[4];
+    if (!walletks_priv_to_xy(
+            precPtr, precPitch, priv32, pubkey65, px, py)) {
+        return false;
+    }
+    int key_len = 0;
+    _GetHash160Comp(pubkey65, key_len, out20);
+    return true;
+}
+
+static inline int wallet_terra_hex_nibble(uchar c) {
+    if (c >= uchar('0') && c <= uchar('9')) return int(c - uchar('0'));
+    if (c >= uchar('a') && c <= uchar('f')) return int(c - uchar('a')) + 10;
+    if (c >= uchar('A') && c <= uchar('F')) return int(c - uchar('A')) + 10;
+    return -1;
+}
+
+__attribute__((noinline)) static bool wallet_terra_station_verify(
+    const constant secp256k1_ge_storage* precPtr,
+    ulong precPitch,
+    const thread uchar key32[32],
+    const device BrowserVaultDeviceTarget& target,
+    const device uchar* ciphertext,
+    thread uchar priv32[32],
+    thread uchar hash160[20]) {
+    if (precPtr == nullptr || ciphertext == nullptr ||
+        target.iv_len != 16u || target.ciphertext_len != 80u ||
+        target.expected_public_len != 20u) {
+        return false;
+    }
+    uint round_keys[60];
+    provider_aes_expand_key(key32, round_keys);
+    uchar plain[80];
+    for (uint block = 0u; block < 5u; ++block) {
+        const uint off = block * 16u;
+        wallet_aes256_decrypt_block(round_keys, ciphertext + off, plain + off);
+        for (uint i = 0u; i < 16u; ++i) {
+            const uchar previous = block == 0u
+                ? target.iv[i]
+                : ciphertext[off - 16u + i];
+            plain[off + i] = uchar(plain[off + i] ^ previous);
+        }
+    }
+    for (uint i = 64u; i < 80u; ++i) {
+        if (plain[i] != 16u) return false;
+    }
+    for (uint i = 0u; i < 32u; ++i) {
+        const int hi = wallet_terra_hex_nibble(plain[i * 2u]);
+        const int lo = wallet_terra_hex_nibble(plain[i * 2u + 1u]);
+        if (hi < 0 || lo < 0) return false;
+        priv32[i] = uchar((uint(hi) << 4u) | uint(lo));
+    }
+    if (!wallet_terra_hash160_from_private(
+            precPtr, precPitch, priv32, hash160)) {
+        return false;
+    }
+    uchar diff = 0u;
+    for (uint i = 0u; i < 20u; ++i) {
+        diff |= uchar(hash160[i] ^ target.expected_public[i]);
+    }
+    return diff == 0u;
+}
+
+static inline void wallet_emit_terra_result(
+    device bool* isResult,
+    device bool* buffResult,
+    const thread uchar* pass,
+    uint pass_len,
+    uint target_index,
+    const thread uchar priv32[32],
+    const thread uchar hash160[20],
+    device WalletModeResult* wallet_results,
+    device atomic_uint* wallet_count,
+    uint max_founds) {
+    walletks_mark_hit(isResult, buffResult);
+    if (wallet_results == nullptr || wallet_count == nullptr) return;
+    const ulong ridx = wallet_atomic_add_count(wallet_count, 1u);
+    if (ridx >= ulong(max_founds)) return;
+    device WalletModeResult& out = wallet_results[ridx];
+    wallet_zero_result(out);
+    out.mode = WALLET_MODE_BROWSERVAULT;
+    out.type = BROWSERVAULT_PROFILE_TERRA_STATION_AES_CBC;
+    out.target_index = target_index;
+    walletks_copy_password(out, pass, pass_len);
+    for (uint i = 0u; i < 32u; ++i) out.priv[i] = priv32[i];
+    for (uint i = 0u; i < 20u; ++i) out.payload[i] = hash160[i];
+    out.payload_len = 20u;
+}
+
 kernel void workerBrowserVaultGrouped(device bool* isResult [[buffer(0)]],
                                       device bool* buffResult [[buffer(1)]],
                                       constant secp256k1_ge_storage* precPtr [[buffer(2)]],
@@ -607,6 +704,9 @@ kernel void workerBrowserVaultGrouped(device bool* isResult [[buffer(0)]],
         } else if (group_profile == BROWSERVAULT_PROFILE_ANDROID_BACKUP_PBKDF2_SHA1_AES_CBC) {
             wallet_pbkdf2_sha1_32(pass_local, pass_len, group.salt, group.salt_len,
                                   group.iterations, key32);
+        } else if (group_profile == BROWSERVAULT_PROFILE_TERRA_STATION_AES_CBC) {
+            wallet_pbkdf2_sha1_32(pass_local, pass_len, group.salt, group.salt_len,
+                                  group.iterations, key32);
         } else if (group_profile == BROWSERVAULT_PROFILE_DOGECHAIN_PBKDF2_AES_CBC) {
             thread uchar pass_sha[32];
             thread uchar pass_b64[44];
@@ -675,6 +775,18 @@ kernel void workerBrowserVaultGrouped(device bool* isResult [[buffer(0)]],
             } else if (target_profile == BROWSERVAULT_PROFILE_ANDROID_BACKUP_PBKDF2_SHA1_AES_CBC) {
                 ok = wallet_aes256_cbc_check_android_backup_tail(key32, target.iv, ciphertext,
                                                                  target.ciphertext_len);
+            } else if (target_profile == BROWSERVAULT_PROFILE_TERRA_STATION_AES_CBC) {
+                thread uchar priv32[32];
+                thread uchar hash160[20];
+                if (wallet_terra_station_verify(
+                        precPtr, precPitch, key32, target, ciphertext,
+                        priv32, hash160)) {
+                    wallet_emit_terra_result(
+                        isResult, buffResult, pass_local, pass_len,
+                        target.target_index, priv32, hash160,
+                        wallet_results, wallet_count, max_founds);
+                }
+                continue;
             } else if (target_profile == BROWSERVAULT_PROFILE_DOGECHAIN_PBKDF2_AES_CBC) {
                 ok = wallet_aes256_cbc_check_dogechain_ascii(key32, target.iv, ciphertext,
                                                              target.ciphertext_len);

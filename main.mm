@@ -62,6 +62,7 @@
 #include "big_int/big_int_host.h"
 #include "filter.h"
 #include "sr25519-donna-32bit/dot.h"
+static constexpr uint32_t BROWSERVAULT_PROFILE_TERRA_STATION_AES_CBC = 34u;
 static constexpr uint8_t XP_PROFILE_RANDSTORM_PYMT = 10u;
 static constexpr uint8_t XP_PROFILE_RANDSTORM_MWC32 = 11u;
 static constexpr uint8_t XP_PROFILE_RANDSTORM_BYTES = 13u;
@@ -390,6 +391,7 @@ static bool WALLETDAT_MODE = false;
 static bool WALLETJS_MODE = false;
 static bool BROWSERVAULT_MODE = false;
 static bool COPAYWALLET_MODE = false;
+static bool TERRAWALLET_MODE = false;
 static bool SUBSTRATEWALLET_MODE = false;
 static bool ELECTRUMWALLET_MODE = false;
 static bool EXODUSSECO_MODE = false;
@@ -410,7 +412,8 @@ static bool WALLETSCAN_MODE = false;
 
 static inline bool is_browserlike_wallet_mode()
 {
-    return BROWSERVAULT_MODE || COPAYWALLET_MODE || SUBSTRATEWALLET_MODE ||
+    return BROWSERVAULT_MODE || COPAYWALLET_MODE || TERRAWALLET_MODE ||
+        SUBSTRATEWALLET_MODE ||
         BLOCKCHAINWALLET_MODE || MULTIBITWALLET_MODE ||
         BIP38_MODE || ETHPRESALE_MODE || BISQWALLET_MODE || DOGECHAINWALLET_MODE ||
         STELLARWALLET_MODE || ANDROIDWALLET_MODE;
@@ -8168,6 +8171,7 @@ enum class HelpTopic {
     WalletJs,
     BrowserVault,
     CopayWallet,
+    TerraWallet,
     SubstrateWallet,
     BlockchainWallet,
     MultiBitWallet,
@@ -10307,6 +10311,7 @@ static HelpTopic detect_help_topic(int argc, char** argv) {
         if (is_help_topic_arg(arg, "-walletjs")) return HelpTopic::WalletJs;
         if (is_help_topic_arg(arg, "-browservault")) return HelpTopic::BrowserVault;
         if (is_help_topic_arg(arg, "-copaywallet")) return HelpTopic::CopayWallet;
+        if (is_help_topic_arg(arg, "-terrawallet")) return HelpTopic::TerraWallet;
         if (is_help_topic_arg(arg, "-substratewallet")) return HelpTopic::SubstrateWallet;
         if (is_help_topic_arg(arg, "-blockchainwallet")) return HelpTopic::BlockchainWallet;
         if (is_help_topic_arg(arg, "-multibitwallet")) return HelpTopic::MultiBitWallet;
@@ -10366,6 +10371,7 @@ static const char* help_topic_command(HelpTopic topic) {
     case HelpTopic::WalletJs: return "-walletjs";
     case HelpTopic::BrowserVault: return "-browservault";
     case HelpTopic::CopayWallet: return "-copaywallet";
+    case HelpTopic::TerraWallet: return "-terrawallet";
     case HelpTopic::SubstrateWallet: return "-substratewallet";
     case HelpTopic::BlockchainWallet: return "-blockchainwallet";
     case HelpTopic::MultiBitWallet: return "-multibitwallet";
@@ -10458,6 +10464,7 @@ static void printHelpShort() {
 [!] -walletdat                    Bitcoin Core wallet.dat password recovery.
 [!] -browservault                 Browser extension vault recovery.
 [!] -copaywallet                  Copay/BitPay SJCL backup password recovery.
+[!] -terrawallet                  Terra Station exported-key password recovery.
 [!] -substratewallet              Substrate/Polkadot JSON PKCS8 recovery.
 [!] -electrumwallet               Electrum wallet password recovery.
 [!] -exodusseco                   Exodus SECO container recovery.
@@ -11488,6 +11495,7 @@ static bool helpTopicUsesWalletPasswordCommonSection(HelpTopic topic) {
     case HelpTopic::WalletDat:
     case HelpTopic::BrowserVault:
     case HelpTopic::CopayWallet:
+    case HelpTopic::TerraWallet:
     case HelpTopic::SubstrateWallet:
     case HelpTopic::BlockchainWallet:
     case HelpTopic::MultiBitWallet:
@@ -11690,6 +11698,64 @@ static void printHelpCopayWalletSection() {
 )HELP");
 }
 
+static void printHelpTerraWalletSection() {
+    puts(R"HELP([!] MAIN MODE: -terrawallet  (Terra Station exported-key recovery)
+[!] ======================================================================
+[!] Purpose:
+[!] Recover passwords for legacy Terra Station mobile exported-key JSON.
+[!] Every result is fully verified by regenerating the compressed secp256k1
+[!] public key and matching its HASH160 to the decoded terra1... address.
+[!]
+[!] Inputs:
+[!] -terrawallet FILE1 ...       Load raw JSON or outer-base64 JSON exports.
+[!] -terrawallet -f DIR          Recursively scan .json/.txt/no-extension files.
+[!] Required fields: name, address and encrypted_key.
+[!] Duplicate encrypted exports are computed once.
+[!]
+[!] Supported profile:
+[!] PBKDF2-HMAC-SHA1 (100 iterations), 16-byte salt, AES-256-CBC/PKCS7,
+[!] and the historical 64-character private-key hex plaintext.
+[!] Address must be a checksum-valid Bech32 terra address with 20-byte payload.
+[!]
+[!] Password candidates:
+[!] -i FILE                       Dictionary/password list, repeatable.
+[!] -hex                          Dictionary lines are exact hex bytes.
+[!] -mask MASK / -mask-file FILE  GPU mask candidates.
+[!] -cs1/-cs2/-cs3/-cs4 CHARS     Custom mask charsets.
+[!] -start HEX [-end HEX]         Raw byte range, length-major, up to 127 bytes.
+[!] -n N                          Optional active candidate/window cap.
+[!]
+[!] GPU / memory:
+[!] -wallet-mem auto|all|NN%|SIZE Hard unified-memory working-set budget.
+[!] -device LIST                  Split candidate ordinals without gaps/overlap.
+[!] Exports with identical salt share one grouped PBKDF2 computation.
+[!] Large target sets use compact metadata and pooled ciphertext.
+[!]
+[!] Statistics:
+[!] SpeedThreadFunc is the only statistics printer.
+[!] KDF/s counts completed password/KDF-group jobs after Metal completion.
+[!] Verify/s counts exact private-key/address checks, without multiplying speed
+[!] by the logical target count.
+[!]
+[!] Output:
+[!] TERRAWALLET:<file>:PASSWORD:<password>:PRIV:<64hex>:
+[!] ADDRESS:<terra1...>:PROFILE:terra-station-pbkdf2-sha1-aes-256-cbc
+[!]
+[!] Examples:
+[!] ./METAL_CRYPTO_TOOLKIT -terrawallet terra-export.json \
+[!]   -i passwords.txt -wallet-mem auto -save
+[!] ./METAL_CRYPTO_TOOLKIT -terrawallet -f terra_exports \
+[!]   -mask "?a?a?a?a?a?a?a?a" -wallet-mem all -device 0 \
+[!]   -save -o terra_found.txt
+[!]
+[!] Limitations:
+[!] Only the historical Terra Station exported-key profile above is accepted.
+[!] Mnemonics, hardware wallets, modern WalletConnect records and unknown future
+[!] formats are rejected before GPU work. No-match completion returns success;
+[!] CLI/runtime errors return nonzero.
+)HELP");
+}
+
 static void printHelpSubstrateWalletSection() {
     puts(R"HELP([!] MAIN MODE: -substratewallet  (Substrate / Polkadot JSON wallet recovery)
 [!] ======================================================================
@@ -11768,6 +11834,9 @@ static void printHelpModeSection(HelpTopic topic) {
         break;
     case HelpTopic::CopayWallet:
         printHelpCopayWalletSection();
+        break;
+    case HelpTopic::TerraWallet:
+        printHelpTerraWalletSection();
         break;
     case HelpTopic::SubstrateWallet:
         printHelpSubstrateWalletSection();
@@ -15147,7 +15216,8 @@ int main(int argc, char** argv)
     if (BRAIN && metalStatus != metalSuccess) {
         return 1;
     }
-    return ((BIP38_MODE || COPAYWALLET_MODE) && metalStatus != metalSuccess) ? 1 : 0;
+    return ((BIP38_MODE || COPAYWALLET_MODE || TERRAWALLET_MODE) &&
+            metalStatus != metalSuccess) ? 1 : 0;
 }
 
 static inline bool crypted_base_priv_mode_selected() {
@@ -15360,6 +15430,15 @@ bool readArgs(int argc, char** argv) {
         }
         if (strcmp(argv[a], "-copaywallet") == 0) {
             COPAYWALLET_MODE = true;
+            a++;
+            while (a < argc && !wallet_is_flag_token(argv[a])) {
+                wallet_artifact_files.push_back(string(argv[a]));
+                a++;
+            }
+            continue;
+        }
+        if (strcmp(argv[a], "-terrawallet") == 0) {
+            TERRAWALLET_MODE = true;
             a++;
             while (a < argc && !wallet_is_flag_token(argv[a])) {
                 wallet_artifact_files.push_back(string(argv[a]));
@@ -18562,6 +18641,7 @@ bool readArgs(int argc, char** argv) {
         (WALLETJS_MODE ? 1 : 0) +
         (BROWSERVAULT_MODE ? 1 : 0) +
         (COPAYWALLET_MODE ? 1 : 0) +
+        (TERRAWALLET_MODE ? 1 : 0) +
         (SUBSTRATEWALLET_MODE ? 1 : 0) +
         (BLOCKCHAINWALLET_MODE ? 1 : 0) +
         (MULTIBITWALLET_MODE ? 1 : 0) +
@@ -18656,9 +18736,9 @@ bool readArgs(int argc, char** argv) {
         return false;
     }
     if (wallet_memory_explicit && !BIP38_MODE && !SUBSTRATEWALLET_MODE &&
-        !COPAYWALLET_MODE &&
+        !COPAYWALLET_MODE && !TERRAWALLET_MODE &&
         !MNEMONIC_SCRAMBLE_MODE) {
-        std::cerr << "[!] Error: -wallet-mem is not enabled for this wallet mode yet; it is supported by -bip38, -copaywallet, -substratewallet and -mnemonic -scramble [!]" << std::endl;
+        std::cerr << "[!] Error: -wallet-mem is not enabled for this wallet mode yet; it is supported by -bip38, -copaywallet, -terrawallet, -substratewallet and -mnemonic -scramble [!]" << std::endl;
         return false;
     }
     if ((!mnemonic_scramble_pattern.empty() ||
@@ -21042,6 +21122,7 @@ bool checkDevice() {
                 else if (DOGECHAINWALLET_MODE) tuneProfile = "dogechainwallet";
                 else if (ANDROIDWALLET_MODE) tuneProfile = "androidwallet";
                 else if (COPAYWALLET_MODE) tuneProfile = "copaywallet";
+                else if (TERRAWALLET_MODE) tuneProfile = "terrawallet";
                 else tuneProfile = "browservault";
             }
             else if (ELECTRUMWALLET_MODE) {
@@ -27154,6 +27235,236 @@ static bool wallet_parse_copaywallet_file(
     return true;
 }
 
+static uint32_t wallet_terra_bech32_polymod_step(const uint32_t pre)
+{
+    const uint32_t top = pre >> 25u;
+    uint32_t value = (pre & 0x01ffffffu) << 5u;
+    if ((top & 1u) != 0u) value ^= 0x3b6a57b2u;
+    if ((top & 2u) != 0u) value ^= 0x26508e6du;
+    if ((top & 4u) != 0u) value ^= 0x1ea119fau;
+    if ((top & 8u) != 0u) value ^= 0x3d4233ddu;
+    if ((top & 16u) != 0u) value ^= 0x2a1462b3u;
+    return value;
+}
+
+static int wallet_terra_bech32_value(const unsigned char c)
+{
+    static constexpr char charset[] =
+        "qpzry9x8gf2tvdw0s3jn54khce6mua7l";
+    const unsigned char lower =
+        (c >= 'A' && c <= 'Z') ? static_cast<unsigned char>(c + 32u) : c;
+    const char* p = std::strchr(charset, static_cast<int>(lower));
+    return p == nullptr ? -1 : static_cast<int>(p - charset);
+}
+
+static bool wallet_terra_decode_address(
+    const std::string& input,
+    uint8_t payload20[20],
+    std::string& err)
+{
+    const std::string address = wallet_trim_copy(input);
+    if (address.size() < 8u || address.size() > 90u) {
+        err = "terra address length is invalid";
+        return false;
+    }
+    bool lower = false;
+    bool upper = false;
+    for (const unsigned char c : address) {
+        if (c < 33u || c > 126u) {
+            err = "terra address contains an invalid character";
+            return false;
+        }
+        lower = lower || (c >= 'a' && c <= 'z');
+        upper = upper || (c >= 'A' && c <= 'Z');
+    }
+    if (lower && upper) {
+        err = "terra address mixes upper and lower case";
+        return false;
+    }
+    const size_t separator = address.rfind('1');
+    if (separator == std::string::npos || separator == 0u ||
+        separator + 7u > address.size()) {
+        err = "terra address has no valid Bech32 separator/checksum";
+        return false;
+    }
+    std::string hrp = address.substr(0u, separator);
+    std::transform(hrp.begin(), hrp.end(), hrp.begin(),
+        [](const unsigned char c) {
+            return static_cast<char>(std::tolower(c));
+        });
+    if (hrp != "terra") {
+        err = "address HRP must be terra";
+        return false;
+    }
+
+    uint32_t checksum = 1u;
+    for (const unsigned char c : hrp) {
+        checksum =
+            wallet_terra_bech32_polymod_step(checksum) ^ (c >> 5u);
+    }
+    checksum = wallet_terra_bech32_polymod_step(checksum);
+    for (const unsigned char c : hrp) {
+        checksum =
+            wallet_terra_bech32_polymod_step(checksum) ^ (c & 31u);
+    }
+    std::vector<uint8_t> values;
+    values.reserve(address.size() - separator - 7u);
+    for (size_t i = separator + 1u; i < address.size(); ++i) {
+        const int value =
+            wallet_terra_bech32_value(static_cast<unsigned char>(address[i]));
+        if (value < 0) {
+            err = "terra address contains an invalid Bech32 character";
+            return false;
+        }
+        checksum =
+            wallet_terra_bech32_polymod_step(checksum) ^
+            static_cast<uint32_t>(value);
+        if (i + 6u < address.size()) {
+            values.push_back(static_cast<uint8_t>(value));
+        }
+    }
+    if (checksum != 1u) {
+        err = "terra address Bech32 checksum mismatch";
+        return false;
+    }
+
+    uint32_t accumulator = 0u;
+    uint32_t bits = 0u;
+    size_t output = 0u;
+    for (const uint8_t value : values) {
+        accumulator = ((accumulator << 5u) | value) & 0x0fffffffu;
+        bits += 5u;
+        while (bits >= 8u) {
+            bits -= 8u;
+            if (output >= 20u) {
+                err = "terra address payload is longer than 20 bytes";
+                return false;
+            }
+            payload20[output++] =
+                static_cast<uint8_t>((accumulator >> bits) & 0xffu);
+        }
+    }
+    if (output != 20u || bits >= 5u ||
+        ((accumulator << (8u - bits)) & 0xffu) != 0u) {
+        err = "terra address payload must be exactly 20 bytes";
+        return false;
+    }
+    return true;
+}
+
+static bool wallet_parse_terrawallet_text(
+    const std::string& source,
+    const std::string& input,
+    std::vector<BrowserVaultHostTarget>& targets,
+    std::unordered_set<std::string>& seen,
+    std::string& err)
+{
+    std::string json = wallet_trim_copy(input);
+    if (json.empty()) {
+        err = "empty Terra Station export";
+        return false;
+    }
+    if (json.front() != '{') {
+        std::vector<uint8_t> decoded;
+        if (!wallet_base64_to_bytes(json, decoded, err) || decoded.empty()) {
+            err = "invalid outer-base64 Terra Station export: " + err;
+            return false;
+        }
+        json.assign(
+            reinterpret_cast<const char*>(decoded.data()), decoded.size());
+        json = wallet_trim_copy(json);
+    }
+    if (json.empty() || json.front() != '{' || json.back() != '}') {
+        err = "Terra Station export must be a JSON object";
+        return false;
+    }
+
+    std::string name;
+    std::string address;
+    std::string encrypted_key;
+    if (!wallet_json_get_string(json, "name", name) ||
+        !wallet_json_get_string(json, "address", address) ||
+        !wallet_json_get_string(json, "encrypted_key", encrypted_key)) {
+        err = "missing required name/address/encrypted_key fields";
+        return false;
+    }
+    if (encrypted_key.size() <= 64u) {
+        err = "encrypted_key is too short";
+        return false;
+    }
+
+    std::vector<uint8_t> salt;
+    std::vector<uint8_t> iv;
+    std::vector<uint8_t> ciphertext;
+    if (!wallet_hex_to_bytes(encrypted_key.substr(0u, 32u), salt, err) ||
+        salt.size() != 16u ||
+        !wallet_hex_to_bytes(encrypted_key.substr(32u, 32u), iv, err) ||
+        iv.size() != 16u ||
+        !wallet_base64_to_bytes(encrypted_key.substr(64u), ciphertext, err)) {
+        err = "invalid encrypted_key salt/iv/ciphertext: " + err;
+        return false;
+    }
+    if (ciphertext.size() != 80u) {
+        err = "Terra Station ciphertext must be exactly 80 bytes";
+        return false;
+    }
+
+    uint8_t address_payload[20] = {};
+    if (!wallet_terra_decode_address(address, address_payload, err)) {
+        return false;
+    }
+
+    std::vector<uint8_t> identity = ciphertext;
+    identity.insert(identity.end(), address_payload, address_payload + 20u);
+    const std::string key = wallet_browser_vault_key(
+        identity, iv, salt, 100u,
+        BROWSERVAULT_PROFILE_TERRA_STATION_AES_CBC);
+    if (!seen.insert(key).second) {
+        return true;
+    }
+
+    BrowserVaultHostTarget target;
+    target.file = source;
+    target.dev.profile = BROWSERVAULT_PROFILE_TERRA_STATION_AES_CBC;
+    target.dev.iterations = 100u;
+    target.dev.salt_len = 16u;
+    target.dev.iv_len = 16u;
+    target.dev.ciphertext_len = 80u;
+    target.dev.expected_public_len = 20u;
+    memcpy(target.dev.salt, salt.data(), 16u);
+    memcpy(target.dev.iv, iv.data(), 16u);
+    memcpy(target.dev.expected_public, address_payload, 20u);
+    target.ciphertext = ciphertext;
+    wallet_browser_vault_hash(
+        identity, iv, salt, 100u,
+        BROWSERVAULT_PROFILE_TERRA_STATION_AES_CBC,
+        target.dev.vault_hash);
+    targets.push_back(std::move(target));
+    return true;
+}
+
+static bool wallet_parse_terrawallet_file(
+    const std::string& path,
+    std::vector<BrowserVaultHostTarget>& targets,
+    std::unordered_set<std::string>& seen,
+    std::string& err)
+{
+    std::string text;
+    if (!mac_read_text_file(path, text, err)) {
+        return false;
+    }
+    const size_t before = targets.size();
+    if (!wallet_parse_terrawallet_text(
+            path, text, targets, seen, err)) {
+        return false;
+    }
+    if (targets.size() == before) {
+        err = "duplicate Terra Station export";
+        return false;
+    }
+    return true;
+}
+
 static uint32_t wallet_substrate_load_le32(const uint8_t* bytes)
 {
     return static_cast<uint32_t>(bytes[0]) |
@@ -29317,6 +29628,33 @@ static BrowserVaultLoadFileResult wallet_load_one_copaywallet_file(
     result.skipped = !result.loaded;
     if (result.skipped && result.err.empty()) {
         result.err = "no usable Copay/BitPay SJCL backup";
+    }
+    return result;
+}
+
+static BrowserVaultLoadFileResult wallet_load_one_terrawallet_file(
+    const std::string& path)
+{
+    BrowserVaultLoadFileResult result;
+    result.path = path;
+    if (!mac_is_regular_file(path)) {
+        result.skipped = true;
+        result.err = "not a regular file";
+        return result;
+    }
+    std::unordered_set<std::string> local_seen;
+    if (!wallet_parse_terrawallet_file(
+            path, result.targets, local_seen, result.err)) {
+        result.skipped = true;
+        return result;
+    }
+    for (BrowserVaultHostTarget& target : result.targets) {
+        if (target.file.empty()) target.file = path;
+    }
+    result.loaded = !result.targets.empty();
+    result.skipped = !result.loaded;
+    if (result.skipped && result.err.empty()) {
+        result.err = "no usable Terra Station exported key";
     }
     return result;
 }
@@ -32606,7 +32944,8 @@ static void wallet_update_browser_mode_progress(
     const uint64_t completed_verifications,
     const uint64_t readback_ns)
 {
-    if (!BIP38_MODE && !SUBSTRATEWALLET_MODE && !COPAYWALLET_MODE) {
+    if (!BIP38_MODE && !SUBSTRATEWALLET_MODE && !COPAYWALLET_MODE &&
+        !TERRAWALLET_MODE) {
         return;
     }
     uint64_t solved = 0ull;
@@ -50345,6 +50684,7 @@ metalError_t processMetalBrowserVault()
 {
     const bool substrate_mode = SUBSTRATEWALLET_MODE;
     const bool copay_mode = COPAYWALLET_MODE;
+    const bool terra_mode = TERRAWALLET_MODE;
     const bool stellar_mode = STELLARWALLET_MODE;
     const bool blockchain_mode = BLOCKCHAINWALLET_MODE;
     const bool multibit_mode = MULTIBITWALLET_MODE;
@@ -50353,17 +50693,30 @@ metalError_t processMetalBrowserVault()
     const bool ethpresale_mode = ETHPRESALE_MODE;
     const bool bisq_mode = BISQWALLET_MODE;
     const bool android_mode = ANDROIDWALLET_MODE;
-    const char* mode_name = substrate_mode ? "SUBSTRATEWALLET" : (copay_mode ? "COPAYWALLET" : (bip38_mode ? "BIP38" : (ethpresale_mode ? "ETHPRESALE" : (bisq_mode ? "BISQWALLET" : (dogechain_mode ? "DOGECHAINWALLET" : (android_mode ? "ANDROIDWALLET" : (multibit_mode ? "MULTIBITWALLET" : (blockchain_mode ? "BLOCKCHAINWALLET" : (stellar_mode ? "STELLARWALLET" : "BROWSERVAULT")))))))));
-    const char* mode_lc = substrate_mode ? "substratewallet" : (copay_mode ? "copaywallet" : (bip38_mode ? "bip38" : (ethpresale_mode ? "ethpresale" : (bisq_mode ? "bisqwallet" : (dogechain_mode ? "dogechainwallet" : (android_mode ? "androidwallet" : (multibit_mode ? "multibitwallet" : (blockchain_mode ? "blockchainwallet" : (stellar_mode ? "stellarwallet" : "browservault")))))))));
+    const char* mode_name = "BROWSERVAULT";
+    const char* mode_lc = "browservault";
+    if (stellar_mode) { mode_name = "STELLARWALLET"; mode_lc = "stellarwallet"; }
+    if (blockchain_mode) { mode_name = "BLOCKCHAINWALLET"; mode_lc = "blockchainwallet"; }
+    if (multibit_mode) { mode_name = "MULTIBITWALLET"; mode_lc = "multibitwallet"; }
+    if (android_mode) { mode_name = "ANDROIDWALLET"; mode_lc = "androidwallet"; }
+    if (dogechain_mode) { mode_name = "DOGECHAINWALLET"; mode_lc = "dogechainwallet"; }
+    if (bisq_mode) { mode_name = "BISQWALLET"; mode_lc = "bisqwallet"; }
+    if (ethpresale_mode) { mode_name = "ETHPRESALE"; mode_lc = "ethpresale"; }
+    if (bip38_mode) { mode_name = "BIP38"; mode_lc = "bip38"; }
+    if (terra_mode) { mode_name = "TERRAWALLET"; mode_lc = "terrawallet"; }
+    if (copay_mode) { mode_name = "COPAYWALLET"; mode_lc = "copaywallet"; }
+    if (substrate_mode) { mode_name = "SUBSTRATEWALLET"; mode_lc = "substratewallet"; }
     const std::vector<std::string> scan_exts = (blockchain_mode || dogechain_mode || ethpresale_mode || bip38_mode || bisq_mode || android_mode)
         ? std::vector<std::string>{ ".txt", ".hash", ".json", ".wallet", "" }
         : (multibit_mode
             ? std::vector<std::string>{ ".txt", ".hash", ".key", ".wallet", "" }
         : ((substrate_mode || copay_mode)
             ? std::vector<std::string>{ ".json", "" }
+        : (terra_mode
+            ? std::vector<std::string>{ ".json", ".txt", "" }
         : (stellar_mode
             ? std::vector<std::string>{ ".txt", ".hash", ".stellar", "" }
-            : std::vector<std::string>{ ".ldb", ".log", ".json", ".txt", "" })));
+            : std::vector<std::string>{ ".ldb", ".log", ".json", ".txt", "" }))));
 
     std::vector<std::string> files = wallet_artifact_files;
     for (const auto& dir : wallet_artifact_dirs) {
@@ -50387,6 +50740,10 @@ metalError_t processMetalBrowserVault()
     else if (copay_mode) {
         wallet_parallel_load_files(
             files, mode_lc, load_results, wallet_load_one_copaywallet_file);
+    }
+    else if (terra_mode) {
+        wallet_parallel_load_files(
+            files, mode_lc, load_results, wallet_load_one_terrawallet_file);
     }
     else if (blockchain_mode) {
         wallet_parallel_load_files(files, mode_lc, load_results, wallet_load_one_blockchainwallet_file);
@@ -50479,6 +50836,7 @@ metalError_t processMetalBrowserVault()
     size_t substrate_scrypt_targets = 0u;
     size_t substrate_legacy_targets = 0u;
     size_t copay_sjcl_targets = 0u;
+    size_t terra_station_targets = 0u;
     size_t atomic_cryptojs_targets = 0u;
     size_t stellar_targets = 0u;
     size_t blockchain_targets = 0u;
@@ -50531,6 +50889,10 @@ metalError_t processMetalBrowserVault()
         else if (t.dev.profile ==
                  BROWSERVAULT_PROFILE_COPAY_SJCL_AES_CCM) {
             ++copay_sjcl_targets;
+        }
+        else if (t.dev.profile ==
+                 BROWSERVAULT_PROFILE_TERRA_STATION_AES_CBC) {
+            ++terra_station_targets;
         }
         else if (t.dev.profile == BROWSERVAULT_PROFILE_ATOMIC_CRYPTOJS_AES) {
             ++atomic_cryptojs_targets;
@@ -50629,8 +50991,8 @@ metalError_t processMetalBrowserVault()
     printf("[!] starting %s mode [!]\n", mode_name);
     printf("[!] loaded %s targets: %zu [!]\n", mode_lc, targets.size());
     counterWalletActiveTargets = static_cast<uint64_t>(targets.size());
-    printf("[!] %s profiles: metamask=%zu phantom_pbkdf2=%zu phantom_scrypt=%zu substrate_v3=%zu substrate_v2=%zu copay_sjcl=%zu atomic_cryptojs=%zu stellar=%zu blockchain=%zu multibit_md5=%zu multibit_hd=%zu multibit_scrypt=%zu bisq=%zu bip38_non_ec=%zu bip38_ec=%zu dogechain=%zu android_backup=%zu ethpresale=%zu [!]\n",
-        mode_lc, metamask_targets, phantom_pbkdf2_targets, phantom_scrypt_targets, substrate_scrypt_targets, substrate_legacy_targets, copay_sjcl_targets, atomic_cryptojs_targets, stellar_targets, blockchain_targets,
+    printf("[!] %s profiles: metamask=%zu phantom_pbkdf2=%zu phantom_scrypt=%zu substrate_v3=%zu substrate_v2=%zu copay_sjcl=%zu terra_station=%zu atomic_cryptojs=%zu stellar=%zu blockchain=%zu multibit_md5=%zu multibit_hd=%zu multibit_scrypt=%zu bisq=%zu bip38_non_ec=%zu bip38_ec=%zu dogechain=%zu android_backup=%zu ethpresale=%zu [!]\n",
+        mode_lc, metamask_targets, phantom_pbkdf2_targets, phantom_scrypt_targets, substrate_scrypt_targets, substrate_legacy_targets, copay_sjcl_targets, terra_station_targets, atomic_cryptojs_targets, stellar_targets, blockchain_targets,
         multibit_classic_md5_targets, multibit_hd_scrypt_targets, multibit_classic_scrypt_targets, bisq_targets, bip38_non_ec_targets, bip38_ec_targets, dogechain_targets, android_backup_targets, ethpresale_targets);
     printf("[!] %s KDF groups: %zu [saved %.2fx KDF work, singletons=%zu, max_group=%u] [!]\n",
         mode_lc,
@@ -50655,7 +51017,7 @@ metalError_t processMetalBrowserVault()
     uint64_t wallet_scratch_hard_cap = std::numeric_limits<uint64_t>::max();
     if ((browservault_has_scrypt &&
          (bip38_mode || substrate_mode || wallet_memory_explicit)) ||
-        copay_mode) {
+        copay_mode || terra_mode) {
         std::vector<modeinfra::MemoryDeviceInfo> memory_devices;
         memory_devices.reserve(g_gpu_contexts.size());
         for (const GpuRuntimeContext& context : g_gpu_contexts) {
@@ -50724,7 +51086,7 @@ metalError_t processMetalBrowserVault()
     metalError_t st = metalSuccess;
     bool wallet_progress_active = false;
     uint64_t wallet_working_set_bytes = 0ull;
-    if (bip38_mode || substrate_mode || copay_mode) {
+    if (bip38_mode || substrate_mode || copay_mode || terra_mode) {
         modeinfra::ModeProgress& progress = modeinfra::global_mode_progress();
         progress.begin(mode_name, modeinfra::ProgressUnit::Kdf,
                        modeinfra::ProgressPhase::Build);
@@ -50852,7 +51214,7 @@ metalError_t processMetalBrowserVault()
                 static_cast<double>(scratch_bytes) / 1048576.0,
                 static_cast<unsigned long long>(concurrency));
         }
-        if (bip38_mode || substrate_mode || copay_mode) {
+        if (bip38_mode || substrate_mode || copay_mode || terra_mode) {
             const uint64_t fixed_bytes =
                 static_cast<uint64_t>(targets.size()) * sizeof(BrowserVaultDeviceTarget) +
                 static_cast<uint64_t>(groups.size()) * sizeof(BrowserVaultGroup) +
@@ -50870,7 +51232,7 @@ metalError_t processMetalBrowserVault()
     }
 
     {
-        if (bip38_mode || substrate_mode || copay_mode) {
+        if (bip38_mode || substrate_mode || copay_mode || terra_mode) {
             modeinfra::ModeProgress& progress = modeinfra::global_mode_progress();
             progress.set_allocated_working_set(wallet_working_set_bytes);
             progress.set_phase(modeinfra::ProgressPhase::Search);

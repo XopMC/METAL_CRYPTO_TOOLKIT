@@ -219,6 +219,21 @@ Wave 12 adds authenticated Copay/BitPay backup recovery:
 - only the common `SpeedThreadFunc` prints live `KDF/s` and `Verify/s`, and
   neither rate is inflated by the number of artifacts.
 
+Wave 13 adds strict legacy Terra Station export recovery:
+
+- `-terrawallet` accepts the historical mobile exported-key JSON either
+  directly or wrapped in the original outer Base64 representation;
+- the loader requires `name`, a checksum-valid `terra1...` address with a
+  20-byte payload, and the exact `encrypted_key` salt/IV/ciphertext layout;
+- Metal performs PBKDF2-HMAC-SHA1 with 100 iterations, AES-256-CBC/PKCS7,
+  strict 64-character private-key decoding, secp256k1 public-key regeneration,
+  and an exact address HASH160 comparison;
+- targets sharing the same salt reuse one KDF result, compact ciphertext
+  pooling remains bounded by `-wallet-mem`, and only the common
+  `SpeedThreadFunc` prints completed `KDF/s` and actual `Verify/s`;
+- unknown Terra formats, mnemonics, hardware-wallet records, malformed
+  checksums, and unauthenticated plaintext heuristics are rejected.
+
 A cross-wave PRNG compatibility update tracks the current CUDA catalog:
 
 - `-prng` now includes Ill Bloom generators `332..489` and modes `247..762`,
@@ -2642,6 +2657,44 @@ The result identifies the source, recovered password, authenticated backup
 fingerprint, and exact profile. This mode does not parse arbitrary modern
 BitPay application databases or non-SJCL exports.
 
+#### `-terrawallet`
+
+This mode recovers passwords for the historical Terra Station mobile
+exported-key format. Pass raw JSON or its original outer-Base64 form directly,
+or use `-f DIR` to scan `.json`, `.txt`, and extensionless files.
+
+The strict loader requires `name`, `address`, and `encrypted_key`. The address
+must be a checksum-valid Bech32 `terra1...` identity with exactly 20 payload
+bytes. `encrypted_key` must contain a 16-byte hex salt, a 16-byte hex IV, and
+an 80-byte Base64 ciphertext. Unknown or altered layouts are rejected before
+GPU work.
+
+Metal derives the AES key with PBKDF2-HMAC-SHA1 (100 iterations), decrypts
+AES-256-CBC with exact PKCS7 padding, decodes the complete 64-character
+private-key hex string, regenerates its compressed secp256k1 public key, and
+compares the resulting HASH160 with the exported address. A plausible
+plaintext alone is never accepted. Targets with the same salt share one KDF
+result; `-wallet-mem` bounds the unified-memory working set.
+
+```bash
+./METAL_CRYPTO_TOOLKIT -terrawallet terra-export.json \
+  -i passwords.txt -wallet-mem auto -save
+
+./METAL_CRYPTO_TOOLKIT -terrawallet -f terra_exports \
+  -mask "?a?a?a?a?a?a?a?a" -wallet-mem all -device 0 \
+  -save -o terra_found.txt
+```
+
+Result:
+
+```text
+TERRAWALLET:<source>:PASSWORD:<password>:PRIV:<64hex>:ADDRESS:<terra1...>:PROFILE:terra-station-pbkdf2-sha1-aes-256-cbc
+```
+
+Only this legacy exported-key profile is supported. Terra mnemonics, hardware
+wallets, modern WalletConnect records, and unknown future formats are not
+password-recovery targets.
+
 #### `-substratewallet`
 
 This mode recovers passwords for versioned Polkadot/Substrate keyring JSON
@@ -3432,6 +3485,21 @@ tune выбрал 256 потоков на Metal threadgroup: на нагрузк
   на Metal; повреждённый или просто правдоподобный plaintext не принимается;
 - live `KDF/s` и `Verify/s` печатает только общий `SpeedThreadFunc`, без
   искусственного умножения показателей на число artifacts.
+
+Волна 13 добавляет строгое восстановление legacy-экспорта Terra Station:
+
+- `-terrawallet` принимает исторический mobile exported-key JSON напрямую
+  либо в исходной внешней Base64-обёртке;
+- loader требует `name`, checksum-valid адрес `terra1...` с 20-байтовым
+  payload и точную структуру salt/IV/ciphertext поля `encrypted_key`;
+- Metal выполняет PBKDF2-HMAC-SHA1 со 100 итерациями, AES-256-CBC/PKCS7,
+  строгий разбор 64 hex-символов приватного ключа, восстановление secp256k1
+  public key и точное сравнение HASH160 адреса;
+- цели с одинаковым salt разделяют результат KDF, компактный пул ciphertext
+  ограничен `-wallet-mem`, а завершённые `KDF/s` и реальные `Verify/s`
+  печатает только общий `SpeedThreadFunc`;
+- неизвестные Terra-форматы, mnemonic/hardware-wallet записи, неверные
+  checksum и эвристики «похожего plaintext» отклоняются.
 
 Межволновое обновление PRNG синхронизирует каталог с текущей CUDA-версией:
 
@@ -5875,6 +5943,45 @@ KDF-параметрами и salt используют один результ�
 Результат содержит источник, восстановленный пароль, fingerprint
 аутентифицированного backup и точный профиль. Режим не предназначен для
 произвольных современных баз приложения BitPay или export не в формате SJCL.
+
+#### `-terrawallet`
+
+Режим восстанавливает пароли исторического exported-key формата мобильного
+Terra Station. Можно передать raw JSON, его исходную внешнюю Base64-обёртку
+или использовать `-f DIR` для сканирования `.json`, `.txt` и файлов без
+расширения.
+
+Строгий loader требует поля `name`, `address` и `encrypted_key`. Адрес должен
+быть checksum-valid Bech32 `terra1...` ровно с 20 байтами payload.
+`encrypted_key` обязан содержать 16-байтовый hex salt, 16-байтовый hex IV и
+80-байтовый Base64 ciphertext. Неизвестная или изменённая структура
+отклоняется до GPU.
+
+Metal получает AES-ключ через PBKDF2-HMAC-SHA1 (100 итераций), расшифровывает
+AES-256-CBC с точным PKCS7 padding, разбирает все 64 hex-символа приватного
+ключа, восстанавливает compressed secp256k1 public key и сравнивает HASH160 с
+экспортированным адресом. Просто правдоподобный plaintext никогда не считается
+результатом. Цели с одинаковым salt используют один KDF, а `-wallet-mem`
+ограничивает working set unified memory.
+
+```bash
+./METAL_CRYPTO_TOOLKIT -terrawallet terra-export.json \
+  -i passwords.txt -wallet-mem auto -save
+
+./METAL_CRYPTO_TOOLKIT -terrawallet -f terra_exports \
+  -mask "?a?a?a?a?a?a?a?a" -wallet-mem all -device 0 \
+  -save -o terra_found.txt
+```
+
+Результат:
+
+```text
+TERRAWALLET:<source>:PASSWORD:<password>:PRIV:<64hex>:ADDRESS:<terra1...>:PROFILE:terra-station-pbkdf2-sha1-aes-256-cbc
+```
+
+Поддерживается только этот legacy exported-key профиль. Terra mnemonic,
+hardware wallet, современные WalletConnect-записи и неизвестные будущие
+форматы не являются целями восстановления пароля.
 
 #### `-substratewallet`
 
