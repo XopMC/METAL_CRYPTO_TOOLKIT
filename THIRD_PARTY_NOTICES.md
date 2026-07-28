@@ -32,6 +32,13 @@ The adapted reference files are located in `Monero/third_party/`; generated
 word-list data derived from the official language headers is located in
 `Monero/MoneroWordlists.generated.h`.
 
+The `-monerowallet` mode additionally incorporates Monero's CryptoNight-v0
+companion hash implementations and wallet ChaCha8/ChaCha20 primitive from the
+same source revision. The Blake, Groestl, JH, Skein, extra-hash wrappers and
+memory-wipe sources are BSD 3-Clause code from Monero/CryptoNote; the merged
+ChaCha implementation by D. J. Bernstein is public domain. These files are
+located in `MoneroWallet/third_party/`.
+
 ## Polyseed
 
 The `-monero` mode embeds the official Polyseed language lists and follows the

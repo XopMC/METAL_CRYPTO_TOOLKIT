@@ -286,6 +286,23 @@ Wave 16 adds checksum-first Monero mnemonic recovery:
   prefixes, and merely checksum-valid phrases without an exact target match
   are never reported as recovered wallets.
 
+Wave 17 adds version-aware Monero `.keys` password recovery:
+
+- `-monerowallet` accepts repeatable modern or legacy software-wallet `.keys`
+  containers and password literals/files through `-pass` or `-i`;
+- Metal executes the full CryptoNight-v0 slow hash with one 2 MiB scratchpad
+  per active lane, including the Keccak/AES mixing pipeline and exact
+  Blake/Groestl/JH/Skein final selector;
+- modern ChaCha20 JSON and legacy ChaCha8 portable-account payloads are parsed
+  independently, while encrypted spend/view secrets receive the required
+  `CryptoNight(base_key || 'k')` memory key;
+- every result requires canonical private scalars and exact spend/view public
+  keys regenerated with Monero ref10 arithmetic; malformed, unknown, hardware,
+  and custom-background-password profiles are not guessed;
+- `-wallet-mem` bounds all CryptoNight scratch, automatic concurrency backs
+  off after allocation failure, explicit `-n` remains strict, and the common
+  `SpeedThreadFunc` alone reports completed `KDF/s` and real verification work.
+
 A cross-wave PRNG compatibility update tracks the current CUDA catalog:
 
 - `-prng` now includes Ill Bloom generators `332..489` and modes `247..762`,
@@ -2878,6 +2895,47 @@ logical targets, readback time, and the allocated working set. Search size is
 exponential in the number of unknown words; checksum pruning and GPU
 acceleration do not make arbitrary large unknown-word domains practical.
 
+#### `-monerowallet`
+
+This mode recovers passwords for official Monero software-wallet `.keys`
+containers. Provide one or more files with repeatable `-f` or as positional
+paths after the mode. `-pass` accepts either one literal password or an
+existing line-oriented password file; `-i` adds a password file.
+
+```bash
+./METAL_CRYPTO_TOOLKIT -monerowallet -f wallet.keys \
+  -pass passwords.txt -wallet-mem auto -save
+
+./METAL_CRYPTO_TOOLKIT -monerowallet wallet.keys \
+  -pass "correct horse battery staple" -wallet-mem all -device 0
+```
+
+Metal runs the exact CryptoNight-v0 password KDF as staged init, scratch-fill,
+524288-step mixing, fold, Keccak and selected Blake/Groestl/JH/Skein kernels.
+Each active password owns a 2 MiB scratchpad. `-wallet-mem
+auto|all|NN%|SIZE` limits the complete unified-memory working set; automatic
+lane count is reduced after allocation failure, while explicit `-n` is a
+strict active-lane count. `-monero-kdf-rounds` defaults to one and should be
+changed only for a wallet known to have been created with a different round
+count.
+
+Modern ChaCha20/JSON and legacy ChaCha8 portable-account payloads are detected
+separately. For modern encrypted secret keys the mode derives the additional
+`CryptoNight(base_key || 'k')` memory key before decrypting them. A password
+is reported only after canonical scalar checks and exact ref10 regeneration
+of the stored spend/view public keys:
+
+```text
+[+] MONEROWALLET_FOUND SOURCE:<file> PASSWORD:<quoted> PASSWORD_HEX:<hex> SPEND_PRIVATE:<64hex> VIEW_PRIVATE:<64hex> SPEND_PUBLIC:<64hex> VIEW_PUBLIC:<64hex> PROFILE:<monero-keys-json-chacha20|monero-keys-v0-chacha8>
+```
+
+The common `SpeedThreadFunc` is the only live statistics printer. `KDF/s`
+counts password candidates completed after Metal command-buffer completion
+and readback; wallet count is never used as an artificial multiplier.
+Passwords are limited to 127 bytes. Hardware-device containers, custom
+background-password profiles, malformed envelopes, and unknown future
+versions are rejected rather than heuristically decrypted.
+
 #### `-substratewallet`
 
 This mode recovers passwords for versioned Polkadot/Substrate keyring JSON
@@ -3738,6 +3796,24 @@ EMIP-3:
 - encrypted Polyseed features, нарушенные фразы, неподдерживаемые address
   prefixes и просто checksum-valid фразы без точного совпадения с целью не
   объявляются восстановленными кошельками.
+
+Волна 17 добавляет version-aware восстановление паролей Monero `.keys`:
+
+- `-monerowallet` принимает повторяемые современные или legacy `.keys`
+  software-wallet и literal/файловые пароли через `-pass` либо `-i`;
+- Metal выполняет полный CryptoNight-v0 slow hash с отдельным scratchpad
+  2 MiB на активный lane, включая Keccak/AES mixing pipeline и точный
+  Blake/Groestl/JH/Skein final selector;
+- современные payload ChaCha20/JSON и legacy ChaCha8 portable-account
+  разбираются независимо, а зашифрованные spend/view secrets получают
+  обязательный memory key `CryptoNight(base_key || 'k')`;
+- результат требует канонических private scalar и точного восстановления
+  spend/view public keys арифметикой Monero ref10; malformed, неизвестные,
+  hardware и custom-background-password профили не угадываются;
+- `-wallet-mem` ограничивает весь CryptoNight scratch, automatic concurrency
+  уменьшается после allocation failure, явный `-n` остаётся строгим, а
+  завершённые `KDF/s` и реальную verification печатает только общий
+  `SpeedThreadFunc`.
 
 Межволновое обновление PRNG синхронизирует каталог с текущей CUDA-версией:
 
@@ -6350,6 +6426,46 @@ MONERO_FOUND SCHEME:<legacy|polyseed> LANGUAGE:<name> TARGET:<source> MNEMONIC:<
 targets, readback time и выделенный working set. Пространство растёт
 экспоненциально с числом неизвестных слов; checksum pruning и GPU не делают
 произвольно большие domains практически выполнимыми.
+
+#### `-monerowallet`
+
+Режим восстанавливает пароли официальных `.keys`-контейнеров программных
+кошельков Monero. Один или несколько файлов задаются повторяемым `-f` либо
+позиционными путями после режима. `-pass` принимает literal password или
+существующий построчный файл паролей; `-i` добавляет файл кандидатов.
+
+```bash
+./METAL_CRYPTO_TOOLKIT -monerowallet -f wallet.keys \
+  -pass passwords.txt -wallet-mem auto -save
+
+./METAL_CRYPTO_TOOLKIT -monerowallet wallet.keys \
+  -pass "correct horse battery staple" -wallet-mem all -device 0
+```
+
+Metal выполняет точный CryptoNight-v0 password KDF как последовательность
+init, заполнения scratchpad, 524288 mixing steps, fold, Keccak и выбранного
+Blake/Groestl/JH/Skein kernel. Каждый активный пароль использует scratchpad
+2 MiB. `-wallet-mem auto|all|NN%|SIZE` ограничивает полный working set unified
+memory; automatic lane count уменьшается после allocation failure, а явный
+`-n` задаёт строгое число активных lanes. `-monero-kdf-rounds` по умолчанию
+равен одному и меняется только для кошелька, который точно был создан с
+другим количеством раундов.
+
+Современные payload ChaCha20/JSON и legacy ChaCha8 portable-account
+определяются раздельно. Для современных зашифрованных secret keys режим
+дополнительно получает memory key `CryptoNight(base_key || 'k')`. Пароль
+выводится только после проверки канонических scalar и точного восстановления
+сохранённых spend/view public keys арифметикой ref10:
+
+```text
+[+] MONEROWALLET_FOUND SOURCE:<file> PASSWORD:<quoted> PASSWORD_HEX:<hex> SPEND_PRIVATE:<64hex> VIEW_PRIVATE:<64hex> SPEND_PUBLIC:<64hex> VIEW_PUBLIC:<64hex> PROFILE:<monero-keys-json-chacha20|monero-keys-v0-chacha8>
+```
+
+Единственный live printer — общий `SpeedThreadFunc`. `KDF/s` считает кандидаты
+только после завершения Metal command buffer и readback; число кошельков не
+используется как искусственный множитель. Пароли ограничены 127 байтами.
+Hardware-device контейнеры, custom background password, повреждённые envelope
+и неизвестные будущие версии отклоняются без эвристической расшифровки.
 
 #### `-substratewallet`
 

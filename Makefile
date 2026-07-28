@@ -24,7 +24,8 @@ CXXFLAGS := -std=c++17 -O3 -DNDEBUG -Wall -Wextra -Wno-unused-parameter \
             -I. -Isr25519-donna-32bit -Ilib -Ilib/hash -Ilib/V
 OBJCXXFLAGS := $(CXXFLAGS) -fobjc-arc
 CFLAGS   := -std=c17 -O3 -DNDEBUG -Wall -Wextra -Wno-unused-parameter \
-            -I. -Isr25519-donna-32bit -Ilib -Ilib/hash -Ilib/V
+            -I. -Isr25519-donna-32bit -Ilib -Ilib/hash -Ilib/V \
+            -IMoneroWallet/third_party
 DEPFLAGS := -MMD -MP
 LDFLAGS  := -framework Foundation -framework Metal -framework IOKit
 EMBED_METALLIB_LDFLAGS := -Wl,-sectcreate,__DATA,__metallib,$(METALLIB)
@@ -46,6 +47,7 @@ CPP_SRCS := \
 	Hamming/HammingMode.cpp \
 	WarpWallet/WarpWalletMode.cpp \
 	Monero/MoneroMode.cpp \
+	MoneroWallet/MoneroWalletMode.cpp \
 	Brain/BrainInput.cpp \
 	host_secp/HostSecp256k1.cpp \
 	old_electrum_host.cpp \
@@ -54,7 +56,17 @@ CPP_SRCS := \
 	sr25519-donna-32bit/dot.cpp
 C_SRCS := lib/base58.c \
 	Monero/third_party/crypto-ops.c \
-	Monero/third_party/crypto-ops-data.c
+	Monero/third_party/crypto-ops-data.c \
+	MoneroWallet/third_party/blake256.c \
+	MoneroWallet/third_party/chacha.c \
+	MoneroWallet/third_party/groestl.c \
+	MoneroWallet/third_party/hash-extra-blake.c \
+	MoneroWallet/third_party/hash-extra-groestl.c \
+	MoneroWallet/third_party/hash-extra-jh.c \
+	MoneroWallet/third_party/hash-extra-skein.c \
+	MoneroWallet/third_party/jh.c \
+	MoneroWallet/third_party/memwipe.c \
+	MoneroWallet/third_party/skein.c
 UNAME_M := $(shell uname -m)
 ifeq ($(UNAME_M),x86_64)
 CPP_SRCS += lib/hash/ripemd160_sse.cpp
@@ -76,6 +88,7 @@ LOCALIZED_HOST_HEADERS := Makefile KernelRuntime.h MacFileSystem.h Poetry.h Poet
 	Hamming/HammingMode.h \
 	WarpWallet/WarpWalletMode.h \
 	Monero/MoneroMode.h Monero/MoneroWordlists.generated.h \
+	MoneroWallet/MoneroWalletMode.h \
 	Brain/BrainInput.h \
 	Prng32ComboAllowlist.generated.h Prng64ComboAllowlist.generated.h \
 	Kernels/ProfanityHost.h Kernels/WalletModesHost.h Kernels/XpReplayHost.h \

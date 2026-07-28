@@ -1,0 +1,107 @@
+#ifndef METAL_CRYPTO_MONERO_WALLET_COMMON_METALH
+#define METAL_CRYPTO_MONERO_WALLET_COMMON_METALH
+
+#include <metal_stdlib>
+using namespace metal;
+
+#include "GPUHash.metalh"
+#include "ProviderAes.metalh"
+
+#define MONERO_WALLET_PASSWORD_STRIDE 128u
+#define MONERO_WALLET_CN_MEMORY (1u << 21u)
+#define MONERO_WALLET_CN_MASK (MONERO_WALLET_CN_MEMORY - 16u)
+#define MONERO_WALLET_CN_ITERATIONS (1u << 19u)
+
+struct alignas(16) MoneroWalletCnState {
+    uchar state[200];
+    ulong a0;
+    ulong a1;
+    ulong b0;
+    ulong b1;
+    uint valid;
+    uint reserved[5];
+};
+
+static inline ulong monero_wallet_load_le64_thread(
+    const thread uchar* data) {
+    ulong value = 0ul;
+#pragma unroll
+    for (uint i = 0u; i < 8u; ++i) {
+        value |= ulong(data[i]) << (i * 8u);
+    }
+    return value;
+}
+
+static inline ulong monero_wallet_load_le64_device(
+    const device uchar* data) {
+    ulong value = 0ul;
+#pragma unroll
+    for (uint i = 0u; i < 8u; ++i) {
+        value |= ulong(data[i]) << (i * 8u);
+    }
+    return value;
+}
+
+static inline void monero_wallet_store_le64_device(
+    device uchar* data, ulong value) {
+#pragma unroll
+    for (uint i = 0u; i < 8u; ++i) {
+        data[i] = uchar(value >> (i * 8u));
+    }
+}
+
+static inline void monero_wallet_keccak1600(
+    const device uchar* input, uint input_len,
+    thread uchar state[200]) {
+    for (uint i = 0u; i < 200u; ++i) state[i] = 0u;
+    for (uint i = 0u; i < input_len; ++i) state[i] = input[i];
+    state[input_len] ^= 0x01u;
+    state[135] ^= 0x80u;
+    keccakf(reinterpret_cast<thread ulong*>(state));
+}
+
+static inline void monero_wallet_aes_full_round(
+    thread uchar block[16], const thread uint* round_keys,
+    int round) {
+    provider_aes_sub_bytes(block);
+    provider_aes_shift_rows(block);
+    provider_aes_mix_columns(block);
+    provider_aes_add_round_key(block, round_keys, round);
+}
+
+static inline void monero_wallet_aes_pseudo_round(
+    thread uchar block[16], const thread uint round_keys[60]) {
+#pragma unroll
+    for (int round = 0; round < 10; ++round) {
+        monero_wallet_aes_full_round(block, round_keys, round);
+    }
+}
+
+static inline void monero_wallet_aes_single_round(
+    thread uchar block[16], ulong key0, ulong key1) {
+    uchar key_bytes[16];
+#pragma unroll
+    for (uint i = 0u; i < 8u; ++i) {
+        key_bytes[i] = uchar(key0 >> (i * 8u));
+        key_bytes[8u + i] = uchar(key1 >> (i * 8u));
+    }
+    provider_aes_sub_bytes(block);
+    provider_aes_shift_rows(block);
+    provider_aes_mix_columns(block);
+#pragma unroll
+    for (uint i = 0u; i < 16u; ++i) block[i] ^= key_bytes[i];
+}
+
+static inline void monero_wallet_load_block(
+    const device uchar* data, thread uchar block[16]) {
+#pragma unroll
+    for (uint i = 0u; i < 16u; ++i) block[i] = data[i];
+}
+
+static inline void monero_wallet_store_block(
+    device uchar* data, const thread uchar block[16]) {
+#pragma unroll
+    for (uint i = 0u; i < 16u; ++i) data[i] = block[i];
+}
+
+#endif
