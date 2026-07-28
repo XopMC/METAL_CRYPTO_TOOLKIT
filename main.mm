@@ -23,6 +23,7 @@
 #include "Create2/Create2Mode.h"
 #include "HdPath/HdPathMode.h"
 #include "Hamming/HammingMode.h"
+#include "WarpWallet/WarpWalletMode.h"
 #include "Kernels/ProfanityHost.h"
 #include "Kernels/WalletModesHost.h"
 #include "RecoveryWordlistsEmbedded.h"
@@ -8064,6 +8065,7 @@ enum class HelpTopic {
     Priv,
     PrivRecovery,
     Hamming,
+    WarpWallet,
     Kangaroo,
     Bsgs,
     KeyRepair,
@@ -10155,6 +10157,7 @@ static HelpTopic detect_help_topic(int argc, char** argv) {
             return has_arg(argc, argv, "-recovery") ? HelpTopic::PrivRecovery : HelpTopic::Priv;
         }
         if (is_help_topic_arg(arg, "-hamming")) return HelpTopic::Hamming;
+        if (is_help_topic_arg(arg, "-warpwallet")) return HelpTopic::WarpWallet;
         if (is_help_topic_arg(arg, "-kangaroo")) return HelpTopic::Kangaroo;
         if (is_help_topic_arg(arg, "-bsgs")) return HelpTopic::Bsgs;
         if (is_help_topic_arg(arg, "-keyrepair")) return HelpTopic::KeyRepair;
@@ -10224,6 +10227,7 @@ static const char* help_topic_command(HelpTopic topic) {
     case HelpTopic::Priv: return "-priv";
     case HelpTopic::PrivRecovery: return "-priv -recovery";
     case HelpTopic::Hamming: return "-priv -hamming";
+    case HelpTopic::WarpWallet: return "-warpwallet";
     case HelpTopic::Kangaroo: return "-kangaroo";
     case HelpTopic::Bsgs: return "-bsgs";
     case HelpTopic::KeyRepair: return "-keyrepair";
@@ -10320,6 +10324,7 @@ static void printHelpShort() {
 [!] -vanity                       BTC/Ethereum/TRON vanity address generation.
 [!] -create2                      Ethereum CREATE2 salt/address search.
 [!] -hdpath                       GPU BIP32 derivation-path search.
+[!] -warpwallet                   WarpWallet-family memory-hard KDF search.
 [!] -poetry                       Poetry brainwallet phrase recovery.
 [!] -minikeys                     Casascius minikey search.
 [!] -minikeys -seed               Deterministic Casascius minikey seed mode.
@@ -11643,6 +11648,9 @@ static void printHelpModeSection(HelpTopic topic) {
     case HelpTopic::Hamming:
         hamming::print_help();
         break;
+    case HelpTopic::WarpWallet:
+        warpwallet::print_help();
+        break;
     case HelpTopic::Kangaroo:
         kangaroo::print_help();
         break;
@@ -11807,6 +11815,37 @@ int main(int argc, char** argv)
     if (has_help_arg(argc, argv)) {
         printHelpTopic(detect_help_topic(argc, argv));
         return 0;
+    }
+    if (warpwallet::requested(argc, argv)) {
+        counterTotal = 0;
+        Founds = 0;
+        isRun = true;
+
+        const std::time_t started =
+            std::chrono::system_clock::to_time_t(
+                std::chrono::system_clock::now());
+        std::cout << "[!] Program started at: " << std::ctime(&started);
+
+        std::thread speed_thread(SpeedThreadFunc);
+        const warpwallet::RuntimeHooks hooks{
+            [](std::uint64_t completed) {
+                counterTotal += completed;
+            },
+            []() {
+                ++Founds;
+            }
+        };
+        const int result = warpwallet::run(argc, argv, hooks);
+        isRun = false;
+        if (speed_thread.joinable()) speed_thread.join();
+
+        const std::time_t finished =
+            std::chrono::system_clock::to_time_t(
+                std::chrono::system_clock::now());
+        std::cout << "\n[!] Processed " << counterTotal
+                  << " WarpWallet KDF candidates. Found: " << Founds
+                  << ". Program finished at " << std::ctime(&finished);
+        return result;
     }
     if (hamming::requested(argc, argv)) {
         counterTotal = 0;

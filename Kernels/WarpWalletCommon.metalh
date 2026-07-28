@@ -1,0 +1,303 @@
+#ifndef METAL_CRYPTO_WARP_WALLET_COMMON_METALH
+#define METAL_CRYPTO_WARP_WALLET_COMMON_METALH
+
+#include "WorkerKeystoreCommon.metalh"
+
+using namespace metal;
+
+constant uint WARP_PROFILE_WARP = 1u;
+constant uint WARP_PROFILE_BRAINWALLET_IO = 2u;
+constant uint WARP_PROFILE_BRAIN_V2 = 3u;
+constant uint WARP_PROFILE_RUSH = 4u;
+
+struct WarpWalletConfig {
+    uint profile;
+    uint salt_len;
+    uint target_count;
+    uint reserved;
+    uint window_count;
+    uint window_bits;
+    uint reserved2;
+    uint reserved3;
+    uint rush_checksum0;
+    uint rush_checksum1;
+    uint reserved4;
+    uint reserved5;
+};
+
+struct WarpWalletTarget {
+    uchar hash160[20];
+    uint source_index;
+    ulong prefix;
+};
+
+struct WarpWalletHit {
+    ulong candidate_index;
+    uint target_index;
+    uint password_len;
+    uchar password[128];
+    uchar private_key[32];
+    uchar hash160[20];
+    uint profile;
+};
+
+struct WarpWalletDerived {
+    uchar private_key[32];
+    uchar valid;
+    uchar padding[15];
+};
+
+struct WarpWalletResolved {
+    uchar hash160[20];
+    uchar valid;
+    uchar padding[11];
+};
+
+static inline ulong warp_target_prefix(const thread uchar hash[20]) {
+    ulong value = 0ul;
+    for (uint i = 0u; i < 8u; ++i) {
+        value = (value << 8u) | ulong(hash[i]);
+    }
+    return value;
+}
+
+static inline int warp_compare_hash(const thread uchar left[20],
+                                    const device uchar* right) {
+    for (uint i = 0u; i < 20u; ++i) {
+        if (left[i] < right[i]) return -1;
+        if (left[i] > right[i]) return 1;
+    }
+    return 0;
+}
+
+static inline int warp_find_target(
+    const thread uchar hash[20],
+    const device WarpWalletTarget* targets,
+    uint count) {
+    const ulong prefix = warp_target_prefix(hash);
+    uint low = 0u;
+    uint high = count;
+    while (low < high) {
+        const uint middle = low + ((high - low) >> 1u);
+        if (targets[middle].prefix < prefix) low = middle + 1u;
+        else high = middle;
+    }
+    for (uint i = low; i < count && targets[i].prefix == prefix; ++i) {
+        if (warp_compare_hash(hash, targets[i].hash160) == 0) {
+            return int(i);
+        }
+    }
+    return -1;
+}
+
+static inline uchar warp_hex_digit(uchar value) {
+    return value < 10u ? uchar('0' + value)
+                       : uchar('a' + value - 10u);
+}
+
+static inline void warp_hex_lower_32(const thread uchar input[32],
+                                     thread uchar output[64]) {
+    for (uint i = 0u; i < 32u; ++i) {
+        output[i * 2u] = warp_hex_digit(input[i] >> 4u);
+        output[i * 2u + 1u] = warp_hex_digit(input[i] & 15u);
+    }
+}
+
+static inline bool warp_derive_private(
+    const thread uchar* password,
+    uint password_len,
+    const constant WarpWalletConfig& config,
+    const device uchar* salt,
+    device uchar* scratch,
+    ulong scratch_stride,
+    ulong lane,
+    thread uchar private_key[32]) {
+    if (password_len >= 128u || config.salt_len >= 128u) return false;
+
+    if (config.profile == WARP_PROFILE_WARP) {
+        uchar tagged_password[128];
+        for (uint i = 0u; i < password_len; ++i) {
+            tagged_password[i] = password[i];
+        }
+        tagged_password[password_len] = 1u;
+
+        uchar scrypt_value[32];
+        if (!walletks_scrypt_sha256_32_params(
+                tagged_password, password_len + 1u,
+                salt, config.salt_len + 1u,
+                1u << 18u, 8u, 1u,
+                scratch, scratch_stride, lane,
+                scrypt_value)) {
+            return false;
+        }
+        uchar pbkdf_value[32];
+        tagged_password[password_len] = 2u;
+        uchar tagged_salt[128];
+        for (uint i = 0u; i < config.salt_len; ++i) {
+            tagged_salt[i] = salt[i];
+        }
+        tagged_salt[config.salt_len] = 2u;
+        wallet_pbkdf2_sha256_32_thread_salt(
+            tagged_password, password_len + 1u,
+            tagged_salt, config.salt_len + 1u,
+            1u << 16u, pbkdf_value);
+        for (uint i = 0u; i < 32u; ++i) {
+            private_key[i] = scrypt_value[i] ^ pbkdf_value[i];
+        }
+        return true;
+    }
+
+    if (config.profile == WARP_PROFILE_BRAINWALLET_IO) {
+        uchar scrypt_value[32];
+        if (!walletks_scrypt_sha256_32_params(
+                password, password_len, salt, config.salt_len,
+                1u << 18u, 8u, 1u,
+                scratch, scratch_stride, lane,
+                scrypt_value)) {
+            return false;
+        }
+        uchar encoded[64];
+        warp_hex_lower_32(scrypt_value, encoded);
+        SHA256(encoded, 64u, private_key);
+        return true;
+    }
+
+    if (config.profile == WARP_PROFILE_RUSH) {
+        uchar first[32];
+        SHA256(password, size_t(password_len), first);
+        uchar first_hex[64];
+        warp_hex_lower_32(first, first_hex);
+        uchar material[192];
+        if (config.salt_len + 64u > 192u) return false;
+        for (uint i = 0u; i < config.salt_len; ++i) {
+            material[i] = salt[i];
+        }
+        for (uint i = 0u; i < 64u; ++i) {
+            material[config.salt_len + i] = first_hex[i];
+        }
+        SHA256(material, size_t(config.salt_len + 64u), private_key);
+        if ((config.reserved & 1u) != 0u) {
+            for (uint i = 0u; i < 4u; ++i) {
+                if (private_key[i] !=
+                    uchar(config.rush_checksum0 >> (i * 8u))) {
+                    return false;
+                }
+            }
+            if (private_key[4] != uchar(config.rush_checksum1)) {
+                return false;
+            }
+        }
+        return true;
+    }
+    return false;
+}
+
+static inline bool warp_scrypt_sha256_output(
+    const thread uchar* pass,
+    uint pass_len,
+    const device uchar* salt,
+    uint salt_len,
+    uint n,
+    uint r,
+    uint p,
+    device uchar* scratch,
+    ulong scratch_stride,
+    ulong lane,
+    device uchar* output,
+    uint output_len) {
+    if (p == 0u || r == 0u || r > WALLET_SCRYPT_MAX_R ||
+        n < 2u || ((n & (n - 1u)) != 0u)) {
+        return false;
+    }
+    const uint block_size = 128u * r;
+    const ulong b_len = ulong(p) * ulong(block_size);
+    const ulong long_salt_extra =
+        salt_len > WALLET_SCRYPT_MAX_BLOCK
+        ? ulong(salt_len) + 4ul : 0ul;
+    const ulong need =
+        ulong(n) * ulong(block_size) + b_len + 4ul +
+        ulong(block_size) + long_salt_extra;
+    if (scratch == nullptr || scratch_stride < need) return false;
+
+    device uchar* v = scratch + lane * scratch_stride;
+    device uchar* final_b = v + ulong(n) * ulong(block_size);
+    device uchar* y = final_b + b_len + 4ul;
+    device uchar* long_salt = y + ulong(block_size);
+
+    WalletHmacSha256Precomp hmac_ctx;
+    const bool use_fast_hmac =
+        wallet_hmac_sha256_precompute(pass, pass_len, &hmac_ctx);
+    if (salt_len <= WALLET_SCRYPT_MAX_BLOCK) {
+        walletks_pbkdf2_sha256_with_hmac_device_salt(
+            pass, pass_len, salt, salt_len, 1u,
+            &hmac_ctx, use_fast_hmac, final_b, uint(b_len));
+    } else {
+        for (uint i = 0u; i < salt_len; ++i) long_salt[i] = salt[i];
+        for (uint block = 1u, written = 0u;
+             written < uint(b_len); ++block) {
+            walletks_store_be32(long_salt + salt_len, block);
+            uchar digest[32];
+            if (use_fast_hmac) {
+                walletks_hmac_sha256_from_precomp_device(
+                    &hmac_ctx, long_salt, salt_len + 4u, digest);
+            } else {
+                walletks_hmac_sha256_device(
+                    pass, pass_len, long_salt, salt_len + 4u, digest);
+            }
+            const uint copy_count =
+                min(32u, uint(b_len) - written);
+            for (uint i = 0u; i < copy_count; ++i) {
+                final_b[written + i] = digest[i];
+            }
+            written += copy_count;
+        }
+    }
+
+    device uint* v_words = reinterpret_cast<device uint*>(v);
+    device uint* y_words = reinterpret_cast<device uint*>(y);
+    const uint block_words = block_size >> 2u;
+    for (uint part = 0u; part < p; ++part) {
+        device uchar* b =
+            final_b + ulong(part) * ulong(block_size);
+        device uint* b_words = reinterpret_cast<device uint*>(b);
+        for (uint i = 0u; i < n; ++i) {
+            device uint* vi =
+                v_words + ulong(i) * ulong(block_words);
+            for (uint j = 0u; j < block_words; ++j) {
+                vi[j] = b_words[j];
+            }
+            walletks_scrypt_blockmix_words(b_words, y_words, r);
+        }
+        for (uint i = 0u; i < n; ++i) {
+            const uint j =
+                b_words[(2u * r - 1u) * 16u] & (n - 1u);
+            const device uint* vj =
+                v_words + ulong(j) * ulong(block_words);
+            for (uint k = 0u; k < block_words; ++k) {
+                b_words[k] ^= vj[k];
+            }
+            walletks_scrypt_blockmix_words(b_words, y_words, r);
+        }
+    }
+
+    for (uint block = 1u, written = 0u;
+         written < output_len; ++block) {
+        walletks_store_be32(final_b + b_len, block);
+        uchar digest[32];
+        if (use_fast_hmac) {
+            walletks_hmac_sha256_from_precomp_device(
+                &hmac_ctx, final_b, uint(b_len) + 4u, digest);
+        } else {
+            walletks_hmac_sha256_device(
+                pass, pass_len, final_b, uint(b_len) + 4u, digest);
+        }
+        const uint copy_count = min(32u, output_len - written);
+        for (uint i = 0u; i < copy_count; ++i) {
+            output[written + i] = digest[i];
+        }
+        written += copy_count;
+    }
+    return true;
+}
+
+#endif

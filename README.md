@@ -153,6 +153,24 @@ Wave 8 adds checksum-first BIP39 permutation search:
 - `SpeedThreadFunc` remains the only live printer and reports credited
   `Candidate/s`, exact verifications, working set, and readback time.
 
+Wave 9 adds historical memory-hard brainwallet profiles:
+
+- `-warpwallet` implements exact WarpWallet, brainwallet.io, Brainv2, and
+  RushWallet derivation pipelines in Metal rather than approximating them
+  with the ordinary `-brain` hash modes;
+- dictionaries are consumed in bounded streaming windows, while repeated
+  hash160/P2PKH targets are normalized, deduplicated, sorted, and uploaded in
+  shards smaller than both the selected memory budget and `maxBufferLength`;
+- the expensive KDF and secp256k1/hash160 calculation run once per password;
+  target shards perform only exact lookup, so target count never multiplies
+  the reported KDF work;
+- Brainv2 uses separate first, parallel middle, last, and finalize kernels.
+  RushWallet accepts either the prefix through `!` or the complete fragment
+  with its ten-hex-character early-rejection checksum;
+- every Metal hit receives independent host secp256k1/hash160 verification,
+  overflowed hit batches are replayed without double credit, and the common
+  `SpeedThreadFunc` remains the only live `KDF/s` printer.
+
 #### v15
 
 The July 25 update extends both interval-DLP modes for very large target
@@ -2263,6 +2281,44 @@ The result record begins with the selected profile and includes the replay state
 
 ### Brainwallet and legacy seed modes
 
+#### `-warpwallet`
+
+**Use it for:** exact historical memory-hard password-to-key schemes. These
+profiles are intentionally separate from `-brain`, because changing even one
+scrypt/PBKDF2 parameter produces a different private key.
+
+| Profile | Derivation |
+| --- | --- |
+| `warp:SALT` | WarpWallet scrypt `N=2^18,r=8,p=1` XOR PBKDF2-HMAC-SHA256 `c=2^16` |
+| `brainwallet.io:SALT` | brainwallet.io scrypt followed by lowercase-hex SHA-256 |
+| `brainv2:SALT` | exact three-stage Brainv2 scrypt construction |
+| `rush:PREFIX!CHECKSUM10HEX` | RushWallet URL fragment; `rush:PREFIX!` is also accepted when the checksum is unavailable |
+
+Supply one literal password or a line-oriented file with repeatable `-pass`
+or `-i`. Supply repeated 20-byte hash160/P2PKH targets or target files with
+`-target`. Password files and target tables are processed in bounded windows;
+the KDF and secp256k1 point are calculated once per password even when the
+target set spans many Metal shards.
+
+```bash
+./METAL_CRYPTO_TOOLKIT -warpwallet \
+  -profile 'rush:rush!e61ae7a87d' \
+  -pass 'correct horse battery staple' \
+  -target 1895f1392560ed5467adf9bed7dd4c37443bdfba \
+  -wallet-mem auto
+```
+
+`-wallet-mem auto|all|NN%|SIZE` is the total unified-memory ceiling.
+`-wallet-scrypt-mem SIZE` can impose a stricter scrypt-scratch ceiling, and
+`-n N` caps active password lanes. Brainv2 is exceptionally expensive: one
+candidate contains 258 scrypt invocations. GPU execution improves throughput
+but does not make a large unknown password space easy.
+
+Results are written as `WARPWALLET_FOUND` records with profile, exact target,
+password, private key, and target source. Every record is fully re-derived on
+the host before output. Live statistics come only from `SpeedThreadFunc` and
+use `KDF/s`.
+
 #### `-brain [SUBMODE]`
 
 **Use it for:** turning each text/byte candidate directly into private-key material through an explicit hash profile.
@@ -3152,6 +3208,24 @@ tune выбрал 256 потоков на Metal threadgroup: на нагрузк
   существующего pipeline seed, derivation и точной проверки целей;
 - единственным live-выводом остаётся `SpeedThreadFunc` с `Candidate/s`,
   точными проверками, working set и readback time.
+
+Волна 9 добавляет исторические memory-hard профили brainwallet:
+
+- `-warpwallet` точно реализует WarpWallet, brainwallet.io, Brainv2 и
+  RushWallet в Metal вместо приближённой замены обычными hash-режимами
+  `-brain`;
+- словари читаются ограниченными потоковыми окнами, а повторяемые цели
+  hash160/P2PKH нормализуются, дедуплицируются, сортируются и загружаются
+  шардами меньше лимита памяти и `maxBufferLength`;
+- дорогие KDF и secp256k1/hash160 выполняются один раз на пароль; каждый шард
+  целей делает только точный lookup, поэтому число целей не умножает
+  зачтённую KDF-работу;
+- Brainv2 разделён на first, параллельный middle, last и finalize kernels.
+  RushWallet принимает как префикс до `!`, так и полный фрагмент с десятью
+  hex-символами checksum для раннего отсева;
+- каждый Metal hit независимо проверяется через host secp256k1/hash160,
+  переполненные batches повторяются без двойного зачёта, а единственным
+  потоком live-статистики `KDF/s` остаётся общий `SpeedThreadFunc`.
 
 #### v15
 
@@ -5282,6 +5356,43 @@ XorFilter -i PROFANITY_BASEPOINT.txt -compress -mini -check -o profanity-xc
 Результат начинается с `XP:<PROFILE>`, затем содержит нужные этому профилю seed/time/PID/состояние, приват, тип цели и найденное значение.
 
 ### Brainwallet и старые форматы seed
+
+#### `-warpwallet`
+
+**Когда использовать:** для точных исторических memory-hard схем
+«пароль → ключ». Они специально отделены от `-brain`, потому что изменение
+даже одного параметра scrypt/PBKDF2 даёт другой приватный ключ.
+
+| Профиль | Преобразование |
+| --- | --- |
+| `warp:SALT` | WarpWallet: scrypt `N=2^18,r=8,p=1` XOR PBKDF2-HMAC-SHA256 `c=2^16` |
+| `brainwallet.io:SALT` | scrypt brainwallet.io, затем SHA-256 от строчного hex |
+| `brainv2:SALT` | точная трёхступенчатая схема scrypt Brainv2 |
+| `rush:PREFIX!CHECKSUM10HEX` | URL-фрагмент RushWallet; если checksum неизвестен, допускается `rush:PREFIX!` |
+
+Один пароль или построчный файл задаётся повторяемыми `-pass`/`-i`.
+Повторяемые цели hash160/P2PKH либо файлы целей передаются через `-target`.
+Словари и таблицы целей обрабатываются ограниченными окнами; KDF и точка
+secp256k1 вычисляются один раз на пароль, даже если цели занимают несколько
+Metal-шардов.
+
+```bash
+./METAL_CRYPTO_TOOLKIT -warpwallet \
+  -profile 'rush:rush!e61ae7a87d' \
+  -pass 'correct horse battery staple' \
+  -target 1895f1392560ed5467adf9bed7dd4c37443bdfba \
+  -wallet-mem auto
+```
+
+`-wallet-mem auto|all|NN%|SIZE` ограничивает весь unified working set.
+`-wallet-scrypt-mem SIZE` может задать более строгий предел scratch-памяти,
+а `-n N` — число активных парольных lanes. Brainv2 особенно тяжёлый: один
+кандидат включает 258 вызовов scrypt. GPU повышает скорость, но не превращает
+огромный неизвестный парольный диапазон в практически простой поиск.
+
+Результат `WARPWALLET_FOUND` содержит профиль, точную цель, пароль, приват и
+источник цели. Перед выводом каждая строка полностью перепроверяется на CPU.
+Текущую статистику `KDF/s` печатает только штатный `SpeedThreadFunc`.
 
 #### `-brain [ПОДРЕЖИМ]`
 
