@@ -250,6 +250,22 @@ Wave 14 adds exact BitShares 0.x exported-key recovery:
 - arbitrary wallet-database records, watch-only entries, invalid key
   checksums, malformed arrays, and unknown future containers are rejected.
 
+Wave 15 adds authenticated Yoroi IndexedDB / EMIP-3 recovery:
+
+- `-yoroiwallet` loads the actual Yoroi `Key` and `KeyDerivation` IndexedDB
+  tables and follows only the exact root -> `1852'` -> `1815'` -> `account'`
+  chain to its stored BIP32-Ed25519 account xpub;
+- the loader requires an encrypted 156-byte EMIP-3 root record, a 64-byte
+  account xpub, and the exact salt32/nonce12/tag16/ciphertext96 layout;
+- Metal performs PBKDF2-HMAC-SHA512 with 19162 iterations, verifies the
+  ChaCha20-Poly1305 tag, decrypts the 96-byte root xprv, and regenerates both
+  the account public key and chain code through hardened CIP-1852 derivation;
+- roots sharing the same salt reuse one grouped KDF result, compact metadata
+  and pooled ciphertext stay inside `-wallet-mem`, and only the common
+  `SpeedThreadFunc` prints completed `KDF/s` and actual `Verify/s`;
+- mnemonic recovery, hardware signers, watch-only roots, malformed tables,
+  unauthenticated plaintext, and unknown future containers are rejected.
+
 A cross-wave PRNG compatibility update tracks the current CUDA catalog:
 
 - `-prng` now includes Ill Bloom generators `332..489` and modes `247..762`,
@@ -2752,6 +2768,46 @@ are intentionally not treated as this exported-key profile. The common
 `SpeedThreadFunc` is the only live statistics printer; target count does not
 artificially multiply `KDF/s` or `Verify/s`.
 
+#### `-yoroiwallet`
+
+This mode recovers passwords from Yoroi IndexedDB JSON snapshots containing an
+EMIP-3-encrypted BIP32-Ed25519 root key. Pass one or more snapshots directly
+after the mode, or use `-f DIR` to scan `.json` and extensionless files.
+
+The strict loader reads the `Key` and `KeyDerivation` tables, accepts only
+`BIP32ED25519` key records, and follows the exact encrypted root ->
+`1852'` -> `1815'` -> `account'` chain to the stored 64-byte account xpub.
+The encrypted root must be exactly 156 bytes:
+`salt32 || nonce12 || tag16 || ciphertext96`.
+
+Metal derives the 32-byte encryption key with
+PBKDF2-HMAC-SHA512(password, salt, 19162), verifies ChaCha20-Poly1305 with
+empty AAD, decrypts the 96-byte root xprv, and performs hardened CIP-1852
+derivation. A candidate is reported only when both the derived account public
+key and chain code match the IndexedDB identity. Roots sharing one salt reuse
+the grouped PBKDF2 job. `-wallet-mem` bounds the unified-memory working set.
+
+```bash
+./METAL_CRYPTO_TOOLKIT -yoroiwallet yoroi-indexeddb.json \
+  -i passwords.txt -wallet-mem auto -save
+
+./METAL_CRYPTO_TOOLKIT -yoroiwallet -f yoroi_snapshots \
+  -mask "?a?a?a?a?a?a?a?a" -wallet-mem all -device 0 \
+  -save -o yoroi_found.txt
+```
+
+Result:
+
+```text
+YOROIWALLET:<source#root/account>:PASSWORD:<password>:ROOT_XPRV:<192hex>:PROFILE:yoroi-emip3-pbkdf2-sha512-chacha20poly1305
+```
+
+Mnemonic recovery, hardware signers, watch-only roots and unknown future
+containers are intentionally outside this profile. Authentication plus exact
+account xpub regeneration is mandatory. The common `SpeedThreadFunc` is the
+only live statistics printer; target count never inflates `KDF/s` or
+`Verify/s`.
+
 #### `-substratewallet`
 
 This mode recovers passwords for versioned Polkadot/Substrate keyring JSON
@@ -3573,6 +3629,23 @@ tune выбрал 256 потоков на Metal threadgroup: на нагрузк
   и реальные `Verify/s` печатает только общий `SpeedThreadFunc`;
 - произвольные записи wallet database, watch-only entries, неверные checksum,
   нарушенные массивы и неизвестные контейнеры отклоняются.
+
+Волна 15 добавляет аутентифицированное восстановление Yoroi IndexedDB /
+EMIP-3:
+
+- `-yoroiwallet` читает реальные таблицы IndexedDB `Key` и `KeyDerivation` и
+  проходит только точную цепочку root -> `1852'` -> `1815'` -> `account'` до
+  сохранённого account xpub BIP32-Ed25519;
+- loader требует зашифрованную 156-байтовую root-запись EMIP-3, 64-байтовый
+  account xpub и точную структуру salt32/nonce12/tag16/ciphertext96;
+- Metal выполняет PBKDF2-HMAC-SHA512 с 19162 итерациями, проверяет tag
+  ChaCha20-Poly1305, расшифровывает 96-байтовый root xprv и восстанавливает
+  account public key вместе с chain code через hardened CIP-1852 derivation;
+- roots с одинаковым salt разделяют один grouped KDF, компактные metadata и
+  pooled ciphertext остаются в пределах `-wallet-mem`, а завершённые `KDF/s`
+  и реальные `Verify/s` печатает только общий `SpeedThreadFunc`;
+- mnemonic recovery, hardware signers, watch-only roots, нарушенные таблицы,
+  неаутентифицированный plaintext и неизвестные контейнеры отклоняются.
 
 Межволновое обновление PRNG синхронизирует каталог с текущей CUDA-версией:
 
@@ -6096,6 +6169,45 @@ BITSHARESWALLET:<source#account/key>:PASSWORD:<password>:PRIV:<64hex>:PUBKEY:<co
 не считаются этим exported-key профилем. Единственный live printer статистики
 — общий `SpeedThreadFunc`; число целей искусственно не умножает `KDF/s` или
 `Verify/s`.
+
+#### `-yoroiwallet`
+
+Режим восстанавливает пароли из JSON-снимков Yoroi IndexedDB с
+EMIP-3-зашифрованным root key BIP32-Ed25519. Один или несколько снимков
+передаются после режима; `-f DIR` сканирует `.json` и файлы без расширения.
+
+Строгий loader читает таблицы `Key` и `KeyDerivation`, принимает только записи
+`BIP32ED25519` и проходит точную цепочку encrypted root -> `1852'` ->
+`1815'` -> `account'` до сохранённого 64-байтового account xpub.
+Зашифрованный root должен иметь ровно 156 байт:
+`salt32 || nonce12 || tag16 || ciphertext96`.
+
+Metal получает 32-байтовый encryption key как
+PBKDF2-HMAC-SHA512(password, salt, 19162), проверяет ChaCha20-Poly1305 с
+пустым AAD, расшифровывает 96-байтовый root xprv и выполняет hardened
+CIP-1852 derivation. Результат выводится только при совпадении и account
+public key, и chain code с identity из IndexedDB. Roots с одним salt разделяют
+grouped PBKDF2 job. `-wallet-mem` ограничивает working set unified memory.
+
+```bash
+./METAL_CRYPTO_TOOLKIT -yoroiwallet yoroi-indexeddb.json \
+  -i passwords.txt -wallet-mem auto -save
+
+./METAL_CRYPTO_TOOLKIT -yoroiwallet -f yoroi_snapshots \
+  -mask "?a?a?a?a?a?a?a?a" -wallet-mem all -device 0 \
+  -save -o yoroi_found.txt
+```
+
+Результат:
+
+```text
+YOROIWALLET:<source#root/account>:PASSWORD:<password>:ROOT_XPRV:<192hex>:PROFILE:yoroi-emip3-pbkdf2-sha512-chacha20poly1305
+```
+
+Mnemonic recovery, hardware signers, watch-only roots и неизвестные будущие
+контейнеры намеренно не входят в этот профиль. Проверка authentication tag и
+точное восстановление account xpub обязательны. Единственный live printer —
+общий `SpeedThreadFunc`; число целей не раздувает `KDF/s` или `Verify/s`.
 
 #### `-substratewallet`
 

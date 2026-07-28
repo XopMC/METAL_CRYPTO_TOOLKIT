@@ -64,6 +64,7 @@
 #include "sr25519-donna-32bit/dot.h"
 static constexpr uint32_t BROWSERVAULT_PROFILE_TERRA_STATION_AES_CBC = 34u;
 static constexpr uint32_t BROWSERVAULT_PROFILE_BITSHARES_0X_AES_CBC = 35u;
+static constexpr uint32_t BROWSERVAULT_PROFILE_YOROI_EMIP3 = 36u;
 static constexpr uint8_t XP_PROFILE_RANDSTORM_PYMT = 10u;
 static constexpr uint8_t XP_PROFILE_RANDSTORM_MWC32 = 11u;
 static constexpr uint8_t XP_PROFILE_RANDSTORM_BYTES = 13u;
@@ -394,6 +395,7 @@ static bool BROWSERVAULT_MODE = false;
 static bool COPAYWALLET_MODE = false;
 static bool TERRAWALLET_MODE = false;
 static bool BITSHARESWALLET_MODE = false;
+static bool YOROIWALLET_MODE = false;
 static bool SUBSTRATEWALLET_MODE = false;
 static bool ELECTRUMWALLET_MODE = false;
 static bool EXODUSSECO_MODE = false;
@@ -415,7 +417,7 @@ static bool WALLETSCAN_MODE = false;
 static inline bool is_browserlike_wallet_mode()
 {
     return BROWSERVAULT_MODE || COPAYWALLET_MODE || TERRAWALLET_MODE ||
-        BITSHARESWALLET_MODE ||
+        BITSHARESWALLET_MODE || YOROIWALLET_MODE ||
         SUBSTRATEWALLET_MODE ||
         BLOCKCHAINWALLET_MODE || MULTIBITWALLET_MODE ||
         BIP38_MODE || ETHPRESALE_MODE || BISQWALLET_MODE || DOGECHAINWALLET_MODE ||
@@ -8176,6 +8178,7 @@ enum class HelpTopic {
     CopayWallet,
     TerraWallet,
     BitSharesWallet,
+    YoroiWallet,
     SubstrateWallet,
     BlockchainWallet,
     MultiBitWallet,
@@ -10317,6 +10320,7 @@ static HelpTopic detect_help_topic(int argc, char** argv) {
         if (is_help_topic_arg(arg, "-copaywallet")) return HelpTopic::CopayWallet;
         if (is_help_topic_arg(arg, "-terrawallet")) return HelpTopic::TerraWallet;
         if (is_help_topic_arg(arg, "-bitshareswallet")) return HelpTopic::BitSharesWallet;
+        if (is_help_topic_arg(arg, "-yoroiwallet")) return HelpTopic::YoroiWallet;
         if (is_help_topic_arg(arg, "-substratewallet")) return HelpTopic::SubstrateWallet;
         if (is_help_topic_arg(arg, "-blockchainwallet")) return HelpTopic::BlockchainWallet;
         if (is_help_topic_arg(arg, "-multibitwallet")) return HelpTopic::MultiBitWallet;
@@ -10378,6 +10382,7 @@ static const char* help_topic_command(HelpTopic topic) {
     case HelpTopic::CopayWallet: return "-copaywallet";
     case HelpTopic::TerraWallet: return "-terrawallet";
     case HelpTopic::BitSharesWallet: return "-bitshareswallet";
+    case HelpTopic::YoroiWallet: return "-yoroiwallet";
     case HelpTopic::SubstrateWallet: return "-substratewallet";
     case HelpTopic::BlockchainWallet: return "-blockchainwallet";
     case HelpTopic::MultiBitWallet: return "-multibitwallet";
@@ -10472,6 +10477,7 @@ static void printHelpShort() {
 [!] -copaywallet                  Copay/BitPay SJCL backup password recovery.
 [!] -terrawallet                  Terra Station exported-key password recovery.
 [!] -bitshareswallet              BitShares 0.x exported-keys password recovery.
+[!] -yoroiwallet                  Yoroi IndexedDB / EMIP-3 password recovery.
 [!] -substratewallet              Substrate/Polkadot JSON PKCS8 recovery.
 [!] -electrumwallet               Electrum wallet password recovery.
 [!] -exodusseco                   Exodus SECO container recovery.
@@ -11504,6 +11510,7 @@ static bool helpTopicUsesWalletPasswordCommonSection(HelpTopic topic) {
     case HelpTopic::CopayWallet:
     case HelpTopic::TerraWallet:
     case HelpTopic::BitSharesWallet:
+    case HelpTopic::YoroiWallet:
     case HelpTopic::SubstrateWallet:
     case HelpTopic::BlockchainWallet:
     case HelpTopic::MultiBitWallet:
@@ -11822,6 +11829,67 @@ static void printHelpBitSharesWalletSection() {
 )HELP");
 }
 
+static void printHelpYoroiWalletSection() {
+    puts(R"HELP([!] MAIN MODE: -yoroiwallet  (Yoroi IndexedDB / EMIP-3 recovery)
+[!] ======================================================================
+[!] Purpose:
+[!] Recover passwords for Yoroi IndexedDB snapshots containing an encrypted
+[!] BIP32-Ed25519 root key. Every hit passes the EMIP-3 authentication tag and
+[!] exact CIP-1852 account extended-public-key regeneration.
+[!]
+[!] Inputs:
+[!] -yoroiwallet FILE1 ...       Load one or more IndexedDB JSON snapshots.
+[!] -yoroiwallet -f DIR          Recursively scan .json/no-extension files.
+[!] Required tables: Key and KeyDerivation. The loader follows the exact
+[!] 1852'/1815'/account' chain from an encrypted root to an account xpub.
+[!] Duplicate encrypted-root/account pairs are computed once.
+[!]
+[!] Supported profile:
+[!] PBKDF2-HMAC-SHA512(password, salt32, 19162) -> 32-byte key;
+[!] ChaCha20-Poly1305 with nonce12, tag16, empty AAD and a 96-byte root xprv.
+[!] The decrypted root is accepted only if hardened CIP-1852 derivation
+[!] reproduces both the 32-byte account public key and 32-byte chain code.
+[!]
+[!] Password candidates:
+[!] -i FILE                       Dictionary/password list, repeatable.
+[!] -hex                          Dictionary lines are exact hex bytes.
+[!] -mask MASK / -mask-file FILE  GPU mask candidates.
+[!] -cs1/-cs2/-cs3/-cs4 CHARS     Custom mask charsets.
+[!] -start HEX [-end HEX]         Raw byte range, length-major, up to 127 bytes.
+[!] -n N                          Optional active candidate/window cap.
+[!]
+[!] GPU / memory:
+[!] -wallet-mem auto|all|NN%|SIZE Hard unified-memory working-set budget.
+[!] -device LIST                  Split candidate ordinals without gaps/overlap.
+[!] Targets sharing salt/iterations reuse one grouped PBKDF2 result. Large
+[!] snapshots use compact metadata and a pooled ciphertext allocation.
+[!]
+[!] Statistics:
+[!] SpeedThreadFunc is the only statistics printer.
+[!] KDF/s counts completed password/KDF-group jobs after Metal completion.
+[!] Verify/s counts authenticated decrypt-and-derive checks; target count is
+[!] never used as an artificial speed multiplier.
+[!]
+[!] Output:
+[!] YOROIWALLET:<file#root/account>:PASSWORD:<password>:
+[!] ROOT_XPRV:<192hex>:PROFILE:yoroi-emip3-pbkdf2-sha512-chacha20poly1305
+[!]
+[!] Examples:
+[!] ./METAL_CRYPTO_TOOLKIT -yoroiwallet yoroi-indexeddb.json \
+[!]   -i passwords.txt -wallet-mem auto -save
+[!] ./METAL_CRYPTO_TOOLKIT -yoroiwallet -f yoroi_snapshots \
+[!]   -mask "?a?a?a?a?a?a?a?a" -wallet-mem all -device 0 \
+[!]   -save -o yoroi_found.txt
+[!]
+[!] Limitations:
+[!] Only versioned IndexedDB records matching the EMIP-3 root-key layout and
+[!] an exact CIP-1852 derivation chain are accepted. Mnemonic recovery, hardware
+[!] signers, watch-only roots and unknown future containers are rejected before
+[!] GPU work. No-match completion returns success; CLI/runtime errors return
+[!] nonzero.
+)HELP");
+}
+
 static void printHelpSubstrateWalletSection() {
     puts(R"HELP([!] MAIN MODE: -substratewallet  (Substrate / Polkadot JSON wallet recovery)
 [!] ======================================================================
@@ -11906,6 +11974,9 @@ static void printHelpModeSection(HelpTopic topic) {
         break;
     case HelpTopic::BitSharesWallet:
         printHelpBitSharesWalletSection();
+        break;
+    case HelpTopic::YoroiWallet:
+        printHelpYoroiWalletSection();
         break;
     case HelpTopic::SubstrateWallet:
         printHelpSubstrateWalletSection();
@@ -15286,7 +15357,7 @@ int main(int argc, char** argv)
         return 1;
     }
     return ((BIP38_MODE || COPAYWALLET_MODE || TERRAWALLET_MODE ||
-             BITSHARESWALLET_MODE) &&
+             BITSHARESWALLET_MODE || YOROIWALLET_MODE) &&
             metalStatus != metalSuccess) ? 1 : 0;
 }
 
@@ -15518,6 +15589,15 @@ bool readArgs(int argc, char** argv) {
         }
         if (strcmp(argv[a], "-bitshareswallet") == 0) {
             BITSHARESWALLET_MODE = true;
+            a++;
+            while (a < argc && !wallet_is_flag_token(argv[a])) {
+                wallet_artifact_files.push_back(string(argv[a]));
+                a++;
+            }
+            continue;
+        }
+        if (strcmp(argv[a], "-yoroiwallet") == 0) {
+            YOROIWALLET_MODE = true;
             a++;
             while (a < argc && !wallet_is_flag_token(argv[a])) {
                 wallet_artifact_files.push_back(string(argv[a]));
@@ -18722,6 +18802,7 @@ bool readArgs(int argc, char** argv) {
         (COPAYWALLET_MODE ? 1 : 0) +
         (TERRAWALLET_MODE ? 1 : 0) +
         (BITSHARESWALLET_MODE ? 1 : 0) +
+        (YOROIWALLET_MODE ? 1 : 0) +
         (SUBSTRATEWALLET_MODE ? 1 : 0) +
         (BLOCKCHAINWALLET_MODE ? 1 : 0) +
         (MULTIBITWALLET_MODE ? 1 : 0) +
@@ -18817,9 +18898,9 @@ bool readArgs(int argc, char** argv) {
     }
     if (wallet_memory_explicit && !BIP38_MODE && !SUBSTRATEWALLET_MODE &&
         !COPAYWALLET_MODE && !TERRAWALLET_MODE &&
-        !BITSHARESWALLET_MODE &&
+        !BITSHARESWALLET_MODE && !YOROIWALLET_MODE &&
         !MNEMONIC_SCRAMBLE_MODE) {
-        std::cerr << "[!] Error: -wallet-mem is not enabled for this wallet mode yet; it is supported by -bip38, -copaywallet, -terrawallet, -bitshareswallet, -substratewallet and -mnemonic -scramble [!]" << std::endl;
+        std::cerr << "[!] Error: -wallet-mem is not enabled for this wallet mode yet; it is supported by -bip38, -copaywallet, -terrawallet, -bitshareswallet, -yoroiwallet, -substratewallet and -mnemonic -scramble [!]" << std::endl;
         return false;
     }
     if ((!mnemonic_scramble_pattern.empty() ||
@@ -21205,6 +21286,7 @@ bool checkDevice() {
                 else if (COPAYWALLET_MODE) tuneProfile = "copaywallet";
                 else if (TERRAWALLET_MODE) tuneProfile = "terrawallet";
                 else if (BITSHARESWALLET_MODE) tuneProfile = "bitshareswallet";
+                else if (YOROIWALLET_MODE) tuneProfile = "yoroiwallet";
                 else tuneProfile = "browservault";
             }
             else if (ELECTRUMWALLET_MODE) {
@@ -25211,6 +25293,70 @@ static bool wallet_json_get_u32(const std::string& json, const std::string& key,
     return true;
 }
 
+static bool wallet_json_get_bool(
+    const std::string& json,
+    const std::string& key,
+    bool& out)
+{
+    const std::string pattern = "\"" + key + "\"";
+    size_t position = json.find(pattern);
+    if (position == std::string::npos) return false;
+    position = json.find(':', position + pattern.size());
+    if (position == std::string::npos) return false;
+    ++position;
+    while (position < json.size() &&
+           std::isspace(static_cast<unsigned char>(json[position]))) {
+        ++position;
+    }
+    if (json.compare(position, 4u, "true") == 0) {
+        out = true;
+        return true;
+    }
+    if (json.compare(position, 5u, "false") == 0) {
+        out = false;
+        return true;
+    }
+    return false;
+}
+
+static bool wallet_json_get_optional_u32(
+    const std::string& json,
+    const std::string& key,
+    bool& present,
+    uint32_t& out)
+{
+    const std::string pattern = "\"" + key + "\"";
+    size_t position = json.find(pattern);
+    if (position == std::string::npos) return false;
+    position = json.find(':', position + pattern.size());
+    if (position == std::string::npos) return false;
+    ++position;
+    while (position < json.size() &&
+           std::isspace(static_cast<unsigned char>(json[position]))) {
+        ++position;
+    }
+    if (json.compare(position, 4u, "null") == 0) {
+        present = false;
+        out = 0u;
+        return true;
+    }
+    if (position >= json.size() ||
+        !std::isdigit(static_cast<unsigned char>(json[position]))) {
+        return false;
+    }
+    char* end = nullptr;
+    errno = 0;
+    const unsigned long value =
+        std::strtoul(json.c_str() + position, &end, 10);
+    if (errno != 0 || end == json.c_str() + position ||
+        value > std::numeric_limits<uint32_t>::max()) {
+        return false;
+    }
+    present = true;
+    out = static_cast<uint32_t>(value);
+    return true;
+}
+
 static bool wallet_json_get_u32_from(const std::string& json, const std::string& key, size_t start, size_t max_span, uint32_t& out) {
     const std::string pat = "\"" + key + "\"";
     size_t p = json.find(pat, start);
@@ -27883,6 +28029,277 @@ static bool wallet_parse_bitshareswallet_file(
         path, text, targets, seen, err);
 }
 
+struct YoroiIndexedDbKeyRecord {
+    uint32_t key_id = 0u;
+    uint32_t type = 0u;
+    bool encrypted = false;
+    std::vector<uint8_t> bytes;
+};
+
+struct YoroiIndexedDbDerivationRecord {
+    uint32_t derivation_id = 0u;
+    bool has_private_key = false;
+    uint32_t private_key_id = 0u;
+    bool has_public_key = false;
+    uint32_t public_key_id = 0u;
+    bool has_parent = false;
+    uint32_t parent = 0u;
+    bool has_index = false;
+    uint32_t index = 0u;
+};
+
+static bool wallet_parse_yoroiwallet_text(
+    const std::string& source,
+    const std::string& input,
+    std::vector<BrowserVaultHostTarget>& targets,
+    std::unordered_set<std::string>& seen,
+    std::string& err)
+{
+    const std::string json = wallet_trim_copy(input);
+    if (json.empty() || json.front() != '{' || json.back() != '}') {
+        err = "Yoroi IndexedDB input must be a JSON object";
+        return false;
+    }
+
+    std::string keys_json;
+    std::string derivations_json;
+    if (!wallet_json_get_array(json, "Key", keys_json) ||
+        !wallet_json_get_array(
+            json, "KeyDerivation", derivations_json)) {
+        err = "missing Key/KeyDerivation IndexedDB tables";
+        return false;
+    }
+
+    std::vector<std::string> key_objects;
+    std::vector<std::string> derivation_objects;
+    if (!wallet_json_parse_object_array(keys_json, key_objects) ||
+        !wallet_json_parse_object_array(
+            derivations_json, derivation_objects) ||
+        key_objects.empty() || derivation_objects.empty()) {
+        err = "Key/KeyDerivation must be non-empty object arrays";
+        return false;
+    }
+
+    std::unordered_map<uint32_t, YoroiIndexedDbKeyRecord> keys;
+    for (const std::string& object : key_objects) {
+        std::string value;
+        if (!wallet_json_get_object(object, "value", value)) {
+            err = "Key entry is missing its value object";
+            return false;
+        }
+        uint32_t key_id = 0u;
+        uint32_t type = 0u;
+        if (!wallet_json_get_u32(value, "KeyId", key_id) ||
+            !wallet_json_get_u32(value, "Type", type)) {
+            err = "Key value is missing KeyId/Type";
+            return false;
+        }
+        if (type != 0u) {
+            continue;
+        }
+        std::string hash_hex;
+        bool encrypted = false;
+        if (!wallet_json_get_string(value, "Hash", hash_hex) ||
+            !wallet_json_get_bool(
+                value, "IsEncrypted", encrypted)) {
+            err = "BIP32-Ed25519 Key is missing Hash/IsEncrypted";
+            return false;
+        }
+        std::vector<uint8_t> bytes;
+        if (!wallet_hex_to_bytes(hash_hex, bytes, err)) {
+            err = "invalid Yoroi Key.Hash: " + err;
+            return false;
+        }
+        const size_t expected_size = encrypted ? 156u : 64u;
+        if (bytes.size() != expected_size) {
+            err = encrypted
+                ? "encrypted Yoroi root must be 156 EMIP-3 bytes"
+                : "Yoroi account xpub must be 64 bytes";
+            return false;
+        }
+        YoroiIndexedDbKeyRecord record;
+        record.key_id = key_id;
+        record.type = type;
+        record.encrypted = encrypted;
+        record.bytes = std::move(bytes);
+        if (!keys.emplace(key_id, std::move(record)).second) {
+            err = "duplicate Yoroi KeyId";
+            return false;
+        }
+    }
+    if (keys.empty()) {
+        err = "no BIP32-Ed25519 Key records";
+        return false;
+    }
+
+    std::unordered_map<uint32_t, YoroiIndexedDbDerivationRecord>
+        derivations;
+    for (const std::string& object : derivation_objects) {
+        std::string value;
+        if (!wallet_json_get_object(object, "value", value)) {
+            err = "KeyDerivation entry is missing its value object";
+            return false;
+        }
+        YoroiIndexedDbDerivationRecord record;
+        if (!wallet_json_get_u32(
+                value, "KeyDerivationId", record.derivation_id) ||
+            !wallet_json_get_optional_u32(
+                value, "PrivateKeyId",
+                record.has_private_key, record.private_key_id) ||
+            !wallet_json_get_optional_u32(
+                value, "PublicKeyId",
+                record.has_public_key, record.public_key_id) ||
+            !wallet_json_get_optional_u32(
+                value, "Parent",
+                record.has_parent, record.parent) ||
+            !wallet_json_get_optional_u32(
+                value, "Index",
+                record.has_index, record.index)) {
+            err = "malformed Yoroi KeyDerivation value";
+            return false;
+        }
+        if (!derivations.emplace(
+                record.derivation_id, record).second) {
+            err = "duplicate Yoroi KeyDerivationId";
+            return false;
+        }
+    }
+
+    size_t added = 0u;
+    for (const auto& root_pair : derivations) {
+        const YoroiIndexedDbDerivationRecord& root =
+            root_pair.second;
+        if (!root.has_private_key ||
+            root.has_parent || root.has_index) {
+            continue;
+        }
+        const auto root_key_it = keys.find(root.private_key_id);
+        if (root_key_it == keys.end() ||
+            !root_key_it->second.encrypted) {
+            continue;
+        }
+        const std::vector<uint8_t>& emip3 =
+            root_key_it->second.bytes;
+
+        for (const auto& purpose_pair : derivations) {
+            const YoroiIndexedDbDerivationRecord& purpose =
+                purpose_pair.second;
+            if (!purpose.has_parent ||
+                purpose.parent != root.derivation_id ||
+                !purpose.has_index ||
+                purpose.index != 0x8000073cu) {
+                continue;
+            }
+            for (const auto& coin_pair : derivations) {
+                const YoroiIndexedDbDerivationRecord& coin =
+                    coin_pair.second;
+                if (!coin.has_parent ||
+                    coin.parent != purpose.derivation_id ||
+                    !coin.has_index ||
+                    coin.index != 0x80000717u) {
+                    continue;
+                }
+                for (const auto& account_pair : derivations) {
+                    const YoroiIndexedDbDerivationRecord& account =
+                        account_pair.second;
+                    if (!account.has_parent ||
+                        account.parent != coin.derivation_id ||
+                        !account.has_index ||
+                        (account.index & 0x80000000u) == 0u ||
+                        !account.has_public_key) {
+                        continue;
+                    }
+                    const auto account_key_it =
+                        keys.find(account.public_key_id);
+                    if (account_key_it == keys.end() ||
+                        account_key_it->second.encrypted ||
+                        account_key_it->second.bytes.size() != 64u) {
+                        continue;
+                    }
+                    const std::vector<uint8_t>& account_xpub =
+                        account_key_it->second.bytes;
+                    std::vector<uint8_t> identity = emip3;
+                    identity.insert(
+                        identity.end(),
+                        account_xpub.begin(), account_xpub.end());
+                    identity.push_back(
+                        static_cast<uint8_t>(account.index));
+                    identity.push_back(
+                        static_cast<uint8_t>(account.index >> 8u));
+                    identity.push_back(
+                        static_cast<uint8_t>(account.index >> 16u));
+                    identity.push_back(
+                        static_cast<uint8_t>(account.index >> 24u));
+                    std::vector<uint8_t> nonce(
+                        emip3.begin() + 32,
+                        emip3.begin() + 44);
+                    std::vector<uint8_t> salt(
+                        emip3.begin(), emip3.begin() + 32);
+                    const std::string key =
+                        wallet_browser_vault_key(
+                            identity, nonce, salt, 19162u,
+                            BROWSERVAULT_PROFILE_YOROI_EMIP3);
+                    if (!seen.insert(key).second) {
+                        continue;
+                    }
+
+                    BrowserVaultHostTarget target;
+                    target.file = source + "#root=" +
+                        std::to_string(root.private_key_id) +
+                        "/account=" +
+                        std::to_string(
+                            account.index & 0x7fffffffu);
+                    target.dev.profile =
+                        BROWSERVAULT_PROFILE_YOROI_EMIP3;
+                    target.dev.iterations = 19162u;
+                    target.dev.salt_len = 32u;
+                    target.dev.iv_len = 12u;
+                    target.dev.ciphertext_len = 96u;
+                    target.dev.key_kind = account.index;
+                    target.dev.expected_public_len = 32u;
+                    std::memcpy(
+                        target.dev.salt, emip3.data(), 32u);
+                    std::memcpy(
+                        target.dev.salt + 32u,
+                        account_xpub.data() + 32u, 32u);
+                    std::memcpy(
+                        target.dev.iv, emip3.data() + 32u, 12u);
+                    std::memcpy(
+                        target.dev.tag, emip3.data() + 44u, 16u);
+                    std::memcpy(
+                        target.dev.expected_public,
+                        account_xpub.data(), 32u);
+                    target.ciphertext.assign(
+                        emip3.begin() + 60u, emip3.end());
+                    wallet_browser_vault_hash(
+                        identity, nonce, salt, 19162u,
+                        BROWSERVAULT_PROFILE_YOROI_EMIP3,
+                        target.dev.vault_hash);
+                    targets.push_back(std::move(target));
+                    ++added;
+                }
+            }
+        }
+    }
+    if (added == 0u) {
+        err = "no encrypted root with exact 1852'/1815'/account' xpub chain";
+        return false;
+    }
+    return true;
+}
+
+static bool wallet_parse_yoroiwallet_file(
+    const std::string& path,
+    std::vector<BrowserVaultHostTarget>& targets,
+    std::unordered_set<std::string>& seen,
+    std::string& err)
+{
+    std::string text;
+    if (!mac_read_text_file(path, text, err)) return false;
+    return wallet_parse_yoroiwallet_text(
+        path, text, targets, seen, err);
+}
+
 static uint32_t wallet_substrate_load_le32(const uint8_t* bytes)
 {
     return static_cast<uint32_t>(bytes[0]) |
@@ -30097,6 +30514,30 @@ static BrowserVaultLoadFileResult wallet_load_one_bitshareswallet_file(
     result.skipped = !result.loaded;
     if (result.skipped && result.err.empty()) {
         result.err = "no usable BitShares 0.x exported key";
+    }
+    return result;
+}
+
+static BrowserVaultLoadFileResult wallet_load_one_yoroiwallet_file(
+    const std::string& path)
+{
+    BrowserVaultLoadFileResult result;
+    result.path = path;
+    if (!mac_is_regular_file(path)) {
+        result.skipped = true;
+        result.err = "not a regular file";
+        return result;
+    }
+    std::unordered_set<std::string> local_seen;
+    if (!wallet_parse_yoroiwallet_file(
+            path, result.targets, local_seen, result.err)) {
+        result.skipped = true;
+        return result;
+    }
+    result.loaded = !result.targets.empty();
+    result.skipped = !result.loaded;
+    if (result.skipped && result.err.empty()) {
+        result.err = "no usable Yoroi EMIP-3 root";
     }
     return result;
 }
@@ -33387,7 +33828,8 @@ static void wallet_update_browser_mode_progress(
     const uint64_t readback_ns)
 {
     if (!BIP38_MODE && !SUBSTRATEWALLET_MODE && !COPAYWALLET_MODE &&
-        !TERRAWALLET_MODE && !BITSHARESWALLET_MODE) {
+        !TERRAWALLET_MODE && !BITSHARESWALLET_MODE &&
+        !YOROIWALLET_MODE) {
         return;
     }
     uint64_t solved = 0ull;
@@ -51128,6 +51570,7 @@ metalError_t processMetalBrowserVault()
     const bool copay_mode = COPAYWALLET_MODE;
     const bool terra_mode = TERRAWALLET_MODE;
     const bool bitshares_mode = BITSHARESWALLET_MODE;
+    const bool yoroi_mode = YOROIWALLET_MODE;
     const bool stellar_mode = STELLARWALLET_MODE;
     const bool blockchain_mode = BLOCKCHAINWALLET_MODE;
     const bool multibit_mode = MULTIBITWALLET_MODE;
@@ -51148,13 +51591,14 @@ metalError_t processMetalBrowserVault()
     if (bip38_mode) { mode_name = "BIP38"; mode_lc = "bip38"; }
     if (terra_mode) { mode_name = "TERRAWALLET"; mode_lc = "terrawallet"; }
     if (bitshares_mode) { mode_name = "BITSHARESWALLET"; mode_lc = "bitshareswallet"; }
+    if (yoroi_mode) { mode_name = "YOROIWALLET"; mode_lc = "yoroiwallet"; }
     if (copay_mode) { mode_name = "COPAYWALLET"; mode_lc = "copaywallet"; }
     if (substrate_mode) { mode_name = "SUBSTRATEWALLET"; mode_lc = "substratewallet"; }
     const std::vector<std::string> scan_exts = (blockchain_mode || dogechain_mode || ethpresale_mode || bip38_mode || bisq_mode || android_mode)
         ? std::vector<std::string>{ ".txt", ".hash", ".json", ".wallet", "" }
         : (multibit_mode
             ? std::vector<std::string>{ ".txt", ".hash", ".key", ".wallet", "" }
-        : ((substrate_mode || copay_mode || bitshares_mode)
+        : ((substrate_mode || copay_mode || bitshares_mode || yoroi_mode)
             ? std::vector<std::string>{ ".json", "" }
         : (terra_mode
             ? std::vector<std::string>{ ".json", ".txt", "" }
@@ -51192,6 +51636,11 @@ metalError_t processMetalBrowserVault()
     else if (bitshares_mode) {
         wallet_parallel_load_files(
             files, mode_lc, load_results, wallet_load_one_bitshareswallet_file);
+    }
+    else if (yoroi_mode) {
+        wallet_parallel_load_files(
+            files, mode_lc, load_results,
+            wallet_load_one_yoroiwallet_file);
     }
     else if (blockchain_mode) {
         wallet_parallel_load_files(files, mode_lc, load_results, wallet_load_one_blockchainwallet_file);
@@ -51286,6 +51735,7 @@ metalError_t processMetalBrowserVault()
     size_t copay_sjcl_targets = 0u;
     size_t terra_station_targets = 0u;
     size_t bitshares_0x_targets = 0u;
+    size_t yoroi_emip3_targets = 0u;
     size_t atomic_cryptojs_targets = 0u;
     size_t stellar_targets = 0u;
     size_t blockchain_targets = 0u;
@@ -51346,6 +51796,10 @@ metalError_t processMetalBrowserVault()
         else if (t.dev.profile ==
                  BROWSERVAULT_PROFILE_BITSHARES_0X_AES_CBC) {
             ++bitshares_0x_targets;
+        }
+        else if (t.dev.profile ==
+                 BROWSERVAULT_PROFILE_YOROI_EMIP3) {
+            ++yoroi_emip3_targets;
         }
         else if (t.dev.profile == BROWSERVAULT_PROFILE_ATOMIC_CRYPTOJS_AES) {
             ++atomic_cryptojs_targets;
@@ -51444,8 +51898,8 @@ metalError_t processMetalBrowserVault()
     printf("[!] starting %s mode [!]\n", mode_name);
     printf("[!] loaded %s targets: %zu [!]\n", mode_lc, targets.size());
     counterWalletActiveTargets = static_cast<uint64_t>(targets.size());
-    printf("[!] %s profiles: metamask=%zu phantom_pbkdf2=%zu phantom_scrypt=%zu substrate_v3=%zu substrate_v2=%zu copay_sjcl=%zu terra_station=%zu bitshares_0x=%zu atomic_cryptojs=%zu stellar=%zu blockchain=%zu multibit_md5=%zu multibit_hd=%zu multibit_scrypt=%zu bisq=%zu bip38_non_ec=%zu bip38_ec=%zu dogechain=%zu android_backup=%zu ethpresale=%zu [!]\n",
-        mode_lc, metamask_targets, phantom_pbkdf2_targets, phantom_scrypt_targets, substrate_scrypt_targets, substrate_legacy_targets, copay_sjcl_targets, terra_station_targets, bitshares_0x_targets, atomic_cryptojs_targets, stellar_targets, blockchain_targets,
+    printf("[!] %s profiles: metamask=%zu phantom_pbkdf2=%zu phantom_scrypt=%zu substrate_v3=%zu substrate_v2=%zu copay_sjcl=%zu terra_station=%zu bitshares_0x=%zu yoroi_emip3=%zu atomic_cryptojs=%zu stellar=%zu blockchain=%zu multibit_md5=%zu multibit_hd=%zu multibit_scrypt=%zu bisq=%zu bip38_non_ec=%zu bip38_ec=%zu dogechain=%zu android_backup=%zu ethpresale=%zu [!]\n",
+        mode_lc, metamask_targets, phantom_pbkdf2_targets, phantom_scrypt_targets, substrate_scrypt_targets, substrate_legacy_targets, copay_sjcl_targets, terra_station_targets, bitshares_0x_targets, yoroi_emip3_targets, atomic_cryptojs_targets, stellar_targets, blockchain_targets,
         multibit_classic_md5_targets, multibit_hd_scrypt_targets, multibit_classic_scrypt_targets, bisq_targets, bip38_non_ec_targets, bip38_ec_targets, dogechain_targets, android_backup_targets, ethpresale_targets);
     printf("[!] %s KDF groups: %zu [saved %.2fx KDF work, singletons=%zu, max_group=%u] [!]\n",
         mode_lc,
@@ -51470,7 +51924,7 @@ metalError_t processMetalBrowserVault()
     uint64_t wallet_scratch_hard_cap = std::numeric_limits<uint64_t>::max();
     if ((browservault_has_scrypt &&
          (bip38_mode || substrate_mode || wallet_memory_explicit)) ||
-        copay_mode || terra_mode || bitshares_mode) {
+        copay_mode || terra_mode || bitshares_mode || yoroi_mode) {
         std::vector<modeinfra::MemoryDeviceInfo> memory_devices;
         memory_devices.reserve(g_gpu_contexts.size());
         for (const GpuRuntimeContext& context : g_gpu_contexts) {
@@ -51540,7 +51994,7 @@ metalError_t processMetalBrowserVault()
     bool wallet_progress_active = false;
     uint64_t wallet_working_set_bytes = 0ull;
     if (bip38_mode || substrate_mode || copay_mode || terra_mode ||
-        bitshares_mode) {
+        bitshares_mode || yoroi_mode) {
         modeinfra::ModeProgress& progress = modeinfra::global_mode_progress();
         progress.begin(mode_name, modeinfra::ProgressUnit::Kdf,
                        modeinfra::ProgressPhase::Build);
@@ -51669,7 +52123,7 @@ metalError_t processMetalBrowserVault()
                 static_cast<unsigned long long>(concurrency));
         }
         if (bip38_mode || substrate_mode || copay_mode || terra_mode ||
-            bitshares_mode) {
+            bitshares_mode || yoroi_mode) {
             const uint64_t fixed_bytes =
                 static_cast<uint64_t>(targets.size()) * sizeof(BrowserVaultDeviceTarget) +
                 static_cast<uint64_t>(groups.size()) * sizeof(BrowserVaultGroup) +
@@ -51688,7 +52142,7 @@ metalError_t processMetalBrowserVault()
 
     {
         if (bip38_mode || substrate_mode || copay_mode || terra_mode ||
-            bitshares_mode) {
+            bitshares_mode || yoroi_mode) {
             modeinfra::ModeProgress& progress = modeinfra::global_mode_progress();
             progress.set_allocated_working_set(wallet_working_set_bytes);
             progress.set_phase(modeinfra::ProgressPhase::Search);

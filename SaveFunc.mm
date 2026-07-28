@@ -3801,6 +3801,7 @@ static inline std::string wallet_payload_hex(const WalletModeResult& r) {
 
 static constexpr uint8_t BROWSERVAULT_PROFILE_TERRA_STATION_AES_CBC = 34u;
 static constexpr uint8_t BROWSERVAULT_PROFILE_BITSHARES_0X_AES_CBC = 35u;
+static constexpr uint8_t BROWSERVAULT_PROFILE_YOROI_EMIP3 = 36u;
 
 static inline const char* wallet_browser_profile_name(uint8_t profile) {
 	switch (profile) {
@@ -3824,6 +3825,7 @@ static inline const char* wallet_browser_profile_name(uint8_t profile) {
 	case BROWSERVAULT_PROFILE_COPAY_SJCL_AES_CCM: return "copay-sjcl-pbkdf2-aes-ccm";
 	case BROWSERVAULT_PROFILE_TERRA_STATION_AES_CBC: return "terra-station-pbkdf2-sha1-aes-256-cbc";
 	case BROWSERVAULT_PROFILE_BITSHARES_0X_AES_CBC: return "bitshares-0x-exported-keys-sha512-aes-256-cbc";
+	case BROWSERVAULT_PROFILE_YOROI_EMIP3: return "yoroi-emip3-pbkdf2-sha512-chacha20poly1305";
 	default: return "unknown";
 	}
 }
@@ -3846,6 +3848,7 @@ static inline const char* wallet_browser_result_prefix(uint8_t profile) {
 	case BROWSERVAULT_PROFILE_COPAY_SJCL_AES_CCM: return "COPAYWALLET";
 	case BROWSERVAULT_PROFILE_TERRA_STATION_AES_CBC: return "TERRAWALLET";
 	case BROWSERVAULT_PROFILE_BITSHARES_0X_AES_CBC: return "BITSHARESWALLET";
+	case BROWSERVAULT_PROFILE_YOROI_EMIP3: return "YOROIWALLET";
 	default: return "BROWSERVAULT";
 	}
 }
@@ -3959,6 +3962,19 @@ METAL_HOST void SaveResultBrowserVault(FILE* file, uint32_t& Founds, bool save, 
 				":PASSWORD:" + wallet_result_password_label(r) +
 				":PRIV:" + build_hex_bytes_lower(r.priv, 32u) +
 				":PUBKEY:" + build_hex_bytes_lower(r.payload, 33u) +
+				":PROFILE:" + wallet_browser_profile_name(r.type);
+			wallet_append_found_line(file, Founds, save, line);
+			continue;
+		}
+		if (r.type == BROWSERVAULT_PROFILE_YOROI_EMIP3 &&
+			r.payload_len == 64u) {
+			const std::string root_xprv =
+				build_hex_bytes_lower(r.priv, 32u) +
+				build_hex_bytes_lower(r.payload, 64u);
+			const std::string line = std::string("YOROIWALLET:") +
+				wallet_result_target_label(target_files, r.target_index) +
+				":PASSWORD:" + wallet_result_password_label(r) +
+				":ROOT_XPRV:" + root_xprv +
 				":PROFILE:" + wallet_browser_profile_name(r.type);
 			wallet_append_found_line(file, Founds, save, line);
 			continue;

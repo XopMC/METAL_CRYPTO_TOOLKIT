@@ -8,6 +8,7 @@
 #define WALLET_MODE_BIP38 15u
 #define BROWSERVAULT_PROFILE_TERRA_STATION_AES_CBC 34u
 #define BROWSERVAULT_PROFILE_BITSHARES_0X_AES_CBC 35u
+#define BROWSERVAULT_PROFILE_YOROI_EMIP3 36u
 
 constant uint browser_vault_profile_specialization [[function_constant(92)]];
 static constant uint BROWSERVAULT_PROFILE_DYNAMIC = 0xffffffffu;
@@ -668,6 +669,174 @@ static inline void wallet_emit_bitshares_result(
     out.payload_len = 33u;
 }
 
+struct YoroiCardanoXprv {
+    uchar key[64];
+    uchar chain_code[32];
+};
+
+static inline void wallet_yoroi_store_le32(
+    thread uchar out[4],
+    uint value) {
+    out[0] = uchar(value);
+    out[1] = uchar(value >> 8u);
+    out[2] = uchar(value >> 16u);
+    out[3] = uchar(value >> 24u);
+}
+
+static inline void wallet_yoroi_add_256_le(
+    thread uchar out[32],
+    const thread uchar a[32],
+    const thread uchar b[32]) {
+    ushort carry = 0u;
+    for (uint i = 0u; i < 32u; ++i) {
+        const ushort value =
+            ushort(a[i]) + ushort(b[i]) + carry;
+        out[i] = uchar(value);
+        carry = ushort(value >> 8u);
+    }
+}
+
+static inline void wallet_yoroi_add_8mul_zl_le(
+    thread uchar out[32],
+    const thread uchar kl[32],
+    const thread uchar zl[32]) {
+    ushort carry = 0u;
+    for (uint i = 0u; i < 32u; ++i) {
+        ushort shifted = 0u;
+        if (i < 28u) {
+            shifted |= ushort((ushort(zl[i]) << 3u) & 0xffu);
+        }
+        if (i > 0u && (i - 1u) < 28u) {
+            shifted |= ushort(zl[i - 1u] >> 5u);
+        }
+        const ushort value = ushort(kl[i]) + shifted + carry;
+        out[i] = uchar(value);
+        carry = ushort(value >> 8u);
+    }
+}
+
+static inline void wallet_yoroi_ckd_hardened(
+    const thread YoroiCardanoXprv& parent,
+    thread YoroiCardanoXprv& child,
+    uint index) {
+    thread uchar index_le[4];
+    wallet_yoroi_store_le32(index_le, index);
+
+    thread uchar message[69];
+    message[0] = 0x00u;
+    for (uint i = 0u; i < 64u; ++i) {
+        message[1u + i] = parent.key[i];
+    }
+    for (uint i = 0u; i < 4u; ++i) {
+        message[65u + i] = index_le[i];
+    }
+    thread uchar z[64];
+    HMAC_SHA512(
+        parent.chain_code, 32ul, message, 69ul, z);
+
+    message[0] = 0x01u;
+    thread uchar next_chain[64];
+    HMAC_SHA512(
+        parent.chain_code, 32ul, message, 69ul, next_chain);
+
+    wallet_yoroi_add_8mul_zl_le(child.key, parent.key, z);
+    wallet_yoroi_add_256_le(
+        child.key + 32u, parent.key + 32u, z + 32u);
+    for (uint i = 0u; i < 32u; ++i) {
+        child.chain_code[i] = next_chain[32u + i];
+    }
+}
+
+__attribute__((noinline)) static bool wallet_yoroi_emip3_verify(
+    const thread uchar key32[32],
+    const device BrowserVaultDeviceTarget& target,
+    const device uchar* ciphertext,
+    thread uchar root_xprv[96]) {
+    if (ciphertext == nullptr ||
+        target.iv_len != 12u ||
+        target.ciphertext_len != 96u ||
+        target.expected_public_len != 32u ||
+        (target.key_kind & 0x80000000u) == 0u) {
+        return false;
+    }
+
+    thread uchar nonce[12];
+    thread uchar encrypted[96];
+    for (uint i = 0u; i < 12u; ++i) nonce[i] = target.iv[i];
+    for (uint i = 0u; i < 96u; ++i) encrypted[i] = ciphertext[i];
+
+    thread uchar block0[64];
+    thread uchar actual_tag[16];
+    chacha20_block(key32, nonce, 0u, block0);
+    poly1305_aead_mac_empty_aad(
+        block0, encrypted, 96u, actual_tag);
+    uchar tag_diff = 0u;
+    for (uint i = 0u; i < 16u; ++i) {
+        tag_diff |= uchar(actual_tag[i] ^ target.tag[i]);
+    }
+    if (tag_diff != 0u) return false;
+
+    chacha20_encrypt(
+        key32, nonce, 1u, encrypted, root_xprv, 96u);
+    if ((root_xprv[0] & 0x07u) != 0u ||
+        (root_xprv[31] & 0x80u) != 0u ||
+        (root_xprv[31] & 0x40u) == 0u) {
+        return false;
+    }
+
+    thread YoroiCardanoXprv root;
+    thread YoroiCardanoXprv purpose;
+    thread YoroiCardanoXprv coin;
+    thread YoroiCardanoXprv account;
+    for (uint i = 0u; i < 64u; ++i) root.key[i] = root_xprv[i];
+    for (uint i = 0u; i < 32u; ++i) {
+        root.chain_code[i] = root_xprv[64u + i];
+    }
+    wallet_yoroi_ckd_hardened(root, purpose, 0x8000073cu);
+    wallet_yoroi_ckd_hardened(purpose, coin, 0x80000717u);
+    wallet_yoroi_ckd_hardened(coin, account, target.key_kind);
+
+    thread uchar account_public[32];
+    cardano_ed25519_publickey_from_scalar(
+        account.key, account_public);
+    uchar identity_diff = 0u;
+    for (uint i = 0u; i < 32u; ++i) {
+        identity_diff |= uchar(
+            account_public[i] ^ target.expected_public[i]);
+        identity_diff |= uchar(
+            account.chain_code[i] ^ target.salt[32u + i]);
+    }
+    return identity_diff == 0u;
+}
+
+static inline void wallet_emit_yoroi_result(
+    device bool* isResult,
+    device bool* buffResult,
+    const thread uchar* pass,
+    uint pass_len,
+    uint target_index,
+    const thread uchar root_xprv[96],
+    device WalletModeResult* wallet_results,
+    device atomic_uint* wallet_count,
+    uint max_founds) {
+    walletks_mark_hit(isResult, buffResult);
+    if (wallet_results == nullptr || wallet_count == nullptr) return;
+    const ulong result_index = wallet_atomic_add_count(
+        wallet_count, 1u);
+    if (result_index >= ulong(max_founds)) return;
+    device WalletModeResult& out = wallet_results[result_index];
+    wallet_zero_result(out);
+    out.mode = WALLET_MODE_BROWSERVAULT;
+    out.type = BROWSERVAULT_PROFILE_YOROI_EMIP3;
+    out.target_index = target_index;
+    walletks_copy_password(out, pass, pass_len);
+    for (uint i = 0u; i < 32u; ++i) out.priv[i] = root_xprv[i];
+    for (uint i = 0u; i < 64u; ++i) {
+        out.payload[i] = root_xprv[32u + i];
+    }
+    out.payload_len = 64u;
+}
+
 kernel void workerBrowserVaultGrouped(device bool* isResult [[buffer(0)]],
                                       device bool* buffResult [[buffer(1)]],
                                       constant secp256k1_ge_storage* precPtr [[buffer(2)]],
@@ -794,6 +963,15 @@ kernel void workerBrowserVaultGrouped(device bool* isResult [[buffer(0)]],
                 atomic_iv16[i] = digest64[32u + i];
             }
             atomic_key_ready = true;
+        } else if (group_profile ==
+                   BROWSERVAULT_PROFILE_YOROI_EMIP3) {
+            if (group.salt_len != 32u ||
+                group.iterations != 19162u) {
+                continue;
+            }
+            fastpbkdf2_hmac_sha512(
+                pass_local, ulong(pass_len),
+                group.salt, 32ul, 19162ul, key32, 32ul);
         } else if (group_profile == BROWSERVAULT_PROFILE_DOGECHAIN_PBKDF2_AES_CBC) {
             thread uchar pass_sha[32];
             thread uchar pass_b64[44];
@@ -885,6 +1063,18 @@ kernel void workerBrowserVaultGrouped(device bool* isResult [[buffer(0)]],
                     wallet_emit_bitshares_result(
                         isResult, buffResult, pass_local, pass_len,
                         target.target_index, priv32, public33,
+                        wallet_results, wallet_count, max_founds);
+                }
+                continue;
+            } else if (target_profile ==
+                       BROWSERVAULT_PROFILE_YOROI_EMIP3) {
+                thread uchar root_xprv[96];
+                if (wallet_yoroi_emip3_verify(
+                        key32, target, ciphertext, root_xprv)) {
+                    wallet_emit_yoroi_result(
+                        isResult, buffResult,
+                        pass_local, pass_len,
+                        target.target_index, root_xprv,
                         wallet_results, wallet_count, max_founds);
                 }
                 continue;
