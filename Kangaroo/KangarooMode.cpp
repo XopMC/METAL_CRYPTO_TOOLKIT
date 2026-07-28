@@ -433,6 +433,7 @@ constexpr std::uint32_t kMaxStepCount = 8192;
 constexpr std::uint32_t kDefaultStepCount = 1000;
 constexpr std::uint32_t kThreadgroupSize = 256;
 constexpr std::uint32_t kKangaroosPerThread = 16;
+constexpr std::uint32_t kWideKangaroosPerThread = 24;
 constexpr std::uint32_t kCompactSotaKangaroosPerThread = 8;
 constexpr std::uint32_t kDpCapacity = 256u * 1024u;
 constexpr std::uint32_t kCompactDpSlots = 32u;
@@ -2073,16 +2074,19 @@ std::uint32_t auto_kangaroo_count(const metalDeviceProp& properties,
                                   int range_bits,
                                   std::size_t selected_devices)
 {
+    const std::uint32_t occupancy_group_size =
+        range_bits <= 170 ? kKangaroosPerThread
+                          : kWideKangaroosPerThread;
     const std::uint64_t hardware =
         static_cast<std::uint64_t>(std::max(1, properties.multiProcessorCount)) *
-        kThreadgroupSize * kKangaroosPerThread;
+        kThreadgroupSize * occupancy_group_size;
     const long double expected = 1.15L * std::exp2(range_bits / 2.0L);
     const std::uint64_t useful = static_cast<std::uint64_t>(std::max<long double>(
         1024.0L,
         expected / std::max<std::size_t>(1u, selected_devices) / 64.0L));
     std::uint64_t count = std::min<std::uint64_t>(hardware, useful);
     const std::uint64_t alignment =
-        static_cast<std::uint64_t>(kThreadgroupSize) * kKangaroosPerThread;
+        static_cast<std::uint64_t>(kThreadgroupSize) * occupancy_group_size;
     count = std::max<std::uint64_t>(alignment, (count / alignment) * alignment);
     return static_cast<std::uint32_t>(std::min<std::uint64_t>(
         count, std::numeric_limits<std::uint32_t>::max()));
@@ -2189,9 +2193,12 @@ std::uint32_t multi_kangaroo_count(const metalDeviceProp& properties,
         walker_budget > kWalkerFixedReserve && per_walker != 0u
             ? (walker_budget - kWalkerFixedReserve) / per_walker
             : base;
+    const std::uint32_t occupancy_group_size =
+        range_bits <= 170 ? kKangaroosPerThread
+                          : kWideKangaroosPerThread;
     const std::uint64_t alignment =
         static_cast<std::uint64_t>(kThreadgroupSize) *
-        kKangaroosPerThread;
+        occupancy_group_size;
     const std::uint64_t maximum_aligned =
         (static_cast<std::uint64_t>(
              std::numeric_limits<std::uint32_t>::max()) /
@@ -2827,9 +2834,12 @@ SolveResult solve_points(const Options& options,
                 0u,
                 launch_index
             };
-            const std::uint32_t walk_group_size = context->compact170
-                ? kCompactSotaKangaroosPerThread
-                : kKangaroosPerThread;
+            const std::uint32_t walk_group_size =
+                context->compact170
+                    ? kCompactSotaKangaroosPerThread
+                    : (context->wide256
+                           ? kWideKangaroosPerThread
+                           : kKangaroosPerThread);
             const std::uint32_t walk_threads =
                 (context->kangaroo_count + walk_group_size - 1u) /
                 walk_group_size;
@@ -2838,13 +2848,14 @@ SolveResult solve_points(const Options& options,
             if (context->compact170 || context->wide256) {
                 const bool multi_target =
                     context->target_count > 1u;
-                const char* walk_kernel = context->compact170
-                    ? (multi_target
-                           ? "kangarooWalkCompact8Multi"
-                           : "kangarooWalkCompact8")
-                    : (multi_target
-                           ? "kangarooWalkCompactMulti"
-                           : "kangarooWalkCompact");
+                const char* walk_kernel =
+                    context->compact170
+                        ? (multi_target
+                               ? "kangarooWalkCompact8Multi"
+                               : "kangarooWalkCompact8")
+                        : (multi_target
+                               ? "kangarooWalkCompact24Multi"
+                               : "kangarooWalkCompact24");
                 if (!metal_ok(
                         metal_launch(walk_kernel,
                                      blocks,
