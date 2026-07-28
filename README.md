@@ -266,6 +266,26 @@ Wave 15 adds authenticated Yoroi IndexedDB / EMIP-3 recovery:
 - mnemonic recovery, hardware signers, watch-only roots, malformed tables,
   unauthenticated plaintext, and unknown future containers are rejected.
 
+Wave 16 adds checksum-first Monero mnemonic recovery:
+
+- `-monero` accepts repeatable 25-word legacy and 16-word Polyseed phrases or
+  line-oriented files; a standalone `?` marks one unknown whole word;
+- all official Monero legacy and Polyseed language lists are embedded, with
+  exact prefix matching, legacy CRC32 checksum pruning, and Polyseed
+  GF(2^11) checksum decoding before expensive derivation;
+- Metal derives the recovery key, canonical private spend/view scalars, and
+  both Ed25519 public keys once per candidate, then streams sorted target
+  tiles for exact lookup without multiplying KDF work by target count;
+- standard, integrated, and subaddress targets are checksum-validated, while
+  repeated targets retain every source occurrence and each hit is
+  independently re-derived with the official Monero ref10 host code;
+- `-wallet-mem` bounds the unified-memory working set, overflowed hit batches
+  replay without double credit, and only the common `SpeedThreadFunc` prints
+  completed `Candidate/s`, primitive work, and actual `Verify/s`;
+- encrypted Polyseed features, malformed phrases, unsupported address
+  prefixes, and merely checksum-valid phrases without an exact target match
+  are never reported as recovered wallets.
+
 A cross-wave PRNG compatibility update tracks the current CUDA catalog:
 
 - `-prng` now includes Ill Bloom generators `332..489` and modes `247..762`,
@@ -2808,6 +2828,56 @@ account xpub regeneration is mandatory. The common `SpeedThreadFunc` is the
 only live statistics printer; target count never inflates `KDF/s` or
 `Verify/s`.
 
+#### `-monero`
+
+This mode recovers Monero wallets from 25-word legacy mnemonics and 16-word
+Polyseed templates. Pass phrases directly through repeatable `-i`, or pass a
+text file containing one phrase per line. Empty lines and `#` comments are
+ignored. A standalone `?` represents one unknown complete word:
+
+```bash
+./METAL_CRYPTO_TOOLKIT -monero \
+  -i "amaze buffet cake entrance symptoms tiger lamb maze nestle python dusted faxed update vague zinger boxes ornament renting glass gained island nabbing afield calamity ?" \
+  -target 4... -monero-lang English -wallet-mem auto -save
+
+./METAL_CRYPTO_TOOLKIT -monero -i polyseed-templates.txt \
+  -target monero-targets.txt -wallet-mem all -device 0 \
+  -save -o monero_found.txt
+```
+
+`-target` is repeatable and accepts a standard, integrated, or subaddress
+string, a target file, or the expert exact form
+`SPEND_PUBLIC_HEX:VIEW_PUBLIC_HEX`. Addresses are decoded only after their
+network/type prefix and Keccak checksum pass. Duplicate public pairs are
+derived once, but every original source occurrence is retained in the result.
+
+The mode embeds all official Monero legacy and Polyseed language lists.
+`-monero-lang auto` selects an unambiguous list; use an explicit language for
+an all-unknown or otherwise ambiguous template. Legacy CRC32 and Polyseed
+GF(2^11) checksums reject candidates before GPU derivation. Encrypted Polyseed
+feature phrases are intentionally rejected by this recovery profile.
+
+Metal performs Polyseed PBKDF2-HMAC-SHA256 when required, scalar reduction,
+Keccak view-key derivation, and both Ed25519 base-point multiplications once
+per checksum-valid candidate. Large target sets are sorted and streamed as
+bounded exact-lookup tiles, so target count does not multiply the expensive
+derivation or the reported throughput. `-wallet-mem
+auto|all|NN%|SIZE` controls the complete unified-memory working set and `-n`
+sets an optional candidate-batch cap.
+
+Every GPU hit is reconstructed from its checked U256 ordinal and re-derived
+with the official Monero ref10 arithmetic on the host before output:
+
+```text
+MONERO_FOUND SCHEME:<legacy|polyseed> LANGUAGE:<name> TARGET:<source> MNEMONIC:<phrase> SPEND_PRIVATE:<64hex> VIEW_PRIVATE:<64hex> SPEND_PUBLIC:<64hex> VIEW_PUBLIC:<64hex>
+```
+
+The common `SpeedThreadFunc` is the only live statistics printer and reports
+credited `Candidate/s`, primitive operations, exact `Verify/s`, resident and
+logical targets, readback time, and the allocated working set. Search size is
+exponential in the number of unknown words; checksum pruning and GPU
+acceleration do not make arbitrary large unknown-word domains practical.
+
 #### `-substratewallet`
 
 This mode recovers passwords for versioned Polkadot/Substrate keyring JSON
@@ -3646,6 +3716,28 @@ EMIP-3:
   и реальные `Verify/s` печатает только общий `SpeedThreadFunc`;
 - mnemonic recovery, hardware signers, watch-only roots, нарушенные таблицы,
   неаутентифицированный plaintext и неизвестные контейнеры отклоняются.
+
+Волна 16 добавляет checksum-first восстановление mnemonic Monero:
+
+- `-monero` принимает повторяемые legacy-фразы из 25 слов и Polyseed из 16
+  слов напрямую либо из построчных файлов; отдельный `?` обозначает одно
+  неизвестное целое слово;
+- встроены все официальные списки языков Monero legacy и Polyseed с точным
+  prefix matching, предварительной проверкой legacy CRC32 и декодированием
+  checksum Polyseed в GF(2^11) до дорогой derivation;
+- Metal один раз на кандидата получает recovery key, канонические private
+  spend/view scalars и оба Ed25519 public keys, после чего потоково проверяет
+  отсортированные окна целей без умножения KDF-работы на их количество;
+- standard, integrated и subaddress цели принимаются только после проверки
+  checksum, повторные цели сохраняют все источники, а каждый hit независимо
+  пересчитывается официальной host-арифметикой Monero ref10;
+- `-wallet-mem` ограничивает весь working set unified memory, overflow hit
+  batch повторяется без двойного зачёта, а завершённые `Candidate/s`,
+  primitive work и реальные `Verify/s` печатает только общий
+  `SpeedThreadFunc`;
+- encrypted Polyseed features, нарушенные фразы, неподдерживаемые address
+  prefixes и просто checksum-valid фразы без точного совпадения с целью не
+  объявляются восстановленными кошельками.
 
 Межволновое обновление PRNG синхронизирует каталог с текущей CUDA-версией:
 
@@ -6208,6 +6300,56 @@ Mnemonic recovery, hardware signers, watch-only roots и неизвестные 
 контейнеры намеренно не входят в этот профиль. Проверка authentication tag и
 точное восстановление account xpub обязательны. Единственный live printer —
 общий `SpeedThreadFunc`; число целей не раздувает `KDF/s` или `Verify/s`.
+
+#### `-monero`
+
+Режим восстанавливает кошельки Monero из legacy mnemonic по 25 слов и
+16-словных шаблонов Polyseed. Фразы передаются повторяемым `-i` напрямую либо
+в текстовом файле по одной строке. Пустые строки и `#`-комментарии
+игнорируются. Отдельный `?` обозначает одно неизвестное целое слово:
+
+```bash
+./METAL_CRYPTO_TOOLKIT -monero \
+  -i "amaze buffet cake entrance symptoms tiger lamb maze nestle python dusted faxed update vague zinger boxes ornament renting glass gained island nabbing afield calamity ?" \
+  -target 4... -monero-lang English -wallet-mem auto -save
+
+./METAL_CRYPTO_TOOLKIT -monero -i polyseed-templates.txt \
+  -target monero-targets.txt -wallet-mem all -device 0 \
+  -save -o monero_found.txt
+```
+
+Повторяемый `-target` принимает standard, integrated или subaddress, файл
+целей либо экспертную точную форму
+`SPEND_PUBLIC_HEX:VIEW_PUBLIC_HEX`. Адрес декодируется только после проверки
+network/type prefix и Keccak checksum. Одинаковая public-пара вычисляется
+один раз, но в результате сохраняются все исходные occurrences.
+
+Режим содержит все официальные языковые списки Monero legacy и Polyseed.
+`-monero-lang auto` выбирает однозначный список; для полностью неизвестного
+или неоднозначного шаблона следует указать язык явно. Legacy CRC32 и checksum
+Polyseed в GF(2^11) отсеивают кандидатов до GPU derivation. Зашифрованные
+feature-фразы Polyseed намеренно не входят в этот recovery profile.
+
+Metal выполняет PBKDF2-HMAC-SHA256 для Polyseed, reduction scalar,
+Keccak-derivation view key и оба Ed25519 base-point multiplication один раз на
+checksum-valid кандидата. Большие наборы целей сортируются и обрабатываются
+ограниченными точными окнами, поэтому их количество не умножает дорогую
+derivation и отображаемую скорость. `-wallet-mem auto|all|NN%|SIZE`
+управляет полным working set unified memory, а `-n` задаёт дополнительный
+предел candidate batch.
+
+Каждый GPU hit восстанавливается по checked U256 ordinal и независимо
+пересчитывается официальной арифметикой Monero ref10 на host:
+
+```text
+MONERO_FOUND SCHEME:<legacy|polyseed> LANGUAGE:<name> TARGET:<source> MNEMONIC:<phrase> SPEND_PRIVATE:<64hex> VIEW_PRIVATE:<64hex> SPEND_PUBLIC:<64hex> VIEW_PUBLIC:<64hex>
+```
+
+Единственный live printer — общий `SpeedThreadFunc`: он выводит зачтённые
+`Candidate/s`, primitive operations, реальные `Verify/s`, resident/logical
+targets, readback time и выделенный working set. Пространство растёт
+экспоненциально с числом неизвестных слов; checksum pruning и GPU не делают
+произвольно большие domains практически выполнимыми.
 
 #### `-substratewallet`
 

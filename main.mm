@@ -24,6 +24,7 @@
 #include "HdPath/HdPathMode.h"
 #include "Hamming/HammingMode.h"
 #include "WarpWallet/WarpWalletMode.h"
+#include "Monero/MoneroMode.h"
 #include "Brain/BrainInput.h"
 #include "Kernels/ProfanityHost.h"
 #include "Kernels/WalletModesHost.h"
@@ -8149,6 +8150,7 @@ enum class HelpTopic {
     PrivRecovery,
     Hamming,
     WarpWallet,
+    Monero,
     Kangaroo,
     Bsgs,
     KeyRepair,
@@ -10278,6 +10280,7 @@ static HelpTopic detect_help_topic(int argc, char** argv) {
         }
         if (is_help_topic_arg(arg, "-hamming")) return HelpTopic::Hamming;
         if (is_help_topic_arg(arg, "-warpwallet")) return HelpTopic::WarpWallet;
+        if (is_help_topic_arg(arg, "-monero")) return HelpTopic::Monero;
         if (is_help_topic_arg(arg, "-kangaroo")) return HelpTopic::Kangaroo;
         if (is_help_topic_arg(arg, "-bsgs")) return HelpTopic::Bsgs;
         if (is_help_topic_arg(arg, "-keyrepair")) return HelpTopic::KeyRepair;
@@ -10353,6 +10356,7 @@ static const char* help_topic_command(HelpTopic topic) {
     case HelpTopic::PrivRecovery: return "-priv -recovery";
     case HelpTopic::Hamming: return "-priv -hamming";
     case HelpTopic::WarpWallet: return "-warpwallet";
+    case HelpTopic::Monero: return "-monero";
     case HelpTopic::Kangaroo: return "-kangaroo";
     case HelpTopic::Bsgs: return "-bsgs";
     case HelpTopic::KeyRepair: return "-keyrepair";
@@ -10455,6 +10459,7 @@ static void printHelpShort() {
 [!] -create2                      Ethereum CREATE2 salt/address search.
 [!] -hdpath                       GPU BIP32 derivation-path search.
 [!] -warpwallet                   WarpWallet-family memory-hard KDF search.
+[!] -monero                       Legacy Monero mnemonic / Polyseed recovery.
 [!] -poetry                       Poetry brainwallet phrase recovery.
 [!] -minikeys                     Casascius minikey search.
 [!] -minikeys -seed               Deterministic Casascius minikey seed mode.
@@ -11957,6 +11962,9 @@ static void printHelpSubstrateWalletSection() {
 
 static void printHelpModeSection(HelpTopic topic) {
     switch (topic) {
+    case HelpTopic::Monero:
+        monero_mode::print_help();
+        break;
     case HelpTopic::Keystore:
         printHelpRange("[!] MAIN MODE: -keystore", "[!] MAIN MODE: -walletdat");
         break;
@@ -12269,6 +12277,37 @@ int main(int argc, char** argv)
     if (has_help_arg(argc, argv)) {
         printHelpTopic(detect_help_topic(argc, argv));
         return 0;
+    }
+    if (monero_mode::requested(argc, argv)) {
+        counterTotal = 0;
+        Founds = 0;
+        isRun = true;
+
+        const std::time_t started =
+            std::chrono::system_clock::to_time_t(
+                std::chrono::system_clock::now());
+        std::cout << "[!] Program started at: " << std::ctime(&started);
+
+        std::thread speed_thread(SpeedThreadFunc);
+        const monero_mode::RuntimeHooks hooks{
+            [](std::uint64_t completed) {
+                counterTotal += completed;
+            },
+            []() {
+                ++Founds;
+            }
+        };
+        const int result = monero_mode::run(argc, argv, hooks);
+        isRun = false;
+        if (speed_thread.joinable()) speed_thread.join();
+
+        const std::time_t finished =
+            std::chrono::system_clock::to_time_t(
+                std::chrono::system_clock::now());
+        std::cout << "\n[!] Processed " << counterTotal
+                  << " Monero seed candidates. Found: " << Founds
+                  << ". Program finished at " << std::ctime(&finished);
+        return result;
     }
     if (warpwallet::requested(argc, argv)) {
         counterTotal = 0;

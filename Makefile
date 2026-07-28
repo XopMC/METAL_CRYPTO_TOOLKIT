@@ -45,13 +45,16 @@ CPP_SRCS := \
 	HdPath/HdPathMode.cpp \
 	Hamming/HammingMode.cpp \
 	WarpWallet/WarpWalletMode.cpp \
+	Monero/MoneroMode.cpp \
 	Brain/BrainInput.cpp \
 	host_secp/HostSecp256k1.cpp \
 	old_electrum_host.cpp \
 	lib/util.cpp lib/Bech32.cpp lib/V/VBase58.cpp \
 	lib/hash/sha256.cpp lib/hash/ripemd160.cpp \
 	sr25519-donna-32bit/dot.cpp
-C_SRCS := lib/base58.c
+C_SRCS := lib/base58.c \
+	Monero/third_party/crypto-ops.c \
+	Monero/third_party/crypto-ops-data.c
 UNAME_M := $(shell uname -m)
 ifeq ($(UNAME_M),x86_64)
 CPP_SRCS += lib/hash/ripemd160_sse.cpp
@@ -72,6 +75,7 @@ LOCALIZED_HOST_HEADERS := Makefile KernelRuntime.h MacFileSystem.h Poetry.h Poet
 	HdPath/HdPathMode.h \
 	Hamming/HammingMode.h \
 	WarpWallet/WarpWalletMode.h \
+	Monero/MoneroMode.h Monero/MoneroWordlists.generated.h \
 	Brain/BrainInput.h \
 	Prng32ComboAllowlist.generated.h Prng64ComboAllowlist.generated.h \
 	Kernels/ProfanityHost.h Kernels/WalletModesHost.h Kernels/XpReplayHost.h \

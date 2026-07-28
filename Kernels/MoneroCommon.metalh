@@ -1,0 +1,128 @@
+#ifndef METAL_CRYPTO_MONERO_COMMON_METALH
+#define METAL_CRYPTO_MONERO_COMMON_METALH
+
+#include "WorkerKeystoreCommon.metalh"
+#include "../sr25519-donna-32bit/ed25519-donna/ed25519.metalh"
+
+using namespace metal;
+
+constant uint MONERO_SCHEME_LEGACY = 1u;
+constant uint MONERO_SCHEME_POLYSEED = 2u;
+
+struct MoneroCandidate {
+    uchar material[32];
+    uint birthday;
+    uint features;
+    uint scheme;
+    uint valid;
+    ulong ordinal[4];
+    ulong template_index;
+    uint reserved[2];
+};
+
+struct MoneroTarget {
+    uchar spend_public[32];
+    uchar view_public[32];
+    ulong prefix;
+    ulong source_index;
+};
+
+struct MoneroDerived {
+    uchar spend_private[32];
+    uchar view_private[32];
+    uchar spend_public[32];
+    uchar view_public[32];
+    uint valid;
+    uint reserved[3];
+};
+
+struct MoneroHit {
+    ulong ordinal[4];
+    ulong template_index;
+    ulong target_index;
+    uint scheme;
+    uint reserved;
+    uchar spend_private[32];
+    uchar view_private[32];
+    uchar spend_public[32];
+    uchar view_public[32];
+};
+
+static inline ulong monero_prefix(const thread uchar value[32]) {
+    ulong result = 0ul;
+    for (uint i = 0u; i < 8u; ++i) {
+        result = (result << 8u) | ulong(value[i]);
+    }
+    return result;
+}
+
+static inline int monero_compare_keys(
+    const thread uchar spend[32],
+    const thread uchar view[32],
+    const device MoneroTarget& target) {
+    for (uint i = 0u; i < 32u; ++i) {
+        if (spend[i] < target.spend_public[i]) return -1;
+        if (spend[i] > target.spend_public[i]) return 1;
+    }
+    for (uint i = 0u; i < 32u; ++i) {
+        if (view[i] < target.view_public[i]) return -1;
+        if (view[i] > target.view_public[i]) return 1;
+    }
+    return 0;
+}
+
+static inline int monero_find_target(
+    const thread uchar spend[32],
+    const thread uchar view[32],
+    const device MoneroTarget* targets,
+    uint count) {
+    const ulong prefix = monero_prefix(spend);
+    uint low = 0u;
+    uint high = count;
+    while (low < high) {
+        const uint middle = low + ((high - low) >> 1u);
+        if (targets[middle].prefix < prefix) low = middle + 1u;
+        else high = middle;
+    }
+    for (uint i = low; i < count && targets[i].prefix == prefix; ++i) {
+        if (monero_compare_keys(spend, view, targets[i]) == 0) {
+            return int(i);
+        }
+    }
+    return -1;
+}
+
+static inline bool monero_nonzero(const thread uchar value[32]) {
+    uchar combined = 0u;
+    for (uint i = 0u; i < 32u; ++i) combined |= value[i];
+    return combined != 0u;
+}
+
+static inline void monero_reduce_scalar(
+    const thread uchar input[32],
+    thread uchar output[32]) {
+    bignum256modm scalar;
+    expand256_modm(scalar, input, 32u);
+    contract256_modm(output, scalar);
+}
+
+static inline void monero_polyseed_key(
+    const thread MoneroCandidate& candidate,
+    thread uchar output[32]) {
+    uchar salt[32] = {
+        'P','O','L','Y','S','E','E','D',' ','k','e','y',0,
+        0xff,0xff,0xff,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+    };
+    salt[20] = uchar(candidate.birthday);
+    salt[21] = uchar(candidate.birthday >> 8u);
+    salt[22] = uchar(candidate.birthday >> 16u);
+    salt[23] = uchar(candidate.birthday >> 24u);
+    salt[24] = uchar(candidate.features);
+    salt[25] = uchar(candidate.features >> 8u);
+    salt[26] = uchar(candidate.features >> 16u);
+    salt[27] = uchar(candidate.features >> 24u);
+    wallet_pbkdf2_sha256_32_thread_salt(
+        candidate.material, 32u, salt, 32u, 10000u, output);
+}
+
+#endif
