@@ -140,6 +140,19 @@ Wave 7 adds exact Hamming-distance private-key search:
   `Key/s`, primitive scalar multiplications, exact verifications, targets,
   working set, and readback time.
 
+Wave 8 adds checksum-first BIP39 permutation search:
+
+- `-mnemonic -scramble` accepts inline phrases or streaming phrase files and
+  enumerates unique multiset permutations without materializing them;
+- fixed positional words reduce the permutation domain, while `*` and
+  `{word|word}` patterns provide unrestricted and restricted positions;
+- a checked U256 scheduler, exact multi-device interval splitting, adaptive
+  overflow replay, and `-wallet-mem` cover large domains and unified memory;
+- Metal performs multiset rank/unrank and BIP39 checksum pruning before the
+  established seed/derivation/target pipeline;
+- `SpeedThreadFunc` remains the only live printer and reports credited
+  `Candidate/s`, exact verifications, working set, and readback time.
+
 #### v15
 
 The July 25 update extends both interval-DLP modes for very large target
@@ -1114,6 +1127,51 @@ This checks the four-byte payload range in order, applies mnemonic submode `1` (
 ```
 
 This reads one phrase per line, derives every path in `derivations.txt` through BIP32/secp256k1, and checks only compressed Bitcoin HASH160.
+
+##### `-mnemonic -scramble`
+
+Use this submode when all BIP-39 words are known but their order, or part of
+their order, is unknown. The source is either an inline 12/15/18/21/24-word
+phrase after `-scramble` or one phrase per line from repeatable `-i FILE`.
+Words are treated as a multiset: repeated words do not create duplicate
+permutations.
+
+Metal maps a checked U256 ordinal directly to one unique permutation, checks
+the BIP-39 checksum first, and sends only checksum-valid phrases into the
+existing seed, derivation and exact target-verification pipeline. No list of
+permutations is materialized. `SpeedThreadFunc` remains the only statistics
+printer and reports completed `Candidate/s`.
+
+`-pattern` has exactly one token per output position:
+
+- `*` accepts any remaining source word;
+- a plain word fixes that word at the position;
+- `{word|word}` restricts the position to the listed source words.
+
+`-pattern-file FILE` reads one non-comment pattern. `-start N` and exclusive
+`-end N` select a checked U256 ordinal interval; without them the complete
+unique-permutation domain is used. `-n N` controls a completed GPU window.
+`-wallet-mem auto|all|NN%|SIZE` accepts MiB/GiB sizes and limits the unified
+Metal working set. Multi-GPU intervals are disjoint. If the checksum-hit buffer
+overflows, the uncredited window is halved and repeated without losing work.
+
+```bash
+./METAL_CRYPTO_TOOLKIT -mnemonic -scramble \
+  "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about" \
+  -pattern "* * * * * * * * * * * *" \
+  -d derivations.txt -c c -hash 00112233445566778899aabbccddeeff00112233
+```
+
+```bash
+./METAL_CRYPTO_TOOLKIT -mnemonic -scramble -i phrases.txt \
+  -pattern-file positions.txt -start 0 -end 0x100000 \
+  -wallet-mem all -device 0 -d derivations.txt -c p \
+  -hash 00112233445566778899aabbccddeeff00112233
+```
+
+The U256 scheduler makes large domains representable, not practically
+searchable. Restrictive fixed positions can reduce the actual permutation
+domain; brace restrictions currently filter the exact multiset domain on GPU.
 
 #### `-recovery`
 
@@ -3081,6 +3139,20 @@ tune выбрал 256 потоков на Metal threadgroup: на нагрузк
   который печатает зачтённые `Key/s`, scalar multiplications, точные проверки,
   targets, working set и readback time.
 
+Волна 8 добавляет checksum-first перебор перестановок BIP39:
+
+- `-mnemonic -scramble` принимает фразу в командной строке либо потоковые
+  файлы и без материализации перебирает уникальные перестановки мультимножества;
+- фиксированные слова уменьшают домен, а `*` и `{word|word}` задают свободные
+  и ограниченные позиции;
+- checked U256 scheduler, точное разбиение между устройствами, повтор
+  переполненного незачтенного окна и `-wallet-mem` покрывают большие домены и
+  unified memory;
+- Metal выполняет rank/unrank мультимножества и отсев по checksum BIP39 до
+  существующего pipeline seed, derivation и точной проверки целей;
+- единственным live-выводом остаётся `SpeedThreadFunc` с `Candidate/s`,
+  точными проверками, working set и readback time.
+
 #### v15
 
 Обновление от 25 июля расширяет оба interval-DLP режима для очень больших
@@ -4051,6 +4123,53 @@ mkdir -p filters
 ```
 
 Команда читает по одной фразе из `mnemonics.txt`, проходит все пути из `derivations.txt` через BIP32/secp256k1 и проверяет только HASH160 сжатого ключа Bitcoin.
+
+##### `-mnemonic -scramble`
+
+Этот подрежим нужен, когда все слова BIP-39 известны, но полностью или частично
+неизвестен их порядок. Исходную фразу из 12/15/18/21/24 слов можно написать
+после `-scramble` либо читать по одной строке из повторяемых `-i FILE`.
+Повторяющиеся слова образуют мультимножество и не создают одинаковых
+перестановок.
+
+Metal напрямую преобразует проверенный U256 ordinal в уникальную перестановку,
+сначала проверяет checksum BIP-39 и только после этого передает подходящие
+фразы в существующий pipeline seed, derivation и точной проверки целей. Список
+перестановок в памяти не строится. Единственным потоком статистики остается
+`SpeedThreadFunc`, который показывает завершенные `Candidate/s`.
+
+В `-pattern` на каждую выходную позицию приходится ровно один токен:
+
+- `*` разрешает любое оставшееся слово исходной фразы;
+- обычное слово фиксирует его на этой позиции;
+- `{word|word}` ограничивает позицию перечисленными словами.
+
+`-pattern-file FILE` читает один шаблон без комментариев. `-start N` и
+исключающая граница `-end N` задают U256-интервал ordinal; без них проходится
+весь домен уникальных перестановок. `-n N` управляет завершенным GPU-окном.
+`-wallet-mem auto|all|NN%|SIZE` принимает размеры MiB/GiB и ограничивает
+unified memory Metal. Диапазоны нескольких GPU не пересекаются. При
+переполнении checksum-hit буфера незачтенное окно делится пополам и полностью
+повторяется.
+
+```bash
+./METAL_CRYPTO_TOOLKIT -mnemonic -scramble \
+  "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about" \
+  -pattern "* * * * * * * * * * * *" \
+  -d derivations.txt -c c -hash 00112233445566778899aabbccddeeff00112233
+```
+
+```bash
+./METAL_CRYPTO_TOOLKIT -mnemonic -scramble -i phrases.txt \
+  -pattern-file positions.txt -start 0 -end 0x100000 \
+  -wallet-mem all -device 0 -d derivations.txt -c p \
+  -hash 00112233445566778899aabbccddeeff00112233
+```
+
+U256 позволяет корректно представить огромный домен, но не делает такой поиск
+практичным. Фиксированные позиции действительно уменьшают домен перестановок;
+ограничения в фигурных скобках сейчас фильтруют точный домен мультимножества на
+GPU.
 
 #### `-recovery`
 

@@ -3396,6 +3396,44 @@ metalError_t launchWorkerRecoveryChecksum(const uint16_t* base_ids,
                         out_capacity);
 }
 
+metalError_t launchWorkerMnemonicScramble(
+    const uint16_t* unique_ids,
+    const uint16_t* initial_counts,
+    uint32_t unique_count,
+    const uint16_t* output_template,
+    uint32_t words_count,
+    const uint16_t* movable_positions,
+    uint32_t movable_count,
+    const uint32_t* allowed_masks,
+    const uint64_t* base_ordinal,
+    const uint64_t* domain_size,
+    uint64_t range_count,
+    uint16_t* out_ids,
+    uint32_t* out_count,
+    uint32_t out_capacity,
+    uint32_t blocks,
+    uint32_t threads) {
+    SnapshotLock snapshotLock(device_state().snapshotMutex);
+    return metal_launch(
+        "workerMnemonicScramble",
+        MetalGridSize(blocks),
+        MetalGridSize(threads),
+        unique_ids,
+        initial_counts,
+        unique_count,
+        output_template,
+        words_count,
+        movable_positions,
+        movable_count,
+        allowed_masks,
+        base_ordinal,
+        domain_size,
+        range_count,
+        out_ids,
+        out_count,
+        out_capacity);
+}
+
 metalError_t launchWorkerRecoverySeedBatch(const uint16_t* batch_ids,
                                           int words_count,
                                           uint32_t batch_count,

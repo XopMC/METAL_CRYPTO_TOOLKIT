@@ -7,6 +7,7 @@
 #include <stdlib.h>
 #include <chrono>
 #include <set>
+#include <map>
 #include <thread>
 #include <mutex>
 #include <shared_mutex>
@@ -365,7 +366,21 @@ struct RecoveryPreparedTask {
     std::vector<std::pair<std::string, std::string>> replacements;
 };
 
+struct MnemonicScramblePreparedTask {
+    RecoveryPreparedTask recovery;
+    std::vector<uint16_t> unique_ids;
+    std::vector<uint16_t> counts;
+    std::vector<uint16_t> output_template;
+    std::vector<uint16_t> movable_positions;
+    std::vector<uint32_t> allowed_masks;
+    modeinfra::U256 domain_size{};
+};
+
 bool RECOVERY_MODE = false;
+static bool MNEMONIC_SCRAMBLE_MODE = false;
+static std::string mnemonic_scramble_inline;
+static std::string mnemonic_scramble_pattern;
+static std::string mnemonic_scramble_pattern_file;
 static bool POETRY_MODE = false;
 static bool PROFANITY_MODE = false;
 static bool KEYSTORE_MODE = false;
@@ -2319,6 +2334,7 @@ metalError_t processMetalSeqBack();
 metalError_t processMetalSeqBoth();
 metalError_t processMetalHexsetSeq();
 metalError_t processMetalRecoveryHexset();
+metalError_t processMetalMnemonicScramble();
 
 metalError_t processMetalPRIVSeq();
 metalError_t processMetalPRIVSeqBack();
@@ -2393,6 +2409,24 @@ metalError_t processMetalArmoryRoot(std::istream& stream);
 metalError_t processMetalArmoryRootFile(const vector<string>& mnemonicFiles);
 metalError_t processMetalArmoryRootRecoveryHexset();
 metalError_t processMetalRecovery();
+
+metalError_t launchWorkerMnemonicScramble(
+    const uint16_t* unique_ids,
+    const uint16_t* initial_counts,
+    uint32_t unique_count,
+    const uint16_t* output_template,
+    uint32_t words_count,
+    const uint16_t* movable_positions,
+    uint32_t movable_count,
+    const uint32_t* allowed_masks,
+    const uint64_t* base_ordinal,
+    const uint64_t* domain_size,
+    uint64_t range_count,
+    uint16_t* out_ids,
+    uint32_t* out_count,
+    uint32_t out_capacity,
+    uint32_t blocks,
+    uint32_t threads);
 
 bool mallocFounds(uint32_t N);
 
@@ -5797,7 +5831,10 @@ static metalError_t recovery_direct_launch_current_batch(RecoveryGpuDirectContex
 
         metalError_t launch_st = metalGetLastError();
         if (launch_st == metalSuccess) {
-            counterTotal += static_cast<uint64_t>(nr) * static_cast<uint64_t>(Iterations.size());
+            if (!MNEMONIC_SCRAMBLE_MODE) {
+                counterTotal += static_cast<uint64_t>(nr) *
+                    static_cast<uint64_t>(Iterations.size());
+            }
             ctx.kernel_inflight = true;
         }
         return launch_st;
@@ -7192,6 +7229,805 @@ metalError_t processMetalRecovery() {
     return st;
 }
 
+static bool scramble_u256_factorial(
+    uint32_t value,
+    modeinfra::U256& result,
+    std::string& err) {
+    result = modeinfra::U256::from_u64(1u);
+    for (uint32_t factor = 2u; factor <= value; ++factor) {
+        modeinfra::U256 next{};
+        if (!modeinfra::multiply_checked(result, factor, next)) {
+            err = "scramble permutation domain exceeds U256";
+            return false;
+        }
+        result = next;
+    }
+    return true;
+}
+
+static bool scramble_multiset_size(
+    const std::vector<uint16_t>& counts,
+    modeinfra::U256& result,
+    std::string& err) {
+    uint32_t total = 0u;
+    for (uint16_t count : counts) total += count;
+    if (!scramble_u256_factorial(total, result, err)) return false;
+    for (uint16_t count : counts) {
+        for (uint32_t divisor = 2u; divisor <= count; ++divisor) {
+            modeinfra::U256 quotient{};
+            uint64_t remainder = 0u;
+            if (!modeinfra::divide(
+                    result, divisor, quotient, remainder) ||
+                remainder != 0u) {
+                err = "internal multiset factorial division failed";
+                return false;
+            }
+            result = quotient;
+        }
+    }
+    return true;
+}
+
+static bool scramble_load_pattern(std::string& pattern, std::string& err) {
+    pattern = mnemonic_scramble_pattern;
+    if (mnemonic_scramble_pattern_file.empty()) return true;
+    std::ifstream input(mnemonic_scramble_pattern_file);
+    if (!input) {
+        err = "failed to open -pattern-file '" +
+            mnemonic_scramble_pattern_file + "'";
+        return false;
+    }
+    std::string line;
+    while (std::getline(input, line)) {
+        trim_crlf_inplace(line);
+        const size_t comment = line.find('#');
+        if (comment != std::string::npos) line.erase(comment);
+        line = recovery_trim_spaces_copy(line);
+        if (line.empty()) continue;
+        if (!pattern.empty()) {
+            err = "-pattern-file must contain exactly one non-comment pattern";
+            return false;
+        }
+        pattern = line;
+    }
+    if (pattern.empty()) {
+        err = "-pattern-file contains no pattern";
+        return false;
+    }
+    return true;
+}
+
+static bool scramble_load_inputs(
+    std::vector<RecoveryTemplateInput>& inputs,
+    std::string& err) {
+    inputs.clear();
+    if (!mnemonic_scramble_inline.empty()) {
+        inputs.push_back({
+            "command line -scramble", 0u,
+            mnemonic_scramble_inline
+        });
+    }
+    for (const std::string& path : mnemonicFiles) {
+        std::ifstream input(path);
+        if (!input) {
+            err = "failed to open scramble input '" + path + "'";
+            return false;
+        }
+        std::string line;
+        size_t line_no = 0u;
+        while (std::getline(input, line)) {
+            ++line_no;
+            trim_crlf_inplace(line);
+            const size_t comment = line.find('#');
+            if (comment != std::string::npos) line.erase(comment);
+            line = recovery_trim_spaces_copy(line);
+            if (line.empty()) continue;
+            inputs.push_back({path, line_no, line});
+        }
+    }
+    if (inputs.empty()) {
+        err = "scramble input contains no mnemonic phrases";
+        return false;
+    }
+    return true;
+}
+
+static bool scramble_parse_restriction(
+    const std::string& token,
+    const RecoveryWordlist& wordlist,
+    std::vector<uint16_t>& ids,
+    std::string& err) {
+    ids.clear();
+    if (token.size() < 3u || token.front() != '{' ||
+        token.back() != '}') {
+        err = "restricted position must use {word|word}";
+        return false;
+    }
+    std::stringstream values(
+        token.substr(1u, token.size() - 2u));
+    std::string word;
+    std::set<uint16_t> unique;
+    while (std::getline(values, word, '|')) {
+        word = recovery_norm_token(word);
+        const auto found = wordlist.id_by_norm.find(word);
+        if (found == wordlist.id_by_norm.end() ||
+            found->second < 0 || found->second >= 2048) {
+            err = "pattern restriction contains a word outside the selected wordlist";
+            return false;
+        }
+        unique.insert(static_cast<uint16_t>(found->second));
+    }
+    ids.assign(unique.begin(), unique.end());
+    if (ids.empty()) {
+        err = "pattern restriction is empty";
+        return false;
+    }
+    return true;
+}
+
+static bool scramble_prepare_task(
+    const RecoveryTemplateInput& input,
+    const std::string& pattern,
+    const std::vector<RecoveryWordlist>& wordlists,
+    MnemonicScramblePreparedTask& output,
+    std::string& err) {
+    const std::vector<std::string> words =
+        recovery_split_tokens(input.phrase);
+    if (words.size() != 12u && words.size() != 15u &&
+        words.size() != 18u && words.size() != 21u &&
+        words.size() != 24u) {
+        err = "BIP39 scramble requires 12, 15, 18, 21, or 24 words";
+        return false;
+    }
+    const RecoveryWordlist* wordlist =
+        recovery_pick_wordlist(wordlists, words);
+    if (wordlist == nullptr) {
+        err = "no BIP39 wordlist is available";
+        return false;
+    }
+    std::vector<uint16_t> input_ids;
+    input_ids.reserve(words.size());
+    for (const std::string& word : words) {
+        const auto found =
+            wordlist->id_by_norm.find(recovery_norm_token(word));
+        if (found == wordlist->id_by_norm.end() ||
+            found->second < 0 || found->second >= 2048) {
+            err = "input contains a word outside the selected BIP39 wordlist: " +
+                word;
+            return false;
+        }
+        input_ids.push_back(static_cast<uint16_t>(found->second));
+    }
+
+    std::vector<std::string> pattern_tokens;
+    if (pattern.empty()) {
+        pattern_tokens.assign(words.size(), "*");
+    } else {
+        pattern_tokens = recovery_split_tokens(pattern);
+        if (pattern_tokens.size() != words.size()) {
+            err = "pattern word count must match the scramble phrase";
+            return false;
+        }
+    }
+
+    std::map<uint16_t, uint16_t> remaining;
+    for (uint16_t id : input_ids) ++remaining[id];
+    output = MnemonicScramblePreparedTask{};
+    output.recovery.source = input.source;
+    output.recovery.line_no = input.line_no;
+    output.recovery.wordlist = wordlist;
+    output.recovery.ids.assign(words.size(), 0);
+    output.recovery.normalized_phrase =
+        recovery_join_tokens(words);
+    output.output_template.assign(words.size(), 0u);
+    std::vector<std::vector<uint16_t>> restrictions(words.size());
+
+    for (size_t position = 0u;
+         position < pattern_tokens.size(); ++position) {
+        const std::string& token = pattern_tokens[position];
+        if (token == "*") {
+            output.movable_positions.push_back(
+                static_cast<uint16_t>(position));
+            continue;
+        }
+        if (!token.empty() && token.front() == '{') {
+            if (!scramble_parse_restriction(
+                    token, *wordlist, restrictions[position], err)) {
+                return false;
+            }
+            output.movable_positions.push_back(
+                static_cast<uint16_t>(position));
+            continue;
+        }
+        const auto found =
+            wordlist->id_by_norm.find(recovery_norm_token(token));
+        if (found == wordlist->id_by_norm.end() ||
+            found->second < 0 || found->second >= 2048) {
+            err = "fixed pattern word is outside the selected wordlist: " +
+                token;
+            return false;
+        }
+        const uint16_t id = static_cast<uint16_t>(found->second);
+        auto available = remaining.find(id);
+        if (available == remaining.end() || available->second == 0u) {
+            err = "fixed pattern consumes a word not present in the phrase: " +
+                token;
+            return false;
+        }
+        output.output_template[position] = id;
+        --available->second;
+    }
+
+    std::map<uint16_t, uint32_t> unique_index;
+    for (const auto& entry : remaining) {
+        if (entry.second == 0u) continue;
+        unique_index.emplace(
+            entry.first,
+            static_cast<uint32_t>(output.unique_ids.size()));
+        output.unique_ids.push_back(entry.first);
+        output.counts.push_back(entry.second);
+    }
+    if (output.unique_ids.size() > 24u) {
+        err = "scramble unique word count exceeds 24";
+        return false;
+    }
+    if (output.movable_positions.empty()) {
+        output.unique_ids.assign(1u, 0u);
+        output.counts.assign(1u, 0u);
+    }
+    const uint32_t all_mask =
+        unique_index.empty()
+        ? 0u
+        : ((1u << static_cast<uint32_t>(unique_index.size())) - 1u);
+    for (uint16_t position : output.movable_positions) {
+        uint32_t mask = all_mask;
+        if (!restrictions[position].empty()) {
+            mask = 0u;
+            for (uint16_t id : restrictions[position]) {
+                const auto found = unique_index.find(id);
+                if (found != unique_index.end()) {
+                    mask |= 1u << found->second;
+                }
+            }
+            if (mask == 0u) {
+                err = "restricted pattern position has no remaining phrase word";
+                return false;
+            }
+        }
+        output.allowed_masks.push_back(mask);
+    }
+    if (output.allowed_masks.empty()) {
+        output.allowed_masks.push_back(0u);
+    }
+    if (!scramble_multiset_size(
+            output.counts, output.domain_size, err)) {
+        return false;
+    }
+    return true;
+}
+
+static bool scramble_partition_interval(
+    const modeinfra::U256& begin,
+    const modeinfra::U256& end,
+    uint64_t index,
+    uint64_t count,
+    modeinfra::U256& local_begin,
+    modeinfra::U256& local_end,
+    std::string& err) {
+    modeinfra::U256 length{};
+    if (count == 0u ||
+        !modeinfra::subtract_checked(end, begin, length)) {
+        err = "invalid scramble partition interval";
+        return false;
+    }
+    auto offset_for = [&](uint64_t shard,
+                          modeinfra::U256& offset) -> bool {
+        modeinfra::U256 product{};
+        if (!modeinfra::multiply_checked(length, shard, product)) {
+            err = "scramble partition multiplication overflow";
+            return false;
+        }
+        uint64_t remainder = 0u;
+        return modeinfra::divide(product, count, offset, remainder);
+    };
+    modeinfra::U256 first_offset{};
+    modeinfra::U256 last_offset{};
+    if (!offset_for(index, first_offset) ||
+        !offset_for(index + 1u, last_offset) ||
+        !modeinfra::add_checked(begin, first_offset, local_begin) ||
+        !modeinfra::add_checked(begin, last_offset, local_end)) {
+        if (err.empty()) err = "scramble partition arithmetic failed";
+        return false;
+    }
+    return true;
+}
+
+static uint64_t scramble_bounded_window(
+    const modeinfra::U256& remaining,
+    uint64_t maximum) {
+    if (remaining.limbs[1] != 0u ||
+        remaining.limbs[2] != 0u ||
+        remaining.limbs[3] != 0u) {
+        return maximum;
+    }
+    return std::min(remaining.limbs[0], maximum);
+}
+
+metalError_t processMetalMnemonicScramble() {
+    modeinfra::ModeProgress& progress =
+        modeinfra::global_mode_progress();
+    if (is_multi_gpu_active() && !g_disable_multi_gpu_dispatch) {
+        progress.begin(
+            "MNEMONIC-SCRAMBLE",
+            modeinfra::ProgressUnit::Candidate,
+            modeinfra::ProgressPhase::Search);
+        const metalError_t result =
+            dispatch_recovery_mode_multi_gpu(
+                __func__, []() -> metalError_t {
+                    return processMetalMnemonicScramble();
+                });
+        progress.end();
+        return result;
+    }
+    const bool progress_owner = !recovery_partition_active();
+    if (progress_owner) {
+        progress.begin(
+            "MNEMONIC-SCRAMBLE",
+            modeinfra::ProgressUnit::Candidate,
+            modeinfra::ProgressPhase::Search);
+    }
+
+    std::string err;
+    std::string pattern;
+    std::vector<RecoveryTemplateInput> inputs;
+    std::vector<RecoveryWordlist> wordlists;
+    std::vector<MnemonicScramblePreparedTask> tasks;
+    if (!scramble_load_pattern(pattern, err) ||
+        !scramble_load_inputs(inputs, err) ||
+        !recovery_load_wordlists(wordlists, err)) {
+        fprintf(stderr, "[!] Scramble error: %s [!]\n", err.c_str());
+        if (progress_owner) progress.end();
+        return metalErrorInvalidValue;
+    }
+    for (const RecoveryTemplateInput& input : inputs) {
+        MnemonicScramblePreparedTask task;
+        if (!scramble_prepare_task(
+                input, pattern, wordlists, task, err)) {
+            fprintf(stderr, "[!] Scramble error at %s:%llu: %s [!]\n",
+                input.source.c_str(),
+                static_cast<unsigned long long>(input.line_no),
+                err.c_str());
+            if (progress_owner) progress.end();
+            return metalErrorInvalidValue;
+        }
+        tasks.push_back(std::move(task));
+    }
+
+    modeinfra::U256 requested_start{};
+    modeinfra::U256 requested_end{};
+    bool explicit_end = end_point_set;
+    if (seqMode &&
+        !modeinfra::parse_u256(start_point, requested_start, err)) {
+        fprintf(stderr, "[!] Scramble ordinal error: %s [!]\n", err.c_str());
+        if (progress_owner) progress.end();
+        return metalErrorInvalidValue;
+    }
+    if (explicit_end &&
+        !modeinfra::parse_u256(end_point, requested_end, err)) {
+        fprintf(stderr, "[!] Scramble ordinal error: %s [!]\n", err.c_str());
+        if (progress_owner) progress.end();
+        return metalErrorInvalidValue;
+    }
+
+    RecoveryGpuDirectContext recovery_ctx;
+    if (!recovery_direct_init(recovery_ctx, err)) {
+        fprintf(stderr, "[!] Scramble runtime error: %s [!]\n", err.c_str());
+        if (progress_owner) progress.end();
+        return metalErrorUnknown;
+    }
+    const bool use_fused_path = recovery_can_use_fused_path();
+    const uint64_t requested_batch =
+        (use_n_count && n_number != 0u)
+        ? n_number
+        : (1ull << 20u);
+    const uint64_t hard_batch = std::min<uint64_t>(
+        requested_batch,
+        static_cast<uint64_t>(std::numeric_limits<uint32_t>::max()));
+
+    metalDeviceProp properties{};
+    metalError_t st = metalGetDeviceProperties(&properties, DEVICE_NR);
+    if (st != metalSuccess) {
+        recovery_direct_release(recovery_ctx);
+        if (progress_owner) progress.end();
+        return st;
+    }
+    modeinfra::MemoryDeviceInfo memory_info{
+        properties.recommendedMaxWorkingSetSize,
+        properties.currentAllocatedSize,
+        properties.maxBufferLength,
+        properties.hasUnifiedMemory != 0,
+    };
+    modeinfra::MemoryBudget memory_budget;
+    const uint64_t fixed_working_set =
+        32ull * 1024ull * 1024ull;
+    const uint64_t max_words = 24u;
+    const uint64_t bytes_per_hit =
+        max_words * sizeof(uint16_t) +
+        16u * sizeof(uint32_t);
+    if (!modeinfra::resolve_memory_budget(
+            wallet_memory_spec, {memory_info},
+            fixed_working_set + 1024u * bytes_per_hit,
+            0u, memory_budget, err)) {
+        fprintf(stderr, "[!] Scramble memory error: %s [!]\n", err.c_str());
+        recovery_direct_release(recovery_ctx);
+        if (progress_owner) progress.end();
+        return metalErrorInvalidValue;
+    }
+    const uint64_t spare =
+        memory_budget.per_device_budget > fixed_working_set
+        ? memory_budget.per_device_budget - fixed_working_set
+        : 0u;
+    const uint32_t out_capacity = static_cast<uint32_t>(
+        std::max<uint64_t>(
+            1024u,
+            std::min<uint64_t>(
+                262144u,
+                std::min<uint64_t>(
+                    spare / std::max<uint64_t>(bytes_per_hit, 1u),
+                    properties.maxBufferLength /
+                        (max_words * sizeof(uint16_t))))));
+
+    uint16_t* d_unique_ids = nullptr;
+    uint16_t* d_counts = nullptr;
+    uint16_t* d_template = nullptr;
+    uint16_t* d_positions = nullptr;
+    uint32_t* d_allowed = nullptr;
+    uint64_t* d_base = nullptr;
+    uint64_t* d_domain = nullptr;
+    uint16_t* d_out_ids = nullptr;
+    uint32_t* d_out_count = nullptr;
+    uint32_t* d_master_words = nullptr;
+    auto allocate = [&](void** pointer, size_t bytes,
+                        const char* label) -> bool {
+        st = metalMalloc(pointer, std::max<size_t>(bytes, 1u));
+        if (st != metalSuccess) {
+            err = std::string("metalMalloc ") + label + " failed";
+            return false;
+        }
+        return true;
+    };
+    if (!allocate(reinterpret_cast<void**>(&d_unique_ids), 24u * sizeof(uint16_t), "unique ids") ||
+        !allocate(reinterpret_cast<void**>(&d_counts), 24u * sizeof(uint16_t), "counts") ||
+        !allocate(reinterpret_cast<void**>(&d_template), 24u * sizeof(uint16_t), "template") ||
+        !allocate(reinterpret_cast<void**>(&d_positions), 24u * sizeof(uint16_t), "positions") ||
+        !allocate(reinterpret_cast<void**>(&d_allowed), 24u * sizeof(uint32_t), "allowed masks") ||
+        !allocate(reinterpret_cast<void**>(&d_base), 4u * sizeof(uint64_t), "base ordinal") ||
+        !allocate(reinterpret_cast<void**>(&d_domain), 4u * sizeof(uint64_t), "domain") ||
+        !allocate(reinterpret_cast<void**>(&d_out_ids),
+            static_cast<size_t>(out_capacity) * max_words * sizeof(uint16_t), "output ids") ||
+        !allocate(reinterpret_cast<void**>(&d_out_count), sizeof(uint32_t), "output count") ||
+        (use_fused_path &&
+         !allocate(reinterpret_cast<void**>(&d_master_words),
+            static_cast<size_t>(out_capacity) * 16u * sizeof(uint32_t), "master words"))) {
+        fprintf(stderr, "[!] Scramble runtime error: %s [!]\n", err.c_str());
+        st = metalErrorMemoryAllocation;
+        goto scramble_cleanup;
+    }
+
+    progress.set_allocated_working_set(
+        static_cast<uint64_t>(out_capacity) * bytes_per_hit +
+        fixed_working_set);
+    progress.set_targets(1u, 1u, 0u);
+    if (recovery_partition_is_log_owner()) {
+        printf("[!] Mnemonic scramble: tasks=%llu pattern=%s batch=%llu output-capacity=%u engine=%s [!]\n",
+            static_cast<unsigned long long>(tasks.size()),
+            pattern.empty() ? "<all positions>" : pattern.c_str(),
+            static_cast<unsigned long long>(hard_batch),
+            out_capacity,
+            use_fused_path ? "staged GPU" : "compatibility");
+    }
+
+    for (size_t task_index = 0u;
+         task_index < tasks.size(); ++task_index) {
+        MnemonicScramblePreparedTask& task = tasks[task_index];
+        if (!recovery_direct_select_wordlist(
+                recovery_ctx, task.recovery, err)) {
+            st = metalErrorUnknown;
+            goto scramble_cleanup;
+        }
+        modeinfra::U256 begin = requested_start;
+        modeinfra::U256 end =
+            explicit_end ? requested_end : task.domain_size;
+        if (modeinfra::compare(begin, end) >= 0 ||
+            modeinfra::compare(end, task.domain_size) > 0) {
+            err = "require 0 <= -start < -end <= permutation domain";
+            st = metalErrorInvalidValue;
+            goto scramble_cleanup;
+        }
+        if (recovery_partition_active()) {
+            modeinfra::U256 local_begin{};
+            modeinfra::U256 local_end{};
+            if (!scramble_partition_interval(
+                    begin, end,
+                    g_recovery_multi_gpu_partition.index,
+                    g_recovery_multi_gpu_partition.count,
+                    local_begin, local_end, err)) {
+                st = metalErrorInvalidValue;
+                goto scramble_cleanup;
+            }
+            begin = local_begin;
+            end = local_end;
+        }
+        if (modeinfra::compare(begin, end) >= 0) continue;
+
+        st = metalMemcpy(
+            d_unique_ids, task.unique_ids.data(),
+            task.unique_ids.size() * sizeof(uint16_t),
+            metalMemcpyHostToDevice);
+        if (st == metalSuccess) {
+            st = metalMemcpy(
+                d_counts, task.counts.data(),
+                task.counts.size() * sizeof(uint16_t),
+                metalMemcpyHostToDevice);
+        }
+        if (st == metalSuccess) {
+            st = metalMemcpy(
+                d_template, task.output_template.data(),
+                task.output_template.size() * sizeof(uint16_t),
+                metalMemcpyHostToDevice);
+        }
+        if (st == metalSuccess && !task.movable_positions.empty()) {
+            st = metalMemcpy(
+                d_positions, task.movable_positions.data(),
+                task.movable_positions.size() * sizeof(uint16_t),
+                metalMemcpyHostToDevice);
+        }
+        if (st == metalSuccess) {
+            st = metalMemcpy(
+                d_allowed, task.allowed_masks.data(),
+                task.allowed_masks.size() * sizeof(uint32_t),
+                metalMemcpyHostToDevice);
+        }
+        if (st == metalSuccess) {
+            st = metalMemcpy(
+                d_domain, task.domain_size.limbs.data(),
+                4u * sizeof(uint64_t), metalMemcpyHostToDevice);
+        }
+        if (st != metalSuccess) {
+            err = "failed to upload scramble task";
+            goto scramble_cleanup;
+        }
+        if (recovery_partition_is_log_owner()) {
+            printf("[!] Scramble task %llu/%llu: words=%llu movable=%llu domain=0x%s range=[0x%s,0x%s) [!]\n",
+                static_cast<unsigned long long>(task_index + 1u),
+                static_cast<unsigned long long>(tasks.size()),
+                static_cast<unsigned long long>(task.recovery.ids.size()),
+                static_cast<unsigned long long>(task.movable_positions.size()),
+                modeinfra::u256_hex(task.domain_size).c_str(),
+                modeinfra::u256_hex(begin).c_str(),
+                modeinfra::u256_hex(end).c_str());
+        }
+
+        struct PendingWindow {
+            modeinfra::U256 begin{};
+            uint64_t count = 0u;
+        };
+        std::vector<PendingWindow> pending;
+        modeinfra::U256 cursor = begin;
+        while (modeinfra::compare(cursor, end) < 0) {
+            modeinfra::U256 remaining{};
+            if (!modeinfra::subtract_checked(end, cursor, remaining)) {
+                err = "scramble scheduler underflow";
+                st = metalErrorUnknown;
+                goto scramble_cleanup;
+            }
+            const uint64_t count =
+                scramble_bounded_window(remaining, hard_batch);
+            if (count == 0u) {
+                err = "scramble scheduler produced an empty window";
+                st = metalErrorUnknown;
+                goto scramble_cleanup;
+            }
+            pending.push_back({cursor, count});
+            modeinfra::U256 next{};
+            if (!modeinfra::add_checked(
+                    cursor, modeinfra::U256::from_u64(count), next)) {
+                err = "scramble scheduler overflow";
+                st = metalErrorUnknown;
+                goto scramble_cleanup;
+            }
+            cursor = next;
+
+            while (!pending.empty()) {
+                PendingWindow window = pending.back();
+                pending.pop_back();
+                st = metalMemcpy(
+                    d_base, window.begin.limbs.data(),
+                    4u * sizeof(uint64_t), metalMemcpyHostToDevice);
+                if (st == metalSuccess) {
+                    st = metalMemset(
+                        d_out_count, 0, sizeof(uint32_t));
+                }
+                if (st != metalSuccess) {
+                    err = "failed to prepare scramble window";
+                    goto scramble_cleanup;
+                }
+                const uint32_t threads =
+                    BLOCK_THREADS == 0u ? 256u : BLOCK_THREADS;
+                const uint32_t blocks = static_cast<uint32_t>(
+                    std::min<uint64_t>(
+                        BLOCK_NUMBER == 0u ? 1024u : BLOCK_NUMBER,
+                        std::max<uint64_t>(
+                            1u,
+                            (window.count + threads - 1u) /
+                                threads)));
+                const auto readback_started =
+                    std::chrono::steady_clock::now();
+                st = launchWorkerMnemonicScramble(
+                    d_unique_ids, d_counts,
+                    static_cast<uint32_t>(task.unique_ids.size()),
+                    d_template,
+                    static_cast<uint32_t>(task.recovery.ids.size()),
+                    d_positions,
+                    static_cast<uint32_t>(
+                        task.movable_positions.size()),
+                    d_allowed, d_base, d_domain,
+                    window.count, d_out_ids, d_out_count,
+                    out_capacity, blocks, threads);
+                if (st == metalSuccess) st = metalDeviceSynchronize();
+                uint32_t found_total = 0u;
+                if (st == metalSuccess) {
+                    st = metalMemcpy(
+                        &found_total, d_out_count,
+                        sizeof(uint32_t), metalMemcpyDeviceToHost);
+                }
+                if (st != metalSuccess) {
+                    err = "scramble kernel/readback failed";
+                    goto scramble_cleanup;
+                }
+                const uint64_t readback_ns =
+                    static_cast<uint64_t>(
+                        std::chrono::duration_cast<
+                            std::chrono::nanoseconds>(
+                            std::chrono::steady_clock::now() -
+                            readback_started).count());
+                if (found_total > out_capacity &&
+                    window.count > 1u) {
+                    const uint64_t left = window.count >> 1u;
+                    modeinfra::U256 right_begin{};
+                    if (!modeinfra::add_checked(
+                            window.begin,
+                            modeinfra::U256::from_u64(left),
+                            right_begin)) {
+                        err = "scramble overflow retry arithmetic failed";
+                        st = metalErrorUnknown;
+                        goto scramble_cleanup;
+                    }
+                    pending.push_back({
+                        right_begin, window.count - left
+                    });
+                    pending.push_back({window.begin, left});
+                    continue;
+                }
+                const uint32_t eval_count =
+                    std::min(found_total, out_capacity);
+                if (eval_count != 0u) {
+                    if (use_fused_path) {
+                        const uint32_t eval_blocks =
+                            static_cast<uint32_t>(
+                                std::min<uint64_t>(
+                                    BLOCK_NUMBER == 0u
+                                        ? 1024u : BLOCK_NUMBER,
+                                    std::max<uint64_t>(
+                                        1u,
+                                        (static_cast<uint64_t>(
+                                             eval_count) +
+                                         threads - 1u) /
+                                            threads)));
+                        st = launchWorkerRecoverySeedBatch(
+                            d_out_ids,
+                            static_cast<int>(
+                                task.recovery.ids.size()),
+                            eval_count,
+                            passwords_dev,
+                            passwords_lenght_dev,
+                            recovery_ctx.devIter,
+                            recovery_ctx.iteration_size,
+                            d_master_words,
+                            eval_blocks, threads);
+                        if (st == metalSuccess) {
+                            st =
+                                launchWorkerRecoveryEvalMasterBatch(
+                                    recovery_ctx.buffIsResult,
+                                    recovery_ctx.buffDeviceResult,
+                                    _dev_precomp,
+                                    pitch,
+                                    d_out_ids,
+                                    d_master_words,
+                                    static_cast<int>(
+                                        task.recovery.ids.size()),
+                                    eval_count,
+                                    recovery_ctx.devDerivationList,
+                                    recovery_ctx.devDerIndex,
+                                    derIndex_size,
+                                    0u,
+                                    passwords_dev,
+                                    passwords_lenght_dev,
+                                    0u,
+                                    Rounds,
+                                    MNEMONIC_MODE,
+                                    IS_STRING,
+                                    dub_mnem,
+                                    eval_blocks, threads);
+                        }
+                        if (st == metalSuccess) {
+                            st = metalDeviceSynchronize();
+                        }
+                    } else {
+                        std::vector<uint16_t> host_ids(
+                            static_cast<size_t>(eval_count) *
+                            task.recovery.ids.size());
+                        st = metalMemcpy(
+                            host_ids.data(), d_out_ids,
+                            host_ids.size() * sizeof(uint16_t),
+                            metalMemcpyDeviceToHost);
+                        if (st == metalSuccess &&
+                            !recovery_direct_append_batch_u16(
+                                recovery_ctx, task.recovery,
+                                host_ids.data(),
+                                task.recovery.ids.size(),
+                                eval_count, err)) {
+                            st = metalErrorUnknown;
+                        }
+                    }
+                    if (st != metalSuccess) {
+                        if (err.empty()) {
+                            err = "scramble candidate evaluation failed";
+                        }
+                        goto scramble_cleanup;
+                    }
+                }
+                if (read_result_flag_host(
+                        recovery_ctx.buffIsResult)) {
+                    clear_result_flag_host(
+                        recovery_ctx.buffIsResult);
+                    SaveResult(
+                        OUT_FILE, Founds, save,
+                        Derivations_list);
+                }
+                counterTotal += window.count;
+                progress.credit_completed(
+                    window.count, window.count,
+                    eval_count, readback_ns);
+                progress.set_founds(Founds);
+            }
+        }
+    }
+
+    if (!use_fused_path &&
+        !recovery_direct_finalize(recovery_ctx, err)) {
+        st = metalErrorUnknown;
+    }
+
+scramble_cleanup:
+    if (d_unique_ids) metalFree(d_unique_ids);
+    if (d_counts) metalFree(d_counts);
+    if (d_template) metalFree(d_template);
+    if (d_positions) metalFree(d_positions);
+    if (d_allowed) metalFree(d_allowed);
+    if (d_base) metalFree(d_base);
+    if (d_domain) metalFree(d_domain);
+    if (d_out_ids) metalFree(d_out_ids);
+    if (d_out_count) metalFree(d_out_count);
+    if (d_master_words) metalFree(d_master_words);
+    recovery_direct_release(recovery_ctx);
+    if (st != metalSuccess && !err.empty()) {
+        fprintf(stderr, "[!] Scramble runtime error: %s [!]\n", err.c_str());
+    }
+    if (progress_owner) progress.end();
+    return st;
+}
+
 
 
 
@@ -7835,6 +8671,33 @@ static const char* kLegacyDetailedHelp = R"HELP(
 [!] -mnemonic 4                    sha3-256 (1 iter in basic).
 [!] -mnemonic 5                    md5 (1 iter in basic).
 [!] -mnemonic 6                    hexing function.
+[!] -mnemonic -scramble [WORDS]    Unique multiset permutations on Metal.
+[!]
+[!] Scramble input / positional restrictions:
+[!] -scramble "WORDS"              Inline 12/15/18/21/24-word BIP39 phrase.
+[!] -i FILE                        One scramble phrase per line; repeatable.
+[!] -pattern "TOKENS"              One token per output position:
+[!]                                * = any remaining phrase word;
+[!]                                word = fix that word at this position;
+[!]                                {word|word} = restrict this position.
+[!] -pattern-file FILE             Read exactly one non-comment pattern.
+[!] -start N / -end N              Checked U256 permutation ordinal range;
+[!]                                end is exclusive and defaults to the full
+[!]                                unique-multiset permutation domain.
+[!] -n N                           Completed permutation ordinals per batch.
+[!] -wallet-mem auto|all|NN%|SIZE  Unified-memory budget; MiB/GiB supported.
+[!] Duplicate words are handled as a multiset, so identical permutations are
+[!] not repeated. Metal unrank/checksum runs first; only checksum-valid BIP39
+[!] phrases enter seed, derivation and exact target verification. Overflow
+[!] halves and repeats the uncredited window. MultiGPU intervals do not overlap.
+[!] SpeedThreadFunc is the only live statistics printer (Candidate/s).
+[!] Examples:
+[!] ./METAL_CRYPTO_TOOLKIT -mnemonic -scramble \
+[!]   "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about" \
+[!]   -pattern "* * * * * * * * * * * *" -d paths.txt -c c -hash HEX
+[!] ./METAL_CRYPTO_TOOLKIT -mnemonic -scramble -i phrases.txt \
+[!]   -pattern-file positions.txt -start 0 -end 0x100000 \
+[!]   -wallet-mem all -device 0 -d paths.txt -c p -hash HEX
 
 [!] Required / input:
 [!] -d FILE                        BIP derivation paths file for address/path checks.
@@ -9426,6 +10289,7 @@ static void printHelpShort() {
 [!]
 [!] [!] MNEMONIC / DERIVATION MODES [!] [!]
 [!] -mnemonic                     BIP39 mnemonic search.
+[!] -mnemonic -scramble           GPU checksum-first mnemonic permutations.
 [!] -recovery                     Mnemonic template recovery.
 [!] -seed                         Seed bytes mode.
 [!] -hmac                         BIP32 HMAC mode.
@@ -11993,6 +12857,11 @@ int main(int argc, char** argv)
             metalStatus = processMetalProfanity();
         }
     }
+    else if (MNEMONIC_SCRAMBLE_MODE)
+    {
+        printf("[!] starting mnemonic scramble mode [!]\n");
+        metalStatus = processMetalMnemonicScramble();
+    }
     else if (RECOVERY_MODE)
     {
         if (recoveryQueue.empty()) {
@@ -13902,6 +14771,9 @@ int main(int argc, char** argv)
     fclose(OUT_FILE);
     release_all_gpu_contexts();
 
+    if (MNEMONIC_SCRAMBLE_MODE && metalStatus != metalSuccess) {
+        return metalStatus == metalErrorInvalidValue ? 2 : 1;
+    }
     return (BIP38_MODE && metalStatus != metalSuccess) ? 1 : 0;
 }
 
@@ -14421,6 +15293,48 @@ bool readArgs(int argc, char** argv) {
             }
             profanity_random_seeds_per_pick = static_cast<uint64_t>(parsed);
             profanity_random_seeds_explicit = true;
+            a += 2;
+            continue;
+        }
+        if (strcmp(argv[a], "-scramble") == 0) {
+            MNEMONIC_SCRAMBLE_MODE = true;
+            mnemonic_mode_explicit = true;
+            a++;
+            if (a < argc && argv[a] != nullptr && argv[a][0] != '-') {
+                if (!mnemonic_scramble_inline.empty()) {
+                    fprintf(stderr, "[!] Error: -scramble accepts only one inline phrase; use -i FILE for more [!]\n");
+                    return false;
+                }
+                mnemonic_scramble_inline = argv[a];
+                a++;
+            }
+            continue;
+        }
+        if (strcmp(argv[a], "-pattern") == 0) {
+            if (a + 1 >= argc) {
+                fprintf(stderr, "[!] Error: -pattern requires a positional mnemonic pattern [!]\n");
+                return false;
+            }
+            if (!mnemonic_scramble_pattern.empty() ||
+                !mnemonic_scramble_pattern_file.empty()) {
+                fprintf(stderr, "[!] Error: use exactly one -pattern or -pattern-file [!]\n");
+                return false;
+            }
+            mnemonic_scramble_pattern = argv[a + 1];
+            a += 2;
+            continue;
+        }
+        if (strcmp(argv[a], "-pattern-file") == 0) {
+            if (a + 1 >= argc) {
+                fprintf(stderr, "[!] Error: -pattern-file requires a file path [!]\n");
+                return false;
+            }
+            if (!mnemonic_scramble_pattern.empty() ||
+                !mnemonic_scramble_pattern_file.empty()) {
+                fprintf(stderr, "[!] Error: use exactly one -pattern or -pattern-file [!]\n");
+                return false;
+            }
+            mnemonic_scramble_pattern_file = argv[a + 1];
             a += 2;
             continue;
         }
@@ -17276,9 +18190,30 @@ bool readArgs(int argc, char** argv) {
         std::cerr << "[!] Error: -wallet-scrypt-mem is valid only with scrypt wallet modes [!]" << std::endl;
         return false;
     }
-    if (wallet_memory_explicit && !BIP38_MODE) {
-        std::cerr << "[!] Error: -wallet-mem is not enabled for this wallet mode yet; Wave 1 supports it with -bip38 [!]" << std::endl;
+    if (wallet_memory_explicit && !BIP38_MODE && !MNEMONIC_SCRAMBLE_MODE) {
+        std::cerr << "[!] Error: -wallet-mem is not enabled for this wallet mode yet; it is supported by -bip38 and -mnemonic -scramble [!]" << std::endl;
         return false;
+    }
+    if ((!mnemonic_scramble_pattern.empty() ||
+         !mnemonic_scramble_pattern_file.empty()) &&
+        !MNEMONIC_SCRAMBLE_MODE) {
+        std::cerr << "[!] Error: -pattern/-pattern-file currently require -mnemonic -scramble [!]" << std::endl;
+        return false;
+    }
+    if (MNEMONIC_SCRAMBLE_MODE) {
+        if (RECOVERY_MODE || recovery_arg_seen || mode_scoped_recovery ||
+            IS_PRIV || IS_MINIKEYS || BRAIN || OLD || ARMORY ||
+            ARMORY_ROOT || IS_ENTROPY || SEED || HMAC || BIP32 ||
+            POETRY_MODE || XP_MODE || prng_gen || prng64_gen ||
+            hexset_mode || isRandom || backward || both ||
+            pass_thread_mode || der_thread_mode) {
+            std::cerr << "[!] Error: -mnemonic -scramble is a standalone mnemonic source and cannot be mixed with recovery, other source modes, PRNG/random, hexset, direction, pass_thread, or der_thread [!]" << std::endl;
+            return false;
+        }
+        if (mnemonic_scramble_inline.empty() && mnemonicFiles.empty()) {
+            std::cerr << "[!] Error: -mnemonic -scramble requires inline WORDS or -i FILE [!]" << std::endl;
+            return false;
+        }
     }
     if (WALLET_LOAD_ONLY && !(is_wallet_artifact_password_mode() || BIP38_MODE || ANDROIDWALLET_MODE)) {
         std::cerr << "[!] Error: -wallet-load-only is valid only with wallet artifact modes [!]" << std::endl;
