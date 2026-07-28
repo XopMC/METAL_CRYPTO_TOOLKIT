@@ -7630,9 +7630,22 @@ metalError_t processMetalMnemonicScramble() {
         (use_n_count && n_number != 0u)
         ? n_number
         : (1ull << 20u);
+    const uint64_t dispatch_threads =
+        BLOCK_THREADS == 0u ? 256u : BLOCK_THREADS;
+    const uint64_t dispatch_blocks =
+        BLOCK_NUMBER == 0u ? 1024u : BLOCK_NUMBER;
+    const uint64_t dispatch_capacity =
+        dispatch_blocks >
+                std::numeric_limits<uint64_t>::max() /
+                    dispatch_threads
+        ? std::numeric_limits<uint64_t>::max()
+        : dispatch_blocks * dispatch_threads;
     const uint64_t hard_batch = std::min<uint64_t>(
-        requested_batch,
-        static_cast<uint64_t>(std::numeric_limits<uint32_t>::max()));
+        std::min<uint64_t>(
+            requested_batch,
+            static_cast<uint64_t>(
+                std::numeric_limits<uint32_t>::max())),
+        dispatch_capacity);
 
     metalDeviceProp properties{};
     metalError_t st = metalGetDeviceProperties(&properties, DEVICE_NR);
@@ -7853,10 +7866,10 @@ metalError_t processMetalMnemonicScramble() {
                     goto scramble_cleanup;
                 }
                 const uint32_t threads =
-                    BLOCK_THREADS == 0u ? 256u : BLOCK_THREADS;
+                    static_cast<uint32_t>(dispatch_threads);
                 const uint32_t blocks = static_cast<uint32_t>(
                     std::min<uint64_t>(
-                        BLOCK_NUMBER == 0u ? 1024u : BLOCK_NUMBER,
+                        dispatch_blocks,
                         std::max<uint64_t>(
                             1u,
                             (window.count + threads - 1u) /
