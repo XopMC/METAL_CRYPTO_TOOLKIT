@@ -45,6 +45,7 @@ CPP_SRCS := \
 	HdPath/HdPathMode.cpp \
 	Hamming/HammingMode.cpp \
 	WarpWallet/WarpWalletMode.cpp \
+	Brain/BrainInput.cpp \
 	host_secp/HostSecp256k1.cpp \
 	old_electrum_host.cpp \
 	lib/util.cpp lib/Bech32.cpp lib/V/VBase58.cpp \
@@ -71,6 +72,7 @@ LOCALIZED_HOST_HEADERS := Makefile KernelRuntime.h MacFileSystem.h Poetry.h Poet
 	HdPath/HdPathMode.h \
 	Hamming/HammingMode.h \
 	WarpWallet/WarpWalletMode.h \
+	Brain/BrainInput.h \
 	Prng32ComboAllowlist.generated.h Prng64ComboAllowlist.generated.h \
 	Kernels/ProfanityHost.h Kernels/WalletModesHost.h Kernels/XpReplayHost.h \
 	lib/hash/GPUHash.h lib/hash/sha3_ver3.h

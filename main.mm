@@ -24,6 +24,7 @@
 #include "HdPath/HdPathMode.h"
 #include "Hamming/HammingMode.h"
 #include "WarpWallet/WarpWalletMode.h"
+#include "Brain/BrainInput.h"
 #include "Kernels/ProfanityHost.h"
 #include "Kernels/WalletModesHost.h"
 #include "RecoveryWordlistsEmbedded.h"
@@ -2748,6 +2749,11 @@ uint8_t ARMORY_MODE = 0;
 bool IS_STRING = false;
 bool BRAIN = false;
 uint8_t brainMode = 0;
+static std::string brain_profile_arg;
+static std::string brain_rules_path;
+static std::string brain_combine_path;
+static std::string brain_combine_mode = "lr";
+static brain_input::Configuration g_brain_input_configuration;
 
 
 #ifdef _DEBUG
@@ -9686,6 +9692,33 @@ static const char* kLegacyDetailedHelp = R"HELP(
 [!] -brain 2                       keccak256.
 [!] -brain 3                       blake2b-256.
 [!] -brain 4                       passthrough.
+[!]
+[!] Named profiles:
+[!] -brain-profile NAME            Owns hash mode, iteration count and
+[!]                                binary/hex chaining for this run.
+[!]   sha256                       Ordinary SHA-256 (legacy default).
+[!]   brainflayer-sha256           Historical brainflayer SHA-256 alias.
+[!]   brainwallet.org              Historical SHA-256 alias.
+[!]   bitaddress / bitcoinjs       Historical SHA-256 aliases.
+[!]   sha256d / sha256-hex         Two binary or lowercase-hex rounds.
+[!]   sha3-256[d]                  SHA3-256, one or two binary rounds.
+[!]   keccak256[d]                 Keccak-256, one or two binary rounds.
+[!]   blake2b-256[d]               BLAKE2b-256, one or two binary rounds.
+[!]   raw                          Right-aligned 32-byte private material.
+[!]
+[!] Streaming rules / combinator:
+[!] -brain-rules FILE              Hashcat-compatible core rules, one per line.
+[!]                                Supported: : l u c C t r d pN f q { } [ ]
+[!]                                k K $X ^X TN DN 'N xNM sXY @X iNX oNX zN ZN.
+[!]                                Use \xNN for a binary/literal argument.
+[!] -brain-combine FILE            Stream left candidates with a right dictionary.
+[!] -brain-combine-mode lr|rl|both Concatenation order, default lr.
+[!] -space                         Insert one ASCII space between both words.
+[!] Rules are compiled once, duplicate rules are removed, and expansions feed
+[!] the existing double-buffered Metal worker without materializing the
+[!] logical cross-product. Right files up to 64 MiB are resident; larger files
+[!] are replayed as a bounded stream. Completed expanded candidates, not base
+[!] lines, are credited by the common SpeedThreadFunc.
 
 [!] Input / transform:
 [!] -i FILE                        Brainwallet text input file. STDIN is used when -i is not set.
@@ -9727,6 +9760,11 @@ static const char* kLegacyDetailedHelp = R"HELP(
 [!]
 [!] Example:
 [!] ./METAL_CRYPTO_TOOLKIT -brain 2 -iter 1,2,3 -i brain.txt -c cuspex -bf bloom.blf
+[!] ./METAL_CRYPTO_TOOLKIT -brain -brain-profile sha256d \
+[!]   -brain-rules best64.rule -i phrases.txt -c c -hash HASH160
+[!] ./METAL_CRYPTO_TOOLKIT -brain -brain-profile sha256 \
+[!]   -i left.txt -brain-combine right.txt -brain-combine-mode both -space \
+[!]   -c c -bf targets.blf
 
 [!] ======================================================================
 [!] MAIN MODE: -old  (Old Electrum mnemonic)
@@ -12175,6 +12213,68 @@ int main(int argc, char** argv)
     }
     if (!readArgs(argc, argv)) {
         return 2;
+    }
+    const bool brain_extended_requested =
+        !brain_profile_arg.empty() ||
+        !brain_rules_path.empty() ||
+        !brain_combine_path.empty() ||
+        brain_combine_mode != "lr";
+    if (brain_extended_requested && !BRAIN) {
+        std::cerr << "[!] Error: -brain-profile/-brain-rules/-brain-combine options require -brain [!]"
+                  << std::endl;
+        return 2;
+    }
+    if (BRAIN) {
+        std::string brain_error;
+        if (!brain_profile_arg.empty()) {
+            brain_input::ProfileSelection profile;
+            if (!brain_input::resolve_profile(brain_profile_arg, profile, brain_error)) {
+                std::cerr << "[!] Error: " << brain_error << " [!]" << std::endl;
+                return 2;
+            }
+            brainMode = profile.mode;
+            Iterations = profile.iterations;
+            IS_UTF8 = profile.hexadecimal_iterations;
+            std::cout << "[!] Brain profile: " << profile.canonical_name
+                      << " | mode=" << static_cast<unsigned>(brainMode)
+                      << " | iterations=" << Iterations.front()
+                      << (IS_UTF8 ? " | hex-between-rounds" : "")
+                      << " [!]" << std::endl;
+        }
+        if (!brain_input::prepare_configuration(
+                brain_rules_path,
+                brain_combine_path,
+                brain_combine_mode,
+                combo_space,
+                g_brain_input_configuration,
+                brain_error)) {
+            std::cerr << "[!] Error: " << brain_error << " [!]" << std::endl;
+            return 2;
+        }
+        if (g_brain_input_configuration.expands_candidates()) {
+            if (IS_HEX) {
+                std::cerr << "[!] Error: -brain-rules/-brain-combine operate on text candidates and cannot be combined with -hex [!]"
+                          << std::endl;
+                return 2;
+            }
+            if (seqMode || isRandom || prng_gen || prng64_gen || hexset_mode ||
+                mode_scoped_recovery) {
+                std::cerr << "[!] Error: -brain-rules/-brain-combine require external file/stdin input, not seq/random/PRNG/hexset/recovery [!]"
+                          << std::endl;
+                return 2;
+            }
+            std::cout << "[!] Brain streaming expander: "
+                      << g_brain_input_configuration.rules.size() << " rule(s)";
+            if (!brain_combine_path.empty()) {
+                std::cout << " | combine=" << brain_combine_mode
+                          << " | right="
+                          << (g_brain_input_configuration.right_dictionary_resident
+                                  ? "resident<=64MiB"
+                                  : "streamed");
+            }
+            std::cout << " [!]" << std::endl;
+        }
+        brain_input::reset_skipped_candidates();
     }
     if (POETRY_MODE) {
         std::string poetry_error;
@@ -14810,6 +14910,13 @@ int main(int argc, char** argv)
 
     cout << "\n";
     shutdown_async_save_queues();
+    if (BRAIN) {
+        const std::uint64_t skipped = brain_input::skipped_candidates();
+        if (skipped != 0u) {
+            std::cout << "[!] Brain expander skipped " << skipped
+                      << " candidate(s) that violated a rule position or the 512-byte limit [!]\n";
+        }
+    }
 
     s_time = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
     if (!PROFANITY_MODE && !XP_MODE && !IS_PRIV && !IS_MINIKEYS && !POETRY_MODE)
@@ -14825,6 +14932,9 @@ int main(int argc, char** argv)
 
     if (MNEMONIC_SCRAMBLE_MODE && metalStatus != metalSuccess) {
         return metalStatus == metalErrorInvalidValue ? 2 : 1;
+    }
+    if (BRAIN && metalStatus != metalSuccess) {
+        return 1;
     }
     return (BIP38_MODE && metalStatus != metalSuccess) ? 1 : 0;
 }
@@ -14926,6 +15036,42 @@ bool readArgs(int argc, char** argv) {
             }
             DEVICE_NR = DEVICE_LIST.front();
             a++;
+            continue;
+        }
+        if (strcmp(argv[a], "-brain-profile") == 0) {
+            if (a + 1 >= argc) {
+                fprintf(stderr, "[!] Error: -brain-profile requires NAME [!]\n");
+                return false;
+            }
+            brain_profile_arg = argv[a + 1];
+            a += 2;
+            continue;
+        }
+        if (strcmp(argv[a], "-brain-rules") == 0) {
+            if (a + 1 >= argc) {
+                fprintf(stderr, "[!] Error: -brain-rules requires FILE [!]\n");
+                return false;
+            }
+            brain_rules_path = argv[a + 1];
+            a += 2;
+            continue;
+        }
+        if (strcmp(argv[a], "-brain-combine") == 0) {
+            if (a + 1 >= argc) {
+                fprintf(stderr, "[!] Error: -brain-combine requires FILE [!]\n");
+                return false;
+            }
+            brain_combine_path = argv[a + 1];
+            a += 2;
+            continue;
+        }
+        if (strcmp(argv[a], "-brain-combine-mode") == 0) {
+            if (a + 1 >= argc) {
+                fprintf(stderr, "[!] Error: -brain-combine-mode requires lr, rl, or both [!]\n");
+                return false;
+            }
+            brain_combine_mode = argv[a + 1];
+            a += 2;
             continue;
         }
         if (strcmp(argv[a], "-poetry") == 0) {
@@ -56253,6 +56399,22 @@ metalError_t processMetalBrain(std::istream& stream)
     reserve_batch_buffers(combined1, indexes1, outputSizeB_T, 2048);
     reserve_batch_buffers(combined2, indexes2, outputSizeB_T, 2048);
     const bool input_requires_shared_lock = stream_requires_shared_read_lock(stream);
+    const bool expands_brain_candidates =
+        g_brain_input_configuration.expands_candidates();
+    brain_input::Expander brain_expander(g_brain_input_configuration);
+    std::string brain_expand_error;
+    const brain_input::Expander::ReadBase read_brain_base =
+        [&](std::string& line) -> bool {
+            return read_trimmed_line_known_lock(
+                stream, line, 512, input_requires_shared_lock);
+        };
+    auto read_brain_candidate = [&](std::string& line) -> bool {
+        if (!expands_brain_candidates) {
+            return read_brain_base(line);
+        }
+        return brain_expander.next(
+            read_brain_base, line, brain_expand_error);
+    };
 
     std::chrono::steady_clock::time_point beginCountHashrate = std::chrono::steady_clock::now();
     std::chrono::steady_clock::time_point beginCountStatus = std::chrono::steady_clock::now();
@@ -56289,7 +56451,7 @@ metalError_t processMetalBrain(std::istream& stream)
         nr1 = 0;
         data1ready = false;
         std::chrono::steady_clock::time_point beginCountRead = std::chrono::steady_clock::now();
-        while (read_trimmed_line_known_lock(stream, buffer, 512, input_requires_shared_lock))
+        while (read_brain_candidate(buffer))
         {
             if (buffer.length() == 0) {
                 continue;
@@ -56301,6 +56463,11 @@ metalError_t processMetalBrain(std::istream& stream)
             }
             data1ready = true;
             break;
+        }
+        if (!brain_expand_error.empty()) {
+            fprintf(stderr, "[!] Error: %s [!]\n", brain_expand_error.c_str());
+            metalStatus = metalErrorInvalidValue;
+            goto Error;
         }
         if (!data1ready) {
             isData = false;
@@ -56338,6 +56505,12 @@ metalError_t processMetalBrain(std::istream& stream)
                 clear_result_flag_host(buffIsResult);
                 SaveResultBrain(OUT_FILE, Founds, save, Derivations_list);
             }
+            const std::uint64_t completed =
+                static_cast<std::uint64_t>(nr2) *
+                ((static_cast<std::uint64_t>(Rounds) * 2u) + 1u) *
+                Iterations.size();
+            counter += completed;
+            counterTotal += completed;
         }
 
         //launch kernel 1
@@ -56351,14 +56524,12 @@ metalError_t processMetalBrain(std::istream& stream)
         }
 
         STATUS = nr2Last;
-        counter += (nr1 * ((Rounds * 2) + 1)) * Iterations.size();
-        counterTotal += (nr1 * ((Rounds * 2) + 1)) * Iterations.size();
         //read file 1
         combined2.clear();
         indexes2.clear();
         nr2 = 0;
         data2ready = false;
-        while (read_trimmed_line_known_lock(stream, buffer, 512, input_requires_shared_lock))
+        while (read_brain_candidate(buffer))
         {
             if (buffer.length() == 0) {
                 continue;
@@ -56370,6 +56541,11 @@ metalError_t processMetalBrain(std::istream& stream)
             }
             data2ready = true;
             break;
+        }
+        if (!brain_expand_error.empty()) {
+            fprintf(stderr, "[!] Error: %s [!]\n", brain_expand_error.c_str());
+            metalStatus = metalErrorInvalidValue;
+            goto Error;
         }
         if (!data2ready) {
             isData = false;
@@ -56399,6 +56575,12 @@ metalError_t processMetalBrain(std::istream& stream)
                 clear_result_flag_host(buffIsResult);
                 SaveResultBrain(OUT_FILE, Founds, save, Derivations_list);
             }
+            const std::uint64_t completed =
+                static_cast<std::uint64_t>(nr1) *
+                ((static_cast<std::uint64_t>(Rounds) * 2u) + 1u) *
+                Iterations.size();
+            counter += completed;
+            counterTotal += completed;
         }
         //launch kernel 2
         if (nr2 > 0) {
@@ -56410,8 +56592,6 @@ metalError_t processMetalBrain(std::istream& stream)
             }
         }
         STATUS = nr1Last;
-        counter += (nr2 * ((Rounds *2)+ 1)) * Iterations.size();
-        counterTotal += (nr2 * ((Rounds *2)+ 1)) * Iterations.size();
     }
     metalDeviceSynchronize();
     if (read_result_flag_host(buffIsResult)) {

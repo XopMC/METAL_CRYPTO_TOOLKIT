@@ -171,6 +171,22 @@ Wave 9 adds historical memory-hard brainwallet profiles:
   overflowed hit batches are replayed without double credit, and the common
   `SpeedThreadFunc` remains the only live `KDF/s` printer.
 
+Wave 10 extends the ordinary fast `-brain` path:
+
+- `-brain-profile` gives stable names to historical SHA-256 aliases and to
+  binary/hex double-hash, SHA3-256, Keccak-256, BLAKE2b-256, and raw profiles;
+- `-brain-rules FILE` compiles the commonly used hashcat rule core once,
+  removes duplicate rules, and applies the resulting bounded transformations
+  before the existing Metal hash/secp256k1 pipeline;
+- `-brain-combine FILE` adds `lr`, `rl`, or `both` dictionary concatenation,
+  with optional `-space`; the logical cross-product is produced through
+  backpressured streaming rather than materialized as a second dictionary;
+- right dictionaries up to 64 MiB are resident and larger files are replayed
+  as bounded streams, while candidate overflow or invalid rule positions are
+  explicitly counted instead of silently truncated;
+- expanded candidates retain the established exact target filters, found
+  format, multi-device dispatch, and the single common `SpeedThreadFunc`.
+
 #### v15
 
 The July 25 update extends both interval-DLP modes for very large target
@@ -2333,9 +2349,21 @@ use `KDF/s`.
 
 `-iter` repeats the selected transform. Sequential, PRNG, file-combination, and mode-scoped hexadecimal-template sources are available.
 
+Named profiles use `-brain-profile sha256|brainflayer-sha256|brainwallet.org|bitaddress|bitcoinjs|sha256d|sha256-hex|sha3-256[d]|keccak256[d]|blake2b-256[d]|raw`. A named profile owns the transform, iteration count, and binary/hex chaining.
+
+For streamed dictionary mutation, `-brain-rules FILE` accepts the documented hashcat-compatible core (`: l u c C t r d pN f q { } [ ] k K $X ^X TN DN 'N xNM sXY @X iNX oNX zN ZN`). `-brain-combine FILE` joins each left candidate with a right dictionary; `-brain-combine-mode lr|rl|both` selects the order and `-space` inserts one space. These options operate on text input and are intentionally rejected with `-hex` or internal seq/PRNG/template sources.
+
 ```bash
 ./METAL_CRYPTO_TOOLKIT -brain -i phrases.txt -c c \
   -hash 00112233445566778899aabbccddeeff00112233 -save
+
+./METAL_CRYPTO_TOOLKIT -brain -brain-profile sha256d \
+  -brain-rules best64.rule -i phrases.txt -c c \
+  -hash 00112233445566778899aabbccddeeff00112233
+
+./METAL_CRYPTO_TOOLKIT -brain -brain-profile sha256 \
+  -i left.txt -brain-combine right.txt -brain-combine-mode both -space \
+  -c c -hash 00112233445566778899aabbccddeeff00112233
 ```
 
 Found records contain the visible candidate, its hexadecimal bytes, iteration count, private key, target type, and match.
@@ -3226,6 +3254,22 @@ tune выбрал 256 потоков на Metal threadgroup: на нагрузк
 - каждый Metal hit независимо проверяется через host secp256k1/hash160,
   переполненные batches повторяются без двойного зачёта, а единственным
   потоком live-статистики `KDF/s` остаётся общий `SpeedThreadFunc`.
+
+Волна 10 расширяет обычный быстрый контур `-brain`:
+
+- `-brain-profile` задаёт стабильные имена историческим SHA-256 aliases, а
+  также binary/hex double-hash, SHA3-256, Keccak-256, BLAKE2b-256 и raw;
+- `-brain-rules FILE` один раз компилирует основной совместимый набор правил
+  hashcat, удаляет дубли и применяет ограниченные преобразования до
+  существующего Metal pipeline hash/secp256k1;
+- `-brain-combine FILE` добавляет конкатенацию словарей `lr`, `rl` или `both`
+  и опциональный `-space`; логическое декартово произведение поступает через
+  backpressure-stream и не материализуется отдельным огромным списком;
+- правый словарь до 64 MiB хранится resident, больший повторно читается
+  ограниченным потоком, а выход за 512 байт и неприменимые позиции правил
+  явно учитываются вместо тихого усечения;
+- расширенные кандидаты сохраняют точные фильтры целей, формат результатов,
+  multi-device dispatch и единственный общий `SpeedThreadFunc`.
 
 #### v15
 
@@ -5408,9 +5452,21 @@ Metal-шардов.
 
 `-iter` повторяет выбранное преобразование. Поддерживаются файлы, stdin, сочетания слов, диапазоны, PRNG и hex-шаблоны этого режима.
 
+Именованные профили задаются как `-brain-profile sha256|brainflayer-sha256|brainwallet.org|bitaddress|bitcoinjs|sha256d|sha256-hex|sha3-256[d]|keccak256[d]|blake2b-256[d]|raw`. Профиль сам задаёт transform, число итераций и binary/hex chaining.
+
+Для потоковой мутации словаря `-brain-rules FILE` принимает документированный hashcat-совместимый core (`: l u c C t r d pN f q { } [ ] k K $X ^X TN DN 'N xNM sXY @X iNX oNX zN ZN`). `-brain-combine FILE` объединяет левый и правый словари, `-brain-combine-mode lr|rl|both` выбирает порядок, а `-space` вставляет пробел. Эти параметры работают с текстовым входом и намеренно запрещены вместе с `-hex` либо внутренними seq/PRNG/template источниками.
+
 ```bash
 ./METAL_CRYPTO_TOOLKIT -brain -i phrases.txt -c c \
   -hash 00112233445566778899aabbccddeeff00112233 -save
+
+./METAL_CRYPTO_TOOLKIT -brain -brain-profile sha256d \
+  -brain-rules best64.rule -i phrases.txt -c c \
+  -hash 00112233445566778899aabbccddeeff00112233
+
+./METAL_CRYPTO_TOOLKIT -brain -brain-profile sha256 \
+  -i left.txt -brain-combine right.txt -brain-combine-mode both -space \
+  -c c -hash 00112233445566778899aabbccddeeff00112233
 ```
 
 В запись входят читаемый кандидат, его байты в hex, номер повторения, приват, тип цели и совпавшее значение.
