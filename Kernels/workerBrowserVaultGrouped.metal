@@ -7,6 +7,7 @@
 
 #define WALLET_MODE_BIP38 15u
 #define BROWSERVAULT_PROFILE_TERRA_STATION_AES_CBC 34u
+#define BROWSERVAULT_PROFILE_BITSHARES_0X_AES_CBC 35u
 
 constant uint browser_vault_profile_specialization [[function_constant(92)]];
 static constant uint BROWSERVAULT_PROFILE_DYNAMIC = 0xffffffffu;
@@ -598,6 +599,75 @@ static inline void wallet_emit_terra_result(
     out.payload_len = 20u;
 }
 
+__attribute__((noinline)) static bool wallet_bitshares_0x_verify(
+    const constant secp256k1_ge_storage* precPtr,
+    ulong precPitch,
+    const thread uchar key32[32],
+    const thread uchar iv16[16],
+    const device BrowserVaultDeviceTarget& target,
+    const device uchar* ciphertext,
+    thread uchar priv32[32],
+    thread uchar public33[33]) {
+    if (precPtr == nullptr || ciphertext == nullptr ||
+        target.iv_len != 0u || target.ciphertext_len != 48u ||
+        target.expected_public_len != 33u) {
+        return false;
+    }
+    uint round_keys[60];
+    provider_aes_expand_key(key32, round_keys);
+    uchar plain[48];
+    for (uint block = 0u; block < 3u; ++block) {
+        const uint off = block * 16u;
+        wallet_aes256_decrypt_block(
+            round_keys, ciphertext + off, plain + off);
+        for (uint i = 0u; i < 16u; ++i) {
+            const uchar previous = block == 0u
+                ? iv16[i]
+                : ciphertext[off - 16u + i];
+            plain[off + i] = uchar(plain[off + i] ^ previous);
+        }
+    }
+    for (uint i = 32u; i < 48u; ++i) {
+        if (plain[i] != 16u) return false;
+    }
+    for (uint i = 0u; i < 32u; ++i) priv32[i] = plain[i];
+    if (!walletks_pubkey_from_private(
+            precPtr, precPitch, priv32, public33, 33u)) {
+        return false;
+    }
+    uchar diff = 0u;
+    for (uint i = 0u; i < 33u; ++i) {
+        diff |= uchar(public33[i] ^ target.expected_public[i]);
+    }
+    return diff == 0u;
+}
+
+static inline void wallet_emit_bitshares_result(
+    device bool* isResult,
+    device bool* buffResult,
+    const thread uchar* pass,
+    uint pass_len,
+    uint target_index,
+    const thread uchar priv32[32],
+    const thread uchar public33[33],
+    device WalletModeResult* wallet_results,
+    device atomic_uint* wallet_count,
+    uint max_founds) {
+    walletks_mark_hit(isResult, buffResult);
+    if (wallet_results == nullptr || wallet_count == nullptr) return;
+    const ulong ridx = wallet_atomic_add_count(wallet_count, 1u);
+    if (ridx >= ulong(max_founds)) return;
+    device WalletModeResult& out = wallet_results[ridx];
+    wallet_zero_result(out);
+    out.mode = WALLET_MODE_BROWSERVAULT;
+    out.type = BROWSERVAULT_PROFILE_BITSHARES_0X_AES_CBC;
+    out.target_index = target_index;
+    walletks_copy_password(out, pass, pass_len);
+    for (uint i = 0u; i < 32u; ++i) out.priv[i] = priv32[i];
+    for (uint i = 0u; i < 33u; ++i) out.payload[i] = public33[i];
+    out.payload_len = 33u;
+}
+
 kernel void workerBrowserVaultGrouped(device bool* isResult [[buffer(0)]],
                                       device bool* buffResult [[buffer(1)]],
                                       constant secp256k1_ge_storage* precPtr [[buffer(2)]],
@@ -707,6 +777,23 @@ kernel void workerBrowserVaultGrouped(device bool* isResult [[buffer(0)]],
         } else if (group_profile == BROWSERVAULT_PROFILE_TERRA_STATION_AES_CBC) {
             wallet_pbkdf2_sha1_32(pass_local, pass_len, group.salt, group.salt_len,
                                   group.iterations, key32);
+        } else if (group_profile ==
+                   BROWSERVAULT_PROFILE_BITSHARES_0X_AES_CBC) {
+            if (group.salt_len != 64u) continue;
+            thread uchar digest64[64];
+            thread uchar checksum64[64];
+            SHA512(pass_local, ulong(pass_len), digest64);
+            SHA512(digest64, 64ul, checksum64);
+            uchar diff = 0u;
+            for (uint i = 0u; i < 64u; ++i) {
+                diff |= uchar(checksum64[i] ^ group.salt[i]);
+            }
+            if (diff != 0u) continue;
+            for (uint i = 0u; i < 32u; ++i) key32[i] = digest64[i];
+            for (uint i = 0u; i < 16u; ++i) {
+                atomic_iv16[i] = digest64[32u + i];
+            }
+            atomic_key_ready = true;
         } else if (group_profile == BROWSERVAULT_PROFILE_DOGECHAIN_PBKDF2_AES_CBC) {
             thread uchar pass_sha[32];
             thread uchar pass_b64[44];
@@ -784,6 +871,20 @@ kernel void workerBrowserVaultGrouped(device bool* isResult [[buffer(0)]],
                     wallet_emit_terra_result(
                         isResult, buffResult, pass_local, pass_len,
                         target.target_index, priv32, hash160,
+                        wallet_results, wallet_count, max_founds);
+                }
+                continue;
+            } else if (target_profile ==
+                       BROWSERVAULT_PROFILE_BITSHARES_0X_AES_CBC) {
+                if (!atomic_key_ready) continue;
+                thread uchar priv32[32];
+                thread uchar public33[33];
+                if (wallet_bitshares_0x_verify(
+                        precPtr, precPitch, key32, atomic_iv16,
+                        target, ciphertext, priv32, public33)) {
+                    wallet_emit_bitshares_result(
+                        isResult, buffResult, pass_local, pass_len,
+                        target.target_index, priv32, public33,
                         wallet_results, wallet_count, max_founds);
                 }
                 continue;

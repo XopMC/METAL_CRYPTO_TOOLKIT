@@ -234,6 +234,22 @@ Wave 13 adds strict legacy Terra Station export recovery:
 - unknown Terra formats, mnemonics, hardware-wallet records, malformed
   checksums, and unauthenticated plaintext heuristics are rejected.
 
+Wave 14 adds exact BitShares 0.x exported-key recovery:
+
+- `-bitshareswallet` loads the official `exported_keys` JSON schema with its
+  password checksum and parallel encrypted-private/public-key arrays;
+- the loader validates every BTS/BTSX Base58 public-key payload and its
+  RIPEMD-160 checksum before Metal work, and deduplicates repeated key records;
+- Metal computes `SHA512(password)` once per checksum group, verifies the
+  stored `SHA512(password_key)`, decrypts AES-256-CBC/PKCS7 with the derived
+  key and IV, validates the private scalar, and regenerates the exact
+  compressed secp256k1 public key;
+- keys sharing one `password_checksum` reuse the same SHA-512 result, compact
+  target/ciphertext storage remains inside `-wallet-mem`, and only the common
+  `SpeedThreadFunc` prints completed `KDF/s` and actual `Verify/s`;
+- arbitrary wallet-database records, watch-only entries, invalid key
+  checksums, malformed arrays, and unknown future containers are rejected.
+
 A cross-wave PRNG compatibility update tracks the current CUDA catalog:
 
 - `-prng` now includes Ill Bloom generators `332..489` and modes `247..762`,
@@ -2695,6 +2711,47 @@ Only this legacy exported-key profile is supported. Terra mnemonics, hardware
 wallets, modern WalletConnect records, and unknown future formats are not
 password-recovery targets.
 
+#### `-bitshareswallet`
+
+This mode recovers passwords for the official BitShares 0.x `exported_keys`
+JSON format. Pass one or more files directly after the mode, or use `-f DIR`
+to scan `.json` and extensionless files.
+
+The strict loader requires a 64-byte hexadecimal `password_checksum` and a
+non-empty `account_keys` array. Each account must contain parallel non-empty
+`encrypted_private_keys` and `public_keys` string arrays. Encrypted private
+keys are exactly 48 AES-CBC bytes. Public keys must use the historical `BTS`
+or `BTSX` prefix, decode to a compressed secp256k1 key, and carry the correct
+four-byte RIPEMD-160 checksum.
+
+Metal computes `password_key = SHA512(password)` and rejects candidates whose
+`SHA512(password_key)` differs from the exported checksum. The first 32 bytes
+of `password_key` are the AES-256 key and bytes 32 through 47 are the CBC IV.
+After exact PKCS7 validation, the 32-byte plaintext scalar is converted back
+to a compressed secp256k1 public key and compared byte-for-byte with the
+exported identity. Keys with the same password checksum share one KDF job.
+`-wallet-mem` bounds the unified-memory working set.
+
+```bash
+./METAL_CRYPTO_TOOLKIT -bitshareswallet exported-keys.json \
+  -i passwords.txt -wallet-mem auto -save
+
+./METAL_CRYPTO_TOOLKIT -bitshareswallet -f bitshares_exports \
+  -mask "?a?a?a?a?a?a?a?a" -wallet-mem all -device 0 \
+  -save -o bitshares_found.txt
+```
+
+Result:
+
+```text
+BITSHARESWALLET:<source#account/key>:PASSWORD:<password>:PRIV:<64hex>:PUBKEY:<compressed-hex>:PROFILE:bitshares-0x-exported-keys-sha512-aes-256-cbc
+```
+
+Full BitShares wallet databases, watch-only records and unknown containers
+are intentionally not treated as this exported-key profile. The common
+`SpeedThreadFunc` is the only live statistics printer; target count does not
+artificially multiply `KDF/s` or `Verify/s`.
+
 #### `-substratewallet`
 
 This mode recovers passwords for versioned Polkadot/Substrate keyring JSON
@@ -3500,6 +3557,22 @@ tune выбрал 256 потоков на Metal threadgroup: на нагрузк
   печатает только общий `SpeedThreadFunc`;
 - неизвестные Terra-форматы, mnemonic/hardware-wallet записи, неверные
   checksum и эвристики «похожего plaintext» отклоняются.
+
+Волна 14 добавляет точное восстановление exported keys BitShares 0.x:
+
+- `-bitshareswallet` загружает официальную JSON-схему `exported_keys` с
+  password checksum и параллельными массивами encrypted private/public keys;
+- до запуска Metal loader проверяет каждый Base58 public key BTS/BTSX вместе
+  с его RIPEMD-160 checksum и удаляет повторяющиеся key records;
+- Metal один раз на checksum-группу вычисляет `SHA512(password)`, сверяет
+  сохранённый `SHA512(password_key)`, расшифровывает AES-256-CBC/PKCS7
+  производными key/IV, проверяет приватный scalar и точно восстанавливает
+  compressed public key secp256k1;
+- ключи с одинаковым `password_checksum` разделяют один SHA-512, компактные
+  metadata/ciphertext остаются в пределах `-wallet-mem`, а завершённые `KDF/s`
+  и реальные `Verify/s` печатает только общий `SpeedThreadFunc`;
+- произвольные записи wallet database, watch-only entries, неверные checksum,
+  нарушенные массивы и неизвестные контейнеры отклоняются.
 
 Межволновое обновление PRNG синхронизирует каталог с текущей CUDA-версией:
 
@@ -5982,6 +6055,47 @@ TERRAWALLET:<source>:PASSWORD:<password>:PRIV:<64hex>:ADDRESS:<terra1...>:PROFIL
 Поддерживается только этот legacy exported-key профиль. Terra mnemonic,
 hardware wallet, современные WalletConnect-записи и неизвестные будущие
 форматы не являются целями восстановления пароля.
+
+#### `-bitshareswallet`
+
+Режим восстанавливает пароли официального JSON-формата `exported_keys`
+BitShares 0.x. Один или несколько файлов передаются сразу после режима;
+`-f DIR` сканирует `.json` и файлы без расширения.
+
+Строгий loader требует 64-байтовый hex `password_checksum` и непустой массив
+`account_keys`. В каждой account-записи должны находиться параллельные
+непустые строковые массивы `encrypted_private_keys` и `public_keys`.
+Зашифрованный приватный ключ имеет ровно 48 байт AES-CBC. Public key обязан
+иметь исторический префикс `BTS` либо `BTSX`, декодироваться в compressed
+secp256k1 key и содержать корректный четырёхбайтовый RIPEMD-160 checksum.
+
+Metal вычисляет `password_key = SHA512(password)` и отбрасывает кандидата,
+если `SHA512(password_key)` не совпал с export. Первые 32 байта password key
+используются как AES-256 key, байты 32–47 — как CBC IV. После точной проверки
+PKCS7 32-байтовый scalar заново преобразуется в compressed secp256k1 public
+key и побайтно сравнивается с экспортированным identity. Ключи с одним
+password checksum используют общую KDF-задачу. `-wallet-mem` ограничивает
+working set unified memory.
+
+```bash
+./METAL_CRYPTO_TOOLKIT -bitshareswallet exported-keys.json \
+  -i passwords.txt -wallet-mem auto -save
+
+./METAL_CRYPTO_TOOLKIT -bitshareswallet -f bitshares_exports \
+  -mask "?a?a?a?a?a?a?a?a" -wallet-mem all -device 0 \
+  -save -o bitshares_found.txt
+```
+
+Результат:
+
+```text
+BITSHARESWALLET:<source#account/key>:PASSWORD:<password>:PRIV:<64hex>:PUBKEY:<compressed-hex>:PROFILE:bitshares-0x-exported-keys-sha512-aes-256-cbc
+```
+
+Полные базы BitShares, watch-only records и неизвестные контейнеры намеренно
+не считаются этим exported-key профилем. Единственный live printer статистики
+— общий `SpeedThreadFunc`; число целей искусственно не умножает `KDF/s` или
+`Verify/s`.
 
 #### `-substratewallet`
 
