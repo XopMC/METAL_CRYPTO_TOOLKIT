@@ -483,7 +483,7 @@ The July 24 `-bsgs` update adds a native deterministic Metal BSGS mode:
   table size, while versioned checksummed table caching remains explicitly
   opt-in;
 - all live statistics are emitted through the standard `SpeedThreadFunc`.
-  Search uses the CUDA-compatible names `GStep/s` and `EqKey/s`; the Metal
+  Search uses names `GStep/s` and `EqKey/s`; the Metal
   negation-map walk reports effective unique coverage as
   `EqKey/s = GStep/s × 2M`.
 
@@ -4398,7 +4398,7 @@ baseline-групп (0,3145 с против 1,8458/1,8701 с, CV 2,180%). Зак
 - `-bsgs-mem` и `-bsgs-table` управляют unified memory и точным размером baby
   table, а версионированный кеш с контрольными суммами включается только явно;
 - вся текущая статистика печатается стандартным `SpeedThreadFunc`. В поиске
-  используются совместимые с CUDA названия `GStep/s` и `EqKey/s`; Metal
+  используются названия `GStep/s` и `EqKey/s`; Metal
   negation-map walk выводит эффективное уникальное покрытие по формуле
   `EqKey/s = GStep/s × 2M`.
 
