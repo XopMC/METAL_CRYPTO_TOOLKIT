@@ -425,7 +425,7 @@ Wave 25 closes the v16 release candidate and full regression:
   companion tools and separate SHA-256 files;
 - detailed help is symmetric in both argument orders, and the release
   regression covers BSGS, Kangaroo `compact170`/`wide256`, wallet modes,
-  BLS12-381, Ill Bloom PRNG, default auto-grid and P2WSH;
+  BLS12-381, default auto-grid and P2WSH;
 - BIP38 now uses an isolated grouped Metal kernel. This restores exact non-EC
   and EC-multiply recovery after the larger shared wallet kernel gained
   Substrate/Cardano paths, without changing the other wallet pipelines;
@@ -433,15 +433,6 @@ Wave 25 closes the v16 release candidate and full regression:
   available scrypt lanes concurrently. The exact two-target non-EC regression
   improved from 9.948/9.941 s (A1/A2) to 5.132 s median on M4 Max
   (+93.835%/+93.703% throughput, 0.123% CV).
-
-A cross-wave PRNG compatibility update tracks the current CUDA catalog:
-
-- `-prng` now includes Ill Bloom generators `332..489` and modes `247..762`,
-  covering source/runtime variants plus exhaustive chain/output sign masks;
-- `-prng64` generators `221..223` expose compact, non-overlapping packed
-  ordinal spaces for fixed signs, runtime profiles, and raw byte lanes;
-- mode `218` emits direct source bytes, packed bounds are validated on the
-  host, and Metal golden tests compare the CUDA vectors and all 32-byte masks.
 
 #### v15
 
@@ -4338,7 +4329,7 @@ Fused pipeline Волны 18 прошёл симметричный gate на 4 1
   notes, набором утилит и отдельными SHA-256;
 - подробный help симметричен в обоих порядках аргументов, а release-регрессия
   покрывает BSGS, Kangaroo `compact170`/`wide256`, wallet-режимы, BLS12-381,
-  Ill Bloom PRNG, default auto-grid и P2WSH;
+  default auto-grid и P2WSH;
 - BIP38 переведён на изолированное grouped Metal-ядро. Оно восстанавливает
   точные non-EC и EC-multiply результаты после добавления
   Substrate/Cardano-контуров в общее wallet-ядро, не меняя остальные
@@ -4347,15 +4338,6 @@ Fused pipeline Волны 18 прошёл симметричный gate на 4 1
   запуском и параллельно занимают доступные scrypt-lanes. Exact-регрессия
   non-EC с двумя целями на M4 Max ускорилась с медиан 9,948/9,941 с (A1/A2)
   до 5,132 с (+93,835%/+93,703% throughput, CV 0,123%).
-
-Межволновое обновление PRNG синхронизирует каталог с текущей CUDA-версией:
-
-- `-prng` получил Ill Bloom генераторы `332..489` и режимы `247..762`, включая
-  варианты источников/runtime и полный перебор знаков цепочки и результата;
-- генераторы `221..223` в `-prng64` задают компактные непересекающиеся
-  пространства индексов для фиксированных знаков, runtime-профилей и byte lanes;
-- режим `218` выдает исходные байты напрямую, host проверяет границы packed
-  индекса, а Metal golden сверяет CUDA-векторы и все 32-байтовые маски.
 
 #### v15
 
