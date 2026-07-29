@@ -25,6 +25,7 @@
 #include "Hamming/HammingMode.h"
 #include "WarpWallet/WarpWalletMode.h"
 #include "Slip39/Slip39Mode.h"
+#include "Aezeed/AezeedMode.h"
 #include "Algorand/AlgorandMode.h"
 #include "Monero/MoneroMode.h"
 #include "MoneroWallet/MoneroWalletMode.h"
@@ -12028,9 +12029,7 @@ static void printHelpModeSection(HelpTopic topic) {
         slip39_mode::print_help();
         break;
     case HelpTopic::Aezeed:
-        printHelpPendingExactModeSection("-aezeed", "LND aezeed mnemonic/passphrase recovery",
-            "Aezeed requires cipherseed decoding, checksum verification, optional passphrase KDF, and target derivation.",
-            "./METAL_CRYPTO_TOOLKIT -aezeed -i aezeed_templates.txt -d derivations.txt -c c -save");
+        aezeed_mode::print_help();
         break;
     case HelpTopic::Eth2Validator:
         printHelpPendingExactModeSection("-eth2validator", "Ethereum validator seed/passphrase recovery",
@@ -12321,6 +12320,38 @@ int main(int argc, char** argv)
                 std::chrono::system_clock::now());
         std::cout << "\n[!] Processed " << counterTotal
                   << " SLIP-39 password candidates. Found: "
+                  << Founds << ". Program finished at "
+                  << std::ctime(&finished);
+        return result;
+    }
+    if (aezeed_mode::requested(argc, argv)) {
+        counterTotal = 0;
+        Founds = 0;
+        isRun = true;
+
+        const std::time_t started =
+            std::chrono::system_clock::to_time_t(
+                std::chrono::system_clock::now());
+        std::cout << "[!] Program started at: " << std::ctime(&started);
+
+        std::thread speed_thread(SpeedThreadFunc);
+        const aezeed_mode::RuntimeHooks hooks{
+            [](std::uint64_t completed) {
+                counterTotal += completed;
+            },
+            []() {
+                ++Founds;
+            }
+        };
+        const int result = aezeed_mode::run(argc, argv, hooks);
+        isRun = false;
+        if (speed_thread.joinable()) speed_thread.join();
+
+        const std::time_t finished =
+            std::chrono::system_clock::to_time_t(
+                std::chrono::system_clock::now());
+        std::cout << "\n[!] Processed " << counterTotal
+                  << " aezeed KDF candidates. Found: "
                   << Founds << ". Program finished at "
                   << std::ctime(&finished);
         return result;

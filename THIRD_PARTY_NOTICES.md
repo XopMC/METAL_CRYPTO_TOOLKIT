@@ -67,3 +67,12 @@ The generated word-list data is located in
 `Slip39/Slip39Wordlist.generated.h`. The parser, Shamir reconstruction,
 Feistel cipher, host verification, and Metal kernels are native project
 implementations based on the public SLIP-0039 specification.
+
+## LND aezeed and AEZ
+
+The `-aezeed` compatibility implementation was validated against the public
+LND aezeed implementation at commit
+`530dca19b313566a24907a56e5bcb7b0e94af1d4` (MIT License).
+
+The fixed-size AEZ-v5 implementation follows the public AEZ reference at commit
+`e49e68abd344eba4a888cee91bc7370df2d14e27` (CC0 public-domain dedication).

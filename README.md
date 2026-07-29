@@ -346,6 +346,24 @@ Wave 19 completes exact SLIP-0039 recovery:
   before output; `-wallet-mem` bounds unified memory and only the shared
   `SpeedThreadFunc` reports completed `Pwd/s`, primitive work, and `Verify/s`.
 
+Wave 20 adds exact LND aezeed recovery:
+
+- `-aezeed` decodes the standard 24-word English cipherseed, validates its
+  external version and CRC32C before launching Metal, and can repair up to two
+  unknown whole words marked with `?` or `*`;
+- the Metal worker performs the exact v0 scrypt parameters
+  `N=32768,r=8,p=1`, the AEZ-v5 fixed 23-byte decipher operation, tag check,
+  and known internal-version/birthday extraction;
+- recovery can be verified by exact entropy, `SHA256(entropy)`, or the
+  compressed/uncompressed secp256k1 public key of the BIP32 master derived
+  from the 16-byte LND entropy;
+- every hit is independently AEZ-deciphered again and receives full BIP32
+  root-public verification on the host before output;
+- `-wallet-mem` and `-wallet-scrypt-mem` bound resident 32 MiB ROMix lanes,
+  multi-device batches do not overlap, and only the common
+  `SpeedThreadFunc` reports completed `KDF/s`, real verification, readback,
+  and allocated working set.
+
 A cross-wave PRNG compatibility update tracks the current CUDA catalog:
 
 - `-prng` now includes Ill Bloom generators `332..489` and modes `247..762`,
@@ -3396,6 +3414,47 @@ hidden-number/lattice reduction remains an external CPU preprocessing task;
 its candidate scalars can then be passed through the exact Metal verification
 path.
 
+#### `-aezeed`
+
+Use this mode for standard LND 24-word aezeed/cipherseed password recovery.
+Pass an inline mnemonic or a file with one mnemonic per line. The parser uses
+the exact English BIP39 list, external version 0, and CRC32C. A standalone
+`?` or `*` repairs one unknown whole word; at most two unknown positions are
+accepted.
+
+```bash
+./METAL_CRYPTO_TOOLKIT -aezeed -recovery seed.txt
+
+./METAL_CRYPTO_TOOLKIT -aezeed -recovery seed.txt \
+  -pass passwords.txt -wallet-mem auto -save
+
+./METAL_CRYPTO_TOOLKIT -aezeed \
+  -recovery "above judge emerge veteran reform crunch system all snap please shoulder vault hurt city quarter cover enlist swear success suggest drink wagon enrich body" \
+  -entropy 81b637d86359e6960de795e41e0b4cfd
+
+./METAL_CRYPTO_TOOLKIT -aezeed -recovery damaged.txt \
+  -target root_public_keys.txt -mask "secret?d?d" \
+  -wallet-mem all -device 0
+```
+
+`-pass` accepts a literal or an existing file and `-i` always streams a
+dictionary. `-mask` supports `?d/?l/?u/?a/??`; `-start/-end` generate exact
+decimal-string candidates with a checked U256 counter. With no password
+source, the LND default password `aezeed` is tested.
+
+An optional `-target` is either `SHA256(entropy)` or a full 33/65-byte
+secp256k1 BIP32-root public key; `-entropy` supplies the exact 16-byte wallet
+entropy. If no target is available, the authenticated AEZ tag and known LND
+internal version are used as the recovery proof. `-wallet-mem` follows the
+shared Apple unified-memory rules, while `-wallet-scrypt-mem` can impose a
+smaller scratch-only ceiling. Each active v0 scrypt lane needs roughly
+32 MiB, so `-n` controls resident concurrency rather than total search size.
+
+Only aezeed container version 0 and internal derivation versions 0/1 are
+recognized. Passwords are printable ASCII below 128 bytes. Supporting the
+format does not weaken scrypt or make a high-entropy unknown password
+practical to exhaust.
+
 #### `-bisqwallet`
 
 **Active input format:**
@@ -3495,9 +3554,9 @@ These modes print the exact generator and extraction-mode catalogs, then exit. T
 
 ## Reserved or inactive modes
 
-The following command names are parsed or documented for future/external compatibility, but must not be used as working recovery modes:
+The following command name is parsed or documented for future/external
+compatibility, but must not be used as a working recovery mode:
 
-- `-aezeed`: exact LND aezeed decode/KDF worker is not enabled;
 - `-eth2validator`: exact validator-key derivation worker is not enabled.
 
 The program stops or cannot produce a confirmed result for these modes. Do not interpret a run with no result as proof that a password is absent.
@@ -4008,6 +4067,24 @@ Fused pipeline Волны 18 прошёл симметричный gate на 4 1
 - каждый GPU hit независимо расшифровывается и хешируется CommonCrypto до
   вывода; `-wallet-mem` ограничивает unified memory, а завершённые `Pwd/s`,
   primitive work и `Verify/s` печатает только общий `SpeedThreadFunc`.
+
+Волна 20 добавляет точное восстановление LND aezeed:
+
+- `-aezeed` декодирует стандартный английский cipherseed из 24 слов,
+  проверяет external version и CRC32C до запуска Metal и умеет восстановить
+  до двух неизвестных целых слов, обозначенных `?` или `*`;
+- Metal выполняет точные параметры v0 scrypt `N=32768,r=8,p=1`,
+  специализированное для 23 байтов расшифрование AEZ-v5, проверку tag и
+  извлечение известных internal version/birthday;
+- результат можно проверить по точной entropy, `SHA256(entropy)` либо
+  compressed/uncompressed secp256k1 public key BIP32-master, полученного из
+  16-байтовой entropy LND;
+- каждый hit заново независимо расшифровывается через AEZ и полностью
+  проверяется по BIP32 root public key на host до вывода;
+- `-wallet-mem` и `-wallet-scrypt-mem` ограничивают резидентные ROMix lanes
+  примерно по 32 MiB, multi-device batch не пересекаются, а завершённые
+  `KDF/s`, verification, readback и реальный working set печатает только
+  общий `SpeedThreadFunc`.
 
 Межволновое обновление PRNG синхронизирует каталог с текущей CUDA-версией:
 
@@ -7072,6 +7149,48 @@ U256 ordinal-space на непересекающиеся шарды, а `-n` у�
 preprocessing; полученные кандидаты затем можно передать в точный Metal-контур
 проверки.
 
+#### `-aezeed`
+
+Режим восстанавливает пароль стандартного LND aezeed/cipherseed из 24 слов.
+Передайте mnemonic напрямую либо файл с одной фразой на строку. Parser
+использует точный английский список BIP39, external version 0 и CRC32C.
+Отдельный `?` или `*` восстанавливает неизвестное целое слово; разрешено не
+более двух неизвестных позиций.
+
+```bash
+./METAL_CRYPTO_TOOLKIT -aezeed -recovery seed.txt
+
+./METAL_CRYPTO_TOOLKIT -aezeed -recovery seed.txt \
+  -pass passwords.txt -wallet-mem auto -save
+
+./METAL_CRYPTO_TOOLKIT -aezeed \
+  -recovery "above judge emerge veteran reform crunch system all snap please shoulder vault hurt city quarter cover enlist swear success suggest drink wagon enrich body" \
+  -entropy 81b637d86359e6960de795e41e0b4cfd
+
+./METAL_CRYPTO_TOOLKIT -aezeed -recovery damaged.txt \
+  -target root_public_keys.txt -mask "secret?d?d" \
+  -wallet-mem all -device 0
+```
+
+`-pass` принимает literal либо существующий файл, а `-i` всегда потоково
+читает словарь. `-mask` поддерживает `?d/?l/?u/?a/??`; `-start/-end`
+генерируют точные десятичные строки с checked U256-счётчиком. Без источника
+паролей проверяется стандартный пароль LND `aezeed`.
+
+Необязательный `-target` задаёт `SHA256(entropy)` либо полный 33/65-байтовый
+secp256k1 public key BIP32-root; `-entropy` принимает точную 16-байтовую
+entropy кошелька. Если цели нет, доказательством восстановления служат
+аутентифицированный AEZ tag и известная internal version LND.
+`-wallet-mem` следует общим правилам unified memory Apple,
+`-wallet-scrypt-mem` может задать меньший предел только для scratch. Каждый
+активный scrypt lane v0 требует примерно 32 MiB, поэтому `-n` управляет
+резидентной параллельностью, а не общим размером поиска.
+
+Поддерживаются только container version 0 и internal derivation version 0/1.
+Пароль должен быть printable ASCII короче 128 байтов. Поддержка формата не
+ослабляет scrypt и не делает полный перебор случайного сильного пароля
+практически выполнимым.
+
 #### `-bisqwallet`
 
 **Рабочий формат:**
@@ -7169,9 +7288,9 @@ WALLETSCAN:<source_file>:<type>:LINE:<line_number>:VALUE:<value>
 
 ## Зарезервированные или выключенные режимы
 
-Следующие имена распознаются командной строкой или оставлены для совместимых форматов, но не являются рабочими режимами восстановления:
+Следующее имя распознаётся командной строкой или оставлено для совместимого
+формата, но не является рабочим режимом восстановления:
 
-- `-aezeed`: точная обработка LND aezeed и KDF не включена;
 - `-eth2validator`: точная деривация ключей валидатора не включена.
 
 Отсутствие результата в этих режимах не доказывает, что проверяемого пароля нет.

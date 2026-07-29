@@ -1,0 +1,308 @@
+#ifndef METAL_CRYPTO_AEZEED_COMMON_METALH
+#define METAL_CRYPTO_AEZEED_COMMON_METALH
+
+#include "WarpWalletCommon.metalh"
+#include "ProviderAes.metalh"
+
+using namespace metal;
+
+constant uint AEZEED_PASSWORD_STRIDE = 128u;
+constant uint AEZEED_SCRYPT_N = 32768u;
+constant uint AEZEED_SCRYPT_R = 8u;
+constant uint AEZEED_SCRYPT_P = 1u;
+
+struct AezeedConfig {
+    uchar ciphertext[23];
+    uchar salt[5];
+    uint maximum_birthday;
+    uint known_internal_versions;
+};
+
+struct AezeedHit {
+    ulong candidate_index;
+    uint password_len;
+    uint internal_version;
+    uint birthday;
+    uint reserved;
+    uchar password[128];
+    uchar entropy[16];
+    uchar plaintext[19];
+    uchar key[32];
+    uchar padding[5];
+};
+
+static inline void aezeed_blake2b_384(
+    const thread uchar* data, uint length,
+    thread uchar output[48]) {
+    ulong h[8];
+    blake2b_init(h, 48u);
+    uchar block[128];
+    for (uint i = 0u; i < 128u; ++i) block[i] = 0u;
+    for (uint i = 0u; i < length; ++i) block[i] = data[i];
+    blake2b_compress(h, block, ulong(length), 0ul, true);
+    for (uint word = 0u; word < 6u; ++word) {
+        const ulong value = h[word];
+        for (uint byte = 0u; byte < 8u; ++byte) {
+            output[word * 8u + byte] =
+                uchar(value >> (byte * 8u));
+        }
+    }
+}
+
+static inline void aezeed_xor16(
+    const thread uchar a[16],
+    const thread uchar b[16],
+    thread uchar output[16]) {
+    for (uint i = 0u; i < 16u; ++i) output[i] = a[i] ^ b[i];
+}
+
+static inline void aezeed_double_block(thread uchar block[16]) {
+    const uchar first = block[0];
+    for (uint i = 0u; i < 15u; ++i) {
+        block[i] = uchar((block[i] << 1u) |
+                         (block[i + 1u] >> 7u));
+    }
+    block[15] = uchar(
+        (block[15] << 1u) ^
+        ((first & 0x80u) != 0u ? 0x87u : 0u));
+}
+
+static inline void aezeed_mult_block(
+    uint multiplier,
+    const thread uchar source[16],
+    thread uchar output[16]) {
+    uchar term[16];
+    for (uint i = 0u; i < 16u; ++i) {
+        term[i] = source[i];
+        output[i] = 0u;
+    }
+    while (multiplier != 0u) {
+        if ((multiplier & 1u) != 0u) {
+            for (uint i = 0u; i < 16u; ++i) {
+                output[i] ^= term[i];
+            }
+        }
+        aezeed_double_block(term);
+        multiplier >>= 1u;
+    }
+}
+
+static inline void aezeed_add_key(
+    thread uchar state[16],
+    const thread uchar key[16]) {
+    for (uint i = 0u; i < 16u; ++i) state[i] ^= key[i];
+}
+
+static inline void aezeed_aes_round(
+    thread uchar state[16],
+    const thread uchar key[16]) {
+    provider_aes_sub_bytes(state);
+    provider_aes_shift_rows(state);
+    provider_aes_mix_columns(state);
+    aezeed_add_key(state, key);
+}
+
+static inline void aezeed_aes4(
+    const thread uchar extracted[48],
+    const thread uchar j[16],
+    const thread uchar i[16],
+    const thread uchar l[16],
+    const thread uchar source[16],
+    thread uchar output[16]) {
+    for (uint n = 0u; n < 16u; ++n) {
+        output[n] = source[n] ^ j[n] ^ i[n] ^ l[n];
+    }
+    aezeed_aes_round(output, extracted + 16u);
+    aezeed_aes_round(output, extracted);
+    aezeed_aes_round(output, extracted + 32u);
+    uchar zero[16];
+    for (uint n = 0u; n < 16u; ++n) zero[n] = 0u;
+    aezeed_aes_round(output, zero);
+}
+
+static inline void aezeed_aes10(
+    const thread uchar extracted[48],
+    const thread uchar l[16],
+    const thread uchar source[16],
+    thread uchar output[16]) {
+    for (uint n = 0u; n < 16u; ++n) {
+        output[n] = source[n] ^ l[n];
+    }
+    for (uint round = 0u; round < 9u; ++round) {
+        const uint key_offset = (round % 3u) * 16u;
+        aezeed_aes_round(output, extracted + key_offset);
+    }
+    aezeed_aes_round(output, extracted);
+}
+
+struct AezeedState {
+    uchar extracted[48];
+    uchar I[2][16];
+    uchar J[3][16];
+    uchar L[8][16];
+};
+
+static inline void aezeed_state_init(
+    const thread uchar key[32],
+    thread AezeedState& state) {
+    aezeed_blake2b_384(key, 32u, state.extracted);
+    for (uint n = 0u; n < 16u; ++n) {
+        state.I[0][n] = state.extracted[n];
+        state.J[0][n] = state.extracted[16u + n];
+        state.L[0][n] = 0u;
+        state.L[1][n] = state.extracted[32u + n];
+    }
+    for (uint n = 0u; n < 16u; ++n) {
+        state.I[1][n] = state.I[0][n];
+        state.J[1][n] = state.J[0][n];
+        state.J[2][n] = state.J[0][n];
+        state.L[2][n] = state.L[1][n];
+        state.L[4][n] = state.L[1][n];
+        state.L[6][n] = state.L[1][n];
+    }
+    aezeed_double_block(state.I[1]);
+    aezeed_double_block(state.J[1]);
+    aezeed_double_block(state.J[2]);
+    aezeed_double_block(state.J[2]);
+    aezeed_double_block(state.L[2]);
+    for (uint n = 0u; n < 16u; ++n) {
+        state.L[3][n] = state.L[2][n] ^ state.L[1][n];
+        state.L[4][n] = state.L[2][n];
+    }
+    aezeed_double_block(state.L[4]);
+    for (uint n = 0u; n < 16u; ++n) {
+        state.L[5][n] = state.L[4][n] ^ state.L[1][n];
+        state.L[6][n] = state.L[3][n];
+    }
+    aezeed_double_block(state.L[6]);
+    for (uint n = 0u; n < 16u; ++n) {
+        state.L[7][n] = state.L[6][n] ^ state.L[1][n];
+    }
+}
+
+static inline void aezeed_hash(
+    thread AezeedState& state,
+    const thread uchar ad[6],
+    thread uchar delta[16]) {
+    uchar buffer[16];
+    uchar j[16];
+    uchar temporary[16];
+    for (uint n = 0u; n < 16u; ++n) buffer[n] = 0u;
+    buffer[15] = 32u;
+    for (uint n = 0u; n < 16u; ++n) {
+        j[n] = state.J[0][n] ^ state.J[1][n];
+    }
+    aezeed_aes4(
+        state.extracted, j, state.I[1], state.L[1],
+        buffer, delta);
+
+    for (uint n = 0u; n < 16u; ++n) buffer[n] = 0u;
+    buffer[0] = 0x80u;
+    aezeed_aes4(
+        state.extracted, state.J[2], state.I[0],
+        state.L[0], buffer, temporary);
+    for (uint n = 0u; n < 16u; ++n) delta[n] ^= temporary[n];
+
+    aezeed_mult_block(5u, state.J[0], j);
+    for (uint n = 0u; n < 16u; ++n) buffer[n] = 0u;
+    for (uint n = 0u; n < 6u; ++n) buffer[n] = ad[n];
+    buffer[6] = 0x80u;
+    aezeed_aes4(
+        state.extracted, j, state.I[0], state.L[0],
+        buffer, temporary);
+    for (uint n = 0u; n < 16u; ++n) delta[n] ^= temporary[n];
+}
+
+static inline void aezeed_tiny_decipher(
+    thread AezeedState& state,
+    const thread uchar delta[16],
+    const thread uchar input[23],
+    thread uchar output[23]) {
+    constexpr uint input_length = 23u;
+    constexpr uint half_length = 12u;
+    uchar left[16];
+    uchar right[16];
+    uchar buffer[16];
+    uchar temporary[16];
+    for (uint n = 0u; n < 16u; ++n) {
+        left[n] = 0u;
+        right[n] = 0u;
+    }
+    for (uint n = 0u; n < half_length; ++n) {
+        left[n] = input[n];
+        right[n] = input[11u + n];
+    }
+    for (uint n = 0u; n < 11u; ++n) {
+        right[n] = uchar((right[n] << 4u) |
+                         (right[n + 1u] >> 4u));
+    }
+    right[11] = uchar(right[11] << 4u);
+
+    int j = 7;
+    for (uint pair = 0u; pair < 4u; ++pair, j -= 2) {
+        for (uint n = 0u; n < 16u; ++n) buffer[n] = 0u;
+        for (uint n = 0u; n < half_length; ++n) {
+            buffer[n] = right[n];
+        }
+        buffer[11] = uchar((buffer[11] & 0xf0u) | 0x08u);
+        for (uint n = 0u; n < 16u; ++n) buffer[n] ^= delta[n];
+        buffer[15] ^= uchar(j);
+        uchar zero[16];
+        for (uint n = 0u; n < 16u; ++n) zero[n] = 0u;
+        aezeed_aes4(
+            state.extracted, zero, state.I[1], state.L[6],
+            buffer, temporary);
+        for (uint n = 0u; n < 16u; ++n) left[n] ^= temporary[n];
+
+        for (uint n = 0u; n < 16u; ++n) buffer[n] = 0u;
+        for (uint n = 0u; n < half_length; ++n) {
+            buffer[n] = left[n];
+        }
+        buffer[11] = uchar((buffer[11] & 0xf0u) | 0x08u);
+        for (uint n = 0u; n < 16u; ++n) buffer[n] ^= delta[n];
+        buffer[15] ^= uchar(j - 1);
+        aezeed_aes4(
+            state.extracted, zero, state.I[1], state.L[6],
+            buffer, temporary);
+        for (uint n = 0u; n < 16u; ++n) right[n] ^= temporary[n];
+    }
+
+    uchar merged[32];
+    for (uint n = 0u; n < 32u; ++n) merged[n] = 0u;
+    for (uint n = 0u; n < 11u; ++n) merged[n] = right[n];
+    for (uint n = 0u; n < half_length; ++n) {
+        merged[11u + n] = left[n];
+    }
+    for (int n = 22; n > 11; --n) {
+        merged[n] = uchar(
+            (merged[n] >> 4u) | (merged[n - 1] << 4u));
+    }
+    merged[11] = uchar((left[0] >> 4u) | (right[11] & 0xf0u));
+    for (uint n = 0u; n < input_length; ++n) output[n] = merged[n];
+}
+
+static inline bool aezeed_decipher(
+    const thread uchar key[32],
+    const constant AezeedConfig& config,
+    thread uchar plaintext[19]) {
+    AezeedState state;
+    aezeed_state_init(key, state);
+    uchar ad[6];
+    ad[0] = 0u;
+    for (uint n = 0u; n < 5u; ++n) ad[n + 1u] = config.salt[n];
+    uchar delta[16];
+    aezeed_hash(state, ad, delta);
+    uchar ciphertext[23];
+    for (uint n = 0u; n < 23u; ++n) {
+        ciphertext[n] = config.ciphertext[n];
+    }
+    uchar decoded[23];
+    aezeed_tiny_decipher(state, delta, ciphertext, decoded);
+    uchar tag = 0u;
+    for (uint n = 19u; n < 23u; ++n) tag |= decoded[n];
+    if (tag != 0u) return false;
+    for (uint n = 0u; n < 19u; ++n) plaintext[n] = decoded[n];
+    return true;
+}
+
+#endif
