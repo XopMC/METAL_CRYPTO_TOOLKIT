@@ -15,6 +15,7 @@ METAL_AIR := $(BUILD_DIR)/default.air
 METALLIB  := $(BUILD_DIR)/default.metallib
 
 CXX      := xcrun clang++
+CC       := xcrun clang
 METAL    := xcrun metal
 METALLIB_TOOL ?= xcrun metallib
 VANITY_GROUP_SIZE ?= 1024
@@ -25,7 +26,8 @@ CXXFLAGS := -std=c++17 -O3 -DNDEBUG -Wall -Wextra -Wno-unused-parameter \
 OBJCXXFLAGS := $(CXXFLAGS) -fobjc-arc
 CFLAGS   := -std=c17 -O3 -DNDEBUG -Wall -Wextra -Wno-unused-parameter \
             -I. -Isr25519-donna-32bit -Ilib -Ilib/hash -Ilib/V \
-            -IMoneroWallet/third_party
+            -IMoneroWallet/third_party \
+            -Ithird_party/blst/bindings -Ithird_party/blst/src
 DEPFLAGS := -MMD -MP
 LDFLAGS  := -framework Foundation -framework Metal -framework IOKit
 EMBED_METALLIB_LDFLAGS := -Wl,-sectcreate,__DATA,__metallib,$(METALLIB)
@@ -49,6 +51,7 @@ CPP_SRCS := \
 	Slip39/Slip39Mode.cpp \
 	Aezeed/AezeedMode.cpp \
 	Stronghold/StrongholdMode.cpp \
+	bls12_381/Bls12381.cpp \
 	Algorand/AlgorandMode.cpp \
 	Monero/MoneroMode.cpp \
 	MoneroWallet/MoneroWalletMode.cpp \
@@ -71,7 +74,10 @@ C_SRCS := lib/base58.c \
 	MoneroWallet/third_party/hash-extra-skein.c \
 	MoneroWallet/third_party/jh.c \
 	MoneroWallet/third_party/memwipe.c \
-	MoneroWallet/third_party/skein.c
+	MoneroWallet/third_party/skein.c \
+	third_party/blst/src/client_min_pk.c
+BLS_ASM_SRC := third_party/blst/build/assembly.S
+BLS_ASM_OBJ := $(BUILD_DIR)/third_party/blst/build/assembly.o
 UNAME_M := $(shell uname -m)
 ifeq ($(UNAME_M),x86_64)
 CPP_SRCS += lib/hash/ripemd160_sse.cpp
@@ -95,6 +101,7 @@ LOCALIZED_HOST_HEADERS := Makefile KernelRuntime.h MacFileSystem.h Poetry.h Poet
 	Slip39/Slip39Mode.h Slip39/Slip39Wordlist.generated.h \
 	Aezeed/AezeedMode.h \
 	Stronghold/StrongholdMode.h \
+	bls12_381/Bls12381.h \
 	Algorand/AlgorandMode.h \
 	Monero/MoneroMode.h Monero/MoneroWordlists.generated.h \
 	MoneroWallet/MoneroWalletMode.h \
@@ -115,10 +122,14 @@ METAL_DEPS := $(METAL_AIRS:.air=.d)
 ILLBLOOM_TEST_AIR := $(BUILD_DIR)/tests/illbloom_prng_vectors.air
 ILLBLOOM_TEST_METALLIB := $(BUILD_DIR)/tests/illbloom_prng_vectors.metallib
 ILLBLOOM_TEST_BIN := $(BUILD_DIR)/tests/illbloom_prng_metal_test
+BLS_TEST_ASM_BIN := $(BUILD_DIR)/tests/bls12_381_vectors_asm
+BLS_TEST_PORTABLE_BIN := $(BUILD_DIR)/tests/bls12_381_vectors_portable
+BLS_TEST_PORTABLE_C := $(BUILD_DIR)/tests/blst_client_portable.o
 
-.PHONY: all host clean metal-toolchain-check tools tools-clean illbloom-prng-test
+.PHONY: all host clean metal-toolchain-check tools tools-clean \
+	illbloom-prng-test bls12-381-test bls12-381-bench
 
-all: $(TARGET) $(ROOT_TARGET)
+all: $(TARGET) $(ROOT_TARGET) $(BLS_TEST_ASM_BIN) $(BLS_TEST_PORTABLE_BIN)
 
 host: $(TARGET)
 
@@ -131,8 +142,16 @@ tools-clean:
 illbloom-prng-test: $(ILLBLOOM_TEST_BIN) $(ILLBLOOM_TEST_METALLIB)
 	$(ILLBLOOM_TEST_BIN) $(ILLBLOOM_TEST_METALLIB)
 
-$(TARGET): $(HOST_OBJS) $(CPP_OBJS) $(C_OBJS) $(METALLIB) | $(BIN_DIR)
-	$(CXX) $(CXXFLAGS) $(HOST_OBJS) $(CPP_OBJS) $(C_OBJS) -o $@ $(LDFLAGS) $(EMBED_METALLIB_LDFLAGS)
+bls12-381-test: $(BLS_TEST_ASM_BIN) $(BLS_TEST_PORTABLE_BIN)
+	$(BLS_TEST_ASM_BIN)
+	$(BLS_TEST_PORTABLE_BIN)
+
+bls12-381-bench: $(BLS_TEST_ASM_BIN) $(BLS_TEST_PORTABLE_BIN)
+	$(BLS_TEST_ASM_BIN) --bench 10000
+	$(BLS_TEST_PORTABLE_BIN) --bench 10000
+
+$(TARGET): $(HOST_OBJS) $(CPP_OBJS) $(C_OBJS) $(BLS_ASM_OBJ) $(METALLIB) | $(BIN_DIR)
+	$(CXX) $(CXXFLAGS) $(HOST_OBJS) $(CPP_OBJS) $(C_OBJS) $(BLS_ASM_OBJ) -o $@ $(LDFLAGS) $(EMBED_METALLIB_LDFLAGS)
 
 $(ROOT_TARGET): $(TARGET)
 	cp $(TARGET) $@
@@ -147,7 +166,31 @@ $(BUILD_DIR)/%.o: %.cpp | $(BUILD_DIR)
 
 $(BUILD_DIR)/%.o: %.c | $(BUILD_DIR)
 	@mkdir -p $(dir $@)
-	xcrun clang $(CFLAGS) $(DEPFLAGS) -c $< -o $@
+	$(CC) $(CFLAGS) $(DEPFLAGS) -c $< -o $@
+
+$(BLS_ASM_OBJ): $(BLS_ASM_SRC) $(wildcard third_party/blst/build/mach-o/*armv8.S) | $(BUILD_DIR)
+	@mkdir -p $(dir $@)
+	$(CC) -O3 -c $< -o $@
+
+$(BLS_TEST_PORTABLE_C): third_party/blst/src/client_min_pk.c | $(BUILD_DIR)
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -D__BLST_NO_ASM__ -U__aarch64__ \
+		-fno-builtin -c $< -o $@
+
+$(BLS_TEST_ASM_BIN): tests/bls12_381_vectors.cpp bls12_381/Bls12381.cpp \
+		bls12_381/Bls12381.h $(BUILD_DIR)/third_party/blst/src/client_min_pk.o \
+		$(BLS_ASM_OBJ) | $(BUILD_DIR)
+	@mkdir -p $(dir $@)
+	$(CXX) $(CXXFLAGS) -DBLS_TEST_BACKEND=\"arm64-asm\" \
+		tests/bls12_381_vectors.cpp bls12_381/Bls12381.cpp \
+		$(BUILD_DIR)/third_party/blst/src/client_min_pk.o $(BLS_ASM_OBJ) -o $@
+
+$(BLS_TEST_PORTABLE_BIN): tests/bls12_381_vectors.cpp bls12_381/Bls12381.cpp \
+		bls12_381/Bls12381.h $(BLS_TEST_PORTABLE_C) | $(BUILD_DIR)
+	@mkdir -p $(dir $@)
+	$(CXX) $(CXXFLAGS) -DBLS_TEST_BACKEND=\"portable-c\" \
+		tests/bls12_381_vectors.cpp bls12_381/Bls12381.cpp \
+		$(BLS_TEST_PORTABLE_C) -o $@
 
 $(BUILD_DIR)/main.o $(BUILD_DIR)/SaveFunc.o: $(LOCALIZED_HOST_HEADERS) $(LOCALIZED_SECP_HEADERS)
 $(BUILD_DIR)/SecpPrecompute.o $(BUILD_DIR)/host_secp/HostSecp256k1.o: $(LOCALIZED_SECP_HEADERS)

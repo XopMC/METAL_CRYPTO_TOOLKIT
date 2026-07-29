@@ -107,3 +107,18 @@ The host X25519 construction follows the public-domain TweetNaCl design. The
 Stronghold host verifier, XChaCha20-Poly1305 implementation, exact LZ4 decoder,
 memory scheduler, CLI integration, and Metal kernels are maintained as native
 project code.
+
+## Supranational blst
+
+The common BLS12-381 backend incorporates the minimal-public-key build of
+Supranational's `blst` library:
+
+- Copyright (c) 2019-2026 Supranational LLC
+- Upstream: https://github.com/supranational/blst
+- Source revision: `54e6e55674722fc2797ebb4bbb71b26d881eb4b8`
+- License: Apache License 2.0
+
+The pinned upstream C sources, public headers, and Apple-arm64 assembly are
+located in `third_party/blst/`. The narrow toolkit wrapper in `bls12_381/`
+provides checked scalar arithmetic, BLS KeyGen, EIP-2333 derivation and
+compressed/uncompressed G1 public-key serialization.
