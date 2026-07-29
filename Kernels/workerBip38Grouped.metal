@@ -1,0 +1,4 @@
+#define METAL_CRYPTO_BROWSER_VAULT_NO_SUBSTRATE 1
+#define METAL_CRYPTO_BROWSER_VAULT_BIP38_ONLY 1
+#define METAL_CRYPTO_BROWSER_VAULT_GROUPED_KERNEL workerBip38Grouped
+#include "workerBrowserVaultGrouped.metal"

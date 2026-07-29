@@ -3081,7 +3081,8 @@ metalError_t metal_launch_impl(const char* function_name,
         constants = [privFileConstants](MTLFunctionConstantValues* values) {
             bind_priv_file_function_constants(values, privFileConstants);
         };
-    } else if (name == "workerBrowserVaultGrouped") {
+    } else if (name == "workerBrowserVaultGrouped" ||
+               name == "workerBip38Grouped") {
         const BrowserVaultFunctionConstants browserVaultConstants =
             make_browser_vault_function_constants(args, count);
         pipelineKey = browser_vault_function_constants_key(browserVaultConstants);
@@ -3363,6 +3364,7 @@ metalError_t metal_launch_impl(const char* function_name,
             if (st != metalSuccess) return st;
 	        } else if (name == "workerBrowserVault" ||
 	                   name == "workerBrowserVaultGrouped" ||
+	                   name == "workerBip38Grouped" ||
 	                   name == "workerKeystoreV3" ||
 	                   name == "workerExodusSeco" ||
 	                   name == "workerBitcoinJWallet" ||

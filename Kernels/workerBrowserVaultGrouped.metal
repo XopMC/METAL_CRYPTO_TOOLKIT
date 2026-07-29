@@ -1,4 +1,6 @@
+#if !defined(METAL_CRYPTO_BROWSER_VAULT_NO_SUBSTRATE)
 #define METAL_CRYPTO_BROWSER_VAULT_SUBSTRATE 1
+#endif
 #include "WorkerKeystoreCommon.metalh"
 
 #ifndef ENABLE_BIP38_BROWSER_GPU
@@ -12,6 +14,10 @@
 
 constant uint browser_vault_profile_specialization [[function_constant(92)]];
 static constant uint BROWSERVAULT_PROFILE_DYNAMIC = 0xffffffffu;
+
+#ifndef METAL_CRYPTO_BROWSER_VAULT_GROUPED_KERNEL
+#define METAL_CRYPTO_BROWSER_VAULT_GROUPED_KERNEL workerBrowserVaultGrouped
+#endif
 
 __attribute__((noinline)) static void wallet_dogechain_hmac_sha256_32(
     const thread WalletHmacSha256Precomp* ctx,
@@ -504,6 +510,7 @@ static inline void wallet_emit_bip38_result(device bool* isResult,
     out.payload_len = 20u;
 }
 
+#if !defined(METAL_CRYPTO_BROWSER_VAULT_BIP38_ONLY)
 static inline bool wallet_terra_hash160_from_private(
     const constant secp256k1_ge_storage* precPtr,
     ulong precPitch,
@@ -836,8 +843,112 @@ static inline void wallet_emit_yoroi_result(
     }
     out.payload_len = 64u;
 }
+#endif
 
-kernel void workerBrowserVaultGrouped(device bool* isResult [[buffer(0)]],
+#if defined(METAL_CRYPTO_BROWSER_VAULT_BIP38_ONLY)
+kernel void METAL_CRYPTO_BROWSER_VAULT_GROUPED_KERNEL(device bool* isResult [[buffer(0)]],
+                                      device bool* buffResult [[buffer(1)]],
+                                      constant secp256k1_ge_storage* precPtr [[buffer(2)]],
+                                      constant ulong& precPitch [[buffer(3)]],
+                                      const device BrowserVaultDeviceTarget* targets [[buffer(4)]],
+                                      const device BrowserVaultGroup* groups [[buffer(5)]],
+                                      const device uchar* ciphertext_pool [[buffer(6)]],
+                                      constant uint& group_count [[buffer(7)]],
+                                      const device uchar* solved_flags [[buffer(8)]],
+                                      constant uint& solved_count [[buffer(9)]],
+                                      constant uchar& candidate_kind [[buffer(10)]],
+                                      const device char* pass_data [[buffer(11)]],
+                                      const device uchar* pass_lens [[buffer(12)]],
+                                      constant uint& pass_count [[buffer(13)]],
+                                      const device WalletMaskSpec* mask_spec [[buffer(14)]],
+                                      const device WalletRangeSpec* range_spec [[buffer(15)]],
+                                      device uchar* scrypt_scratch [[buffer(16)]],
+                                      constant ulong& scrypt_scratch_stride [[buffer(17)]],
+                                      constant ulong& candidate_start [[buffer(18)]],
+                                      constant ulong& candidate_count [[buffer(19)]],
+                                      device WalletModeResult* wallet_results [[buffer(20)]],
+                                      device atomic_uint* wallet_count [[buffer(21)]],
+                                      constant uint& max_founds [[buffer(22)]],
+                                      uint tid [[thread_position_in_grid]],
+                                      uint threads [[threads_per_grid]]) {
+    if (candidate_count == 0ul || group_count == 0u || groups == nullptr ||
+        targets == nullptr || threads == 0u ||
+        wallet_mul_overflows_u64_by_u32(candidate_count, group_count)) {
+        return;
+    }
+
+    const ulong total_jobs = candidate_count * ulong(group_count);
+    const ulong stride = ulong(threads);
+    for (ulong job = ulong(tid); job < total_jobs; job += stride) {
+        const ulong candidate_idx = job / ulong(group_count);
+        const uint group_idx = uint(job - candidate_idx * ulong(group_count));
+        const device BrowserVaultGroup& group = groups[group_idx];
+        const uint group_profile =
+            browser_vault_profile_specialization == BROWSERVAULT_PROFILE_DYNAMIC
+                ? group.profile
+                : browser_vault_profile_specialization;
+        if ((browser_vault_profile_specialization != BROWSERVAULT_PROFILE_DYNAMIC &&
+             group.profile != browser_vault_profile_specialization) ||
+            (group_profile != BROWSERVAULT_PROFILE_BIP38_NON_EC &&
+             group_profile != BROWSERVAULT_PROFILE_BIP38_EC) ||
+            group.target_count == 0u) {
+            continue;
+        }
+
+        thread uchar pass_local[WALLET_PASS_STRIDE];
+        uint pass_len = 0u;
+        if (!walletks_load_candidate_pass(candidate_kind, pass_data, pass_lens, pass_count,
+                                          mask_spec, range_spec,
+                                          candidate_start + candidate_idx,
+                                          pass_local, &pass_len)) {
+            continue;
+        }
+
+        const uint end = group.target_offset + group.target_count;
+        for (uint target_idx = group.target_offset; target_idx < end; ++target_idx) {
+            const device BrowserVaultDeviceTarget& target = targets[target_idx];
+            const uint target_profile =
+                browser_vault_profile_specialization == BROWSERVAULT_PROFILE_DYNAMIC
+                    ? target.profile
+                    : browser_vault_profile_specialization;
+            if ((browser_vault_profile_specialization != BROWSERVAULT_PROFILE_DYNAMIC &&
+                 target.profile != browser_vault_profile_specialization) ||
+                target_profile != group_profile ||
+                (solved_flags != nullptr && target.target_index < solved_count &&
+                 solved_flags[target.target_index] != 0u) ||
+                ciphertext_pool == nullptr || target.ciphertext_len == 0u ||
+                target.ciphertext_len > BROWSERVAULT_MAX_BLOB_LEN) {
+                continue;
+            }
+
+            const device uchar* ciphertext =
+                ciphertext_pool + target.ciphertext_offset;
+            thread uchar priv32[32];
+            thread uchar hash160[20];
+            uchar result_type = 0u;
+            bool found = false;
+            if (target_profile == BROWSERVAULT_PROFILE_BIP38_NON_EC) {
+                found = wallet_bip38_non_ec_verify(
+                    precPtr, precPitch, pass_local, pass_len, target,
+                    ciphertext, scrypt_scratch, scrypt_scratch_stride,
+                    ulong(tid), priv32, hash160, &result_type);
+            } else if (target_profile == BROWSERVAULT_PROFILE_BIP38_EC) {
+                found = wallet_bip38_ec_verify(
+                    precPtr, precPitch, pass_local, pass_len, target,
+                    ciphertext, scrypt_scratch, scrypt_scratch_stride,
+                    ulong(tid), priv32, hash160, &result_type);
+            }
+            if (found) {
+                wallet_emit_bip38_result(
+                    isResult, buffResult, pass_local, pass_len,
+                    target.target_index, uchar(target.profile), result_type,
+                    priv32, hash160, wallet_results, wallet_count, max_founds);
+            }
+        }
+    }
+}
+#else
+kernel void METAL_CRYPTO_BROWSER_VAULT_GROUPED_KERNEL(device bool* isResult [[buffer(0)]],
                                       device bool* buffResult [[buffer(1)]],
                                       constant secp256k1_ge_storage* precPtr [[buffer(2)]],
                                       constant ulong& precPitch [[buffer(3)]],
@@ -943,7 +1054,9 @@ kernel void workerBrowserVaultGrouped(device bool* isResult [[buffer(0)]],
         } else if (group_profile == BROWSERVAULT_PROFILE_ANDROID_BACKUP_PBKDF2_SHA1_AES_CBC) {
             wallet_pbkdf2_sha1_32(pass_local, pass_len, group.salt, group.salt_len,
                                   group.iterations, key32);
-        } else if (group_profile == BROWSERVAULT_PROFILE_TERRA_STATION_AES_CBC) {
+        }
+#if !defined(METAL_CRYPTO_BROWSER_VAULT_BIP38_ONLY)
+        else if (group_profile == BROWSERVAULT_PROFILE_TERRA_STATION_AES_CBC) {
             wallet_pbkdf2_sha1_32(pass_local, pass_len, group.salt, group.salt_len,
                                   group.iterations, key32);
         } else if (group_profile ==
@@ -972,7 +1085,9 @@ kernel void workerBrowserVaultGrouped(device bool* isResult [[buffer(0)]],
             fastpbkdf2_hmac_sha512(
                 pass_local, ulong(pass_len),
                 group.salt, 32ul, 19162ul, key32, 32ul);
-        } else if (group_profile == BROWSERVAULT_PROFILE_DOGECHAIN_PBKDF2_AES_CBC) {
+        }
+#endif
+        else if (group_profile == BROWSERVAULT_PROFILE_DOGECHAIN_PBKDF2_AES_CBC) {
             thread uchar pass_sha[32];
             thread uchar pass_b64[44];
             SHA256(pass_local, size_t(pass_len), pass_sha);
@@ -1040,7 +1155,9 @@ kernel void workerBrowserVaultGrouped(device bool* isResult [[buffer(0)]],
             } else if (target_profile == BROWSERVAULT_PROFILE_ANDROID_BACKUP_PBKDF2_SHA1_AES_CBC) {
                 ok = wallet_aes256_cbc_check_android_backup_tail(key32, target.iv, ciphertext,
                                                                  target.ciphertext_len);
-            } else if (target_profile == BROWSERVAULT_PROFILE_TERRA_STATION_AES_CBC) {
+            }
+#if !defined(METAL_CRYPTO_BROWSER_VAULT_BIP38_ONLY)
+            else if (target_profile == BROWSERVAULT_PROFILE_TERRA_STATION_AES_CBC) {
                 thread uchar priv32[32];
                 thread uchar hash160[20];
                 if (wallet_terra_station_verify(
@@ -1078,7 +1195,9 @@ kernel void workerBrowserVaultGrouped(device bool* isResult [[buffer(0)]],
                         wallet_results, wallet_count, max_founds);
                 }
                 continue;
-            } else if (target_profile == BROWSERVAULT_PROFILE_DOGECHAIN_PBKDF2_AES_CBC) {
+            }
+#endif
+            else if (target_profile == BROWSERVAULT_PROFILE_DOGECHAIN_PBKDF2_AES_CBC) {
                 ok = wallet_aes256_cbc_check_dogechain_ascii(key32, target.iv, ciphertext,
                                                              target.ciphertext_len);
             } else if (target_profile == BROWSERVAULT_PROFILE_ETHPRESALE_PBKDF2_AES_CBC) {
@@ -1136,14 +1255,18 @@ kernel void workerBrowserVaultGrouped(device bool* isResult [[buffer(0)]],
             } else if (target_profile == BROWSERVAULT_PROFILE_BISQ_SCRYPT_AES) {
                 ok = wallet_aes256_cbc_check_multibit_classic_scrypt(key32, target.iv,
                                                                      ciphertext, target.ciphertext_len);
-            } else if (
+            }
+#if defined(METAL_CRYPTO_BROWSER_VAULT_SUBSTRATE)
+            else if (
                 target_profile ==
                     BROWSERVAULT_PROFILE_SUBSTRATE_SCRYPT_PKCS8 ||
                 target_profile ==
                     BROWSERVAULT_PROFILE_SUBSTRATE_LEGACY_PKCS8) {
                 ok = wallet_substrate_secretbox_pkcs8_verify(
                     precPtr, precPitch, key32, target, ciphertext);
-            } else {
+            }
+#endif
+            else {
                 ok = wallet_xsalsa20poly1305_secretbox_verify(key32, target.iv, target.tag,
                                                               ciphertext, target.ciphertext_len);
             }
@@ -1156,3 +1279,4 @@ kernel void workerBrowserVaultGrouped(device bool* isResult [[buffer(0)]],
         }
     }
 }
+#endif

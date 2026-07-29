@@ -33922,13 +33922,16 @@ static void wallet_build_generic_chunks_from_work(
     for (uint32_t i = 0; i < static_cast<uint32_t>(work_by_target.size()); ++i) {
         const uint64_t w = std::max<uint64_t>(1ull, work_by_target[i]);
         const uint32_t count = i - begin;
-        if (count != 0u && work + w > max_work_per_chunk) {
+        if (count != 0u &&
+            (w > max_work_per_chunk || work > max_work_per_chunk - w)) {
             chunks.push_back({ begin, count, work, scratch_stride });
             begin = i;
             work = 0ull;
             scratch_stride = 0ull;
         }
-        work += w;
+        work = w > std::numeric_limits<uint64_t>::max() - work
+            ? std::numeric_limits<uint64_t>::max()
+            : work + w;
         if (scratch_by_target != nullptr && i < scratch_by_target->size()) {
             scratch_stride = std::max<uint64_t>(scratch_stride, (*scratch_by_target)[i]);
         }
@@ -34288,6 +34291,8 @@ static metalError_t wallet_launch_browservault_generated(
     std::vector<uint8_t>& solved_files,
     bool& all_solved)
 {
+    const char* grouped_kernel =
+        BIP38_MODE ? "workerBip38Grouped" : "workerBrowserVaultGrouped";
     uint32_t active_target_count = 0u;
     metalError_t st = wallet_sync_solved_flags_common(state.solved_flags, state.solved_count,
         state.solved_version_uploaded, state.active_target_count_cached, state.target_file_indices,
@@ -34341,7 +34346,7 @@ static metalError_t wallet_launch_browservault_generated(
                         metal_launch("workerBrowserVault", launch_blocks, BLOCK_THREADS, nullptr, nullptr, state.targets + chunk.offset + group_offset, state.ciphertext_pool, group_sub_count, state.solved_flags, state.solved_count, candidate_kind, nullptr, nullptr, 0u, state.mask_spec, state.range_spec, start + processed, sub_count);
                     }
                     else {
-			            metal_launch("workerBrowserVaultGrouped", launch_blocks, BLOCK_THREADS, nullptr, nullptr, _dev_precomp, pitch, state.targets, state.groups + chunk.offset + group_offset, state.ciphertext_pool, group_sub_count, state.solved_flags, state.solved_count, candidate_kind, nullptr, nullptr, 0u, state.mask_spec, state.range_spec, state.scrypt_scratch, chunk_stride, start + processed, sub_count);
+			            metal_launch(grouped_kernel, launch_blocks, BLOCK_THREADS, nullptr, nullptr, _dev_precomp, pitch, state.targets, state.groups + chunk.offset + group_offset, state.ciphertext_pool, group_sub_count, state.solved_flags, state.solved_count, candidate_kind, nullptr, nullptr, 0u, state.mask_spec, state.range_spec, state.scrypt_scratch, chunk_stride, start + processed, sub_count);
                     }
                     st = metalGetLastError(); if (st != metalSuccess) return st;
                     st = metalDeviceSynchronize(); if (st != metalSuccess) return st;
@@ -34390,6 +34395,8 @@ static metalError_t wallet_launch_browservault_dict_batch(
     std::vector<uint8_t>& solved_files,
     bool& all_solved)
 {
+    const char* grouped_kernel =
+        BIP38_MODE ? "workerBip38Grouped" : "workerBrowserVaultGrouped";
     metalError_t st = copy_to_device_grow(reinterpret_cast<void**>(&state.pass_data), batch.data.data(), batch.data.empty() ? 1u : batch.data.size());
     if (st != metalSuccess) return st;
     st = copy_to_device_grow(reinterpret_cast<void**>(&state.pass_lens), batch.lens.data(), batch.lens.empty() ? 1u : batch.lens.size());
@@ -34451,7 +34458,7 @@ static metalError_t wallet_launch_browservault_dict_batch(
                         metal_launch("workerBrowserVault", launch_blocks, BLOCK_THREADS, nullptr, nullptr, state.targets + chunk.offset + group_offset, state.ciphertext_pool, group_sub_count, state.solved_flags, state.solved_count, WALLET_CANDIDATE_DICTIONARY, state.pass_data, state.pass_lens, batch.count, nullptr, nullptr, processed, sub_count);
                     }
                     else {
-			            metal_launch("workerBrowserVaultGrouped", launch_blocks, BLOCK_THREADS, nullptr, nullptr, _dev_precomp, pitch, state.targets, state.groups + chunk.offset + group_offset, state.ciphertext_pool, group_sub_count, state.solved_flags, state.solved_count, WALLET_CANDIDATE_DICTIONARY, state.pass_data, state.pass_lens, batch.count, nullptr, nullptr, state.scrypt_scratch, chunk_stride, processed, sub_count);
+			            metal_launch(grouped_kernel, launch_blocks, BLOCK_THREADS, nullptr, nullptr, _dev_precomp, pitch, state.targets, state.groups + chunk.offset + group_offset, state.ciphertext_pool, group_sub_count, state.solved_flags, state.solved_count, WALLET_CANDIDATE_DICTIONARY, state.pass_data, state.pass_lens, batch.count, nullptr, nullptr, state.scrypt_scratch, chunk_stride, processed, sub_count);
                     }
                     st = metalGetLastError(); if (st != metalSuccess) return st;
                     st = metalDeviceSynchronize(); if (st != metalSuccess) return st;
@@ -52178,7 +52185,9 @@ metalError_t processMetalBrowserVault()
         }
     }
     std::vector<WalletGenericTargetChunk> chunks;
-    wallet_build_generic_chunks_from_work(work_by_group, chunks, walletdat_max_kdf_iter_work_per_launch, &scratch_by_group);
+    wallet_build_generic_chunks_from_work(
+        work_by_group, chunks, walletdat_max_kdf_iter_work_per_launch,
+        &scratch_by_group);
     std::vector<uint32_t> chunk_target_counts;
     wallet_count_chunk_targets_from_groups(groups, chunks, chunk_target_counts);
     size_t singleton_groups = 0u;
