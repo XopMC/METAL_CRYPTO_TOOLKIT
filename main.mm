@@ -24,6 +24,7 @@
 #include "HdPath/HdPathMode.h"
 #include "Hamming/HammingMode.h"
 #include "WarpWallet/WarpWalletMode.h"
+#include "Slip39/Slip39Mode.h"
 #include "Algorand/AlgorandMode.h"
 #include "Monero/MoneroMode.h"
 #include "MoneroWallet/MoneroWalletMode.h"
@@ -12024,9 +12025,7 @@ static void printHelpModeSection(HelpTopic topic) {
         printHelpRange("[!] MAIN MODE: -androidwallet", "[!] MAIN MODE: -armorywallet");
         break;
     case HelpTopic::Slip39:
-        printHelpPendingExactModeSection("-slip39", "SLIP39 shard/template recovery",
-            "SLIP39 needs shard parsing, threshold/group reconstruction, optional passphrase handling, and target verification.",
-            "./METAL_CRYPTO_TOOLKIT -slip39 -recovery shards.txt -d derivations.txt -c c -save");
+        slip39_mode::print_help();
         break;
     case HelpTopic::Aezeed:
         printHelpPendingExactModeSection("-aezeed", "LND aezeed mnemonic/passphrase recovery",
@@ -12293,6 +12292,38 @@ int main(int argc, char** argv)
     if (has_help_arg(argc, argv)) {
         printHelpTopic(detect_help_topic(argc, argv));
         return 0;
+    }
+    if (slip39_mode::requested(argc, argv)) {
+        counterTotal = 0;
+        Founds = 0;
+        isRun = true;
+
+        const std::time_t started =
+            std::chrono::system_clock::to_time_t(
+                std::chrono::system_clock::now());
+        std::cout << "[!] Program started at: " << std::ctime(&started);
+
+        std::thread speed_thread(SpeedThreadFunc);
+        const slip39_mode::RuntimeHooks hooks{
+            [](std::uint64_t completed) {
+                counterTotal += completed;
+            },
+            []() {
+                ++Founds;
+            }
+        };
+        const int result = slip39_mode::run(argc, argv, hooks);
+        isRun = false;
+        if (speed_thread.joinable()) speed_thread.join();
+
+        const std::time_t finished =
+            std::chrono::system_clock::to_time_t(
+                std::chrono::system_clock::now());
+        std::cout << "\n[!] Processed " << counterTotal
+                  << " SLIP-39 password candidates. Found: "
+                  << Founds << ". Program finished at "
+                  << std::ctime(&finished);
+        return result;
     }
     if (algorand_mode::requested(argc, argv)) {
         counterTotal = 0;

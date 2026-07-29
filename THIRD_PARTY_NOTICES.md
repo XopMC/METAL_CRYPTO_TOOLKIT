@@ -53,3 +53,17 @@ The generated Polyseed word-list data is located in
 `Monero/MoneroWordlists.generated.h`. No Polyseed implementation source is
 copied into the executable; the native implementation is covered by the
 project's combined GPLv3 distribution described above.
+
+## SLIP-0039 word list
+
+The `-slip39` mode embeds the official English SLIP-0039 word list:
+
+- Copyright (c) 2019 SatoshiLabs
+- Upstream: https://github.com/trezor/python-shamir-mnemonic
+- Source revision: `17fcce14736afe498871d3018e4fa9330443471a`
+- License: MIT
+
+The generated word-list data is located in
+`Slip39/Slip39Wordlist.generated.h`. The parser, Shamir reconstruction,
+Feistel cipher, host verification, and Metal kernels are native project
+implementations based on the public SLIP-0039 specification.

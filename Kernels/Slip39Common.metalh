@@ -1,0 +1,271 @@
+#ifndef METAL_CRYPTO_SLIP39_COMMON_METALH
+#define METAL_CRYPTO_SLIP39_COMMON_METALH
+
+#include "GPUHash.metalh"
+
+using namespace metal;
+
+constant uint SLIP39_PASSWORD_STRIDE = 128u;
+constant uint SLIP39_MAX_SECRET_BYTES = 32u;
+
+struct Slip39Config {
+    uchar ciphertext[SLIP39_MAX_SECRET_BYTES];
+    uint ciphertext_len;
+    uint identifier;
+    uint iteration_exponent;
+    uint extendable;
+};
+
+struct Slip39Target {
+    uchar digest[32];
+    ulong prefix;
+    ulong source_index;
+};
+
+struct Slip39Hit {
+    ulong candidate_index;
+    ulong target_index;
+    uint password_len;
+    uint secret_len;
+    uchar password[SLIP39_PASSWORD_STRIDE];
+    uchar master_secret[SLIP39_MAX_SECRET_BYTES];
+};
+
+struct Slip39Derived {
+    uchar digest[32];
+    uchar master_secret[SLIP39_MAX_SECRET_BYTES];
+    uint valid;
+    uint reserved;
+};
+
+struct Slip39HmacPrecomp {
+    uint inner[8];
+    uint outer[8];
+};
+
+static inline void slip39_load_be_words(
+    const thread uchar* bytes,
+    thread uint words[16]) {
+    for (uint i = 0u; i < 16u; ++i) {
+        const uint offset = i * 4u;
+        words[i] =
+            (uint(bytes[offset]) << 24u) |
+            (uint(bytes[offset + 1u]) << 16u) |
+            (uint(bytes[offset + 2u]) << 8u) |
+            uint(bytes[offset + 3u]);
+    }
+}
+
+static inline void slip39_sha256_finish(
+    thread uint state[8],
+    const thread uchar* tail,
+    uint tail_len,
+    ulong total_bytes,
+    thread uchar digest[32]) {
+    uint words[16];
+    for (uint i = 0u; i < 16u; ++i) words[i] = 0u;
+    for (uint i = 0u; i < tail_len; ++i) {
+        words[i >> 2u] |=
+            uint(tail[i]) << ((3u - (i & 3u)) * 8u);
+    }
+    words[tail_len >> 2u] |=
+        0x80u << ((3u - (tail_len & 3u)) * 8u);
+    const ulong bit_count = total_bytes * 8ul;
+    if (tail_len > 55u) {
+        SHA256Transform(state, words);
+        for (uint i = 0u; i < 16u; ++i) words[i] = 0u;
+    }
+    words[14] = uint(bit_count >> 32u);
+    words[15] = uint(bit_count);
+    SHA256Transform(state, words);
+    for (uint i = 0u; i < 8u; ++i) {
+        digest[i * 4u] = uchar(state[i] >> 24u);
+        digest[i * 4u + 1u] = uchar(state[i] >> 16u);
+        digest[i * 4u + 2u] = uchar(state[i] >> 8u);
+        digest[i * 4u + 3u] = uchar(state[i]);
+    }
+}
+
+static inline void slip39_hmac_precompute(
+    const thread uchar* key,
+    uint key_len,
+    thread Slip39HmacPrecomp& result) {
+    uchar normalized[64];
+    for (uint i = 0u; i < 64u; ++i) normalized[i] = 0u;
+    if (key_len > 64u) {
+        uchar digest[32];
+        SHA256(key, size_t(key_len), digest);
+        for (uint i = 0u; i < 32u; ++i) normalized[i] = digest[i];
+    } else {
+        for (uint i = 0u; i < key_len; ++i) normalized[i] = key[i];
+    }
+    uchar block[64];
+    uint words[16];
+    for (uint i = 0u; i < 64u; ++i) {
+        block[i] = uchar(normalized[i] ^ 0x36u);
+    }
+    slip39_load_be_words(block, words);
+    SHA256Initialize(result.inner);
+    SHA256Transform(result.inner, words);
+    for (uint i = 0u; i < 64u; ++i) {
+        block[i] = uchar(normalized[i] ^ 0x5cu);
+    }
+    slip39_load_be_words(block, words);
+    SHA256Initialize(result.outer);
+    SHA256Transform(result.outer, words);
+}
+
+static inline void slip39_hmac(
+    const thread Slip39HmacPrecomp& precomputed,
+    const thread uchar* message,
+    uint message_len,
+    thread uchar digest[32]) {
+    uint state[8];
+    uint words[16];
+    for (uint i = 0u; i < 8u; ++i) state[i] = precomputed.inner[i];
+    uint offset = 0u;
+    while (message_len - offset >= 64u) {
+        slip39_load_be_words(message + offset, words);
+        SHA256Transform(state, words);
+        offset += 64u;
+    }
+    uchar inner_digest[32];
+    slip39_sha256_finish(
+        state, message + offset, message_len - offset,
+        64ul + ulong(message_len), inner_digest);
+    for (uint i = 0u; i < 8u; ++i) state[i] = precomputed.outer[i];
+    slip39_sha256_finish(
+        state, inner_digest, 32u, 96ul, digest);
+}
+
+static inline void slip39_pbkdf2_block1(
+    const thread uchar* password,
+    uint password_len,
+    const thread uchar* salt,
+    uint salt_len,
+    uint iterations,
+    thread uchar output[32]) {
+    Slip39HmacPrecomp precomputed;
+    slip39_hmac_precompute(
+        password, password_len, precomputed);
+    uchar message[36];
+    for (uint i = 0u; i < salt_len; ++i) message[i] = salt[i];
+    message[salt_len] = 0u;
+    message[salt_len + 1u] = 0u;
+    message[salt_len + 2u] = 0u;
+    message[salt_len + 3u] = 1u;
+    uchar u[32];
+    uchar next[32];
+    slip39_hmac(precomputed, message, salt_len + 4u, u);
+    for (uint i = 0u; i < 32u; ++i) output[i] = u[i];
+    for (uint iteration = 1u; iteration < iterations; ++iteration) {
+        slip39_hmac(precomputed, u, 32u, next);
+        for (uint i = 0u; i < 32u; ++i) {
+            u[i] = next[i];
+            output[i] = uchar(output[i] ^ next[i]);
+        }
+    }
+}
+
+static inline bool slip39_decrypt(
+    const constant Slip39Config& config,
+    const thread uchar* password,
+    uint password_len,
+    thread uchar master_secret[SLIP39_MAX_SECRET_BYTES]) {
+    if (config.ciphertext_len < 16u ||
+        config.ciphertext_len > SLIP39_MAX_SECRET_BYTES ||
+        (config.ciphertext_len & 1u) != 0u ||
+        password_len >= SLIP39_PASSWORD_STRIDE ||
+        config.iteration_exponent > 15u) {
+        return false;
+    }
+    const uint half_len = config.ciphertext_len >> 1u;
+    uchar left[16];
+    uchar right[16];
+    for (uint i = 0u; i < half_len; ++i) {
+        left[i] = config.ciphertext[i];
+        right[i] = config.ciphertext[half_len + i];
+    }
+    const uint iterations = 2500u << config.iteration_exponent;
+    for (int round = 3; round >= 0; --round) {
+        uchar round_password[SLIP39_PASSWORD_STRIDE];
+        round_password[0] = uchar(round);
+        for (uint i = 0u; i < password_len; ++i) {
+            round_password[i + 1u] = password[i];
+        }
+        uchar salt[24];
+        uint salt_len = 0u;
+        if (config.extendable == 0u) {
+            salt[salt_len++] = 's';
+            salt[salt_len++] = 'h';
+            salt[salt_len++] = 'a';
+            salt[salt_len++] = 'm';
+            salt[salt_len++] = 'i';
+            salt[salt_len++] = 'r';
+            salt[salt_len++] = uchar(config.identifier >> 8u);
+            salt[salt_len++] = uchar(config.identifier);
+        }
+        for (uint i = 0u; i < half_len; ++i) {
+            salt[salt_len++] = right[i];
+        }
+        uchar block[32];
+        slip39_pbkdf2_block1(
+            round_password, password_len + 1u,
+            salt, salt_len, iterations, block);
+        uchar next_right[16];
+        for (uint i = 0u; i < half_len; ++i) {
+            next_right[i] = uchar(left[i] ^ block[i]);
+        }
+        for (uint i = 0u; i < half_len; ++i) {
+            left[i] = right[i];
+            right[i] = next_right[i];
+        }
+    }
+    for (uint i = 0u; i < half_len; ++i) {
+        master_secret[i] = right[i];
+        master_secret[half_len + i] = left[i];
+    }
+    return true;
+}
+
+static inline ulong slip39_digest_prefix(
+    const thread uchar digest[32]) {
+    ulong prefix = 0ul;
+    for (uint i = 0u; i < 8u; ++i) {
+        prefix = (prefix << 8u) | ulong(digest[i]);
+    }
+    return prefix;
+}
+
+static inline int slip39_compare_digest(
+    const thread uchar digest[32],
+    const device Slip39Target& target) {
+    for (uint i = 0u; i < 32u; ++i) {
+        if (digest[i] < target.digest[i]) return -1;
+        if (digest[i] > target.digest[i]) return 1;
+    }
+    return 0;
+}
+
+static inline int slip39_find_target(
+    const thread uchar digest[32],
+    const device Slip39Target* targets,
+    uint target_count) {
+    const ulong prefix = slip39_digest_prefix(digest);
+    uint low = 0u;
+    uint high = target_count;
+    while (low < high) {
+        const uint middle = low + ((high - low) >> 1u);
+        if (targets[middle].prefix < prefix) low = middle + 1u;
+        else high = middle;
+    }
+    for (uint i = low;
+         i < target_count && targets[i].prefix == prefix; ++i) {
+        if (slip39_compare_digest(digest, targets[i]) == 0) {
+            return int(i);
+        }
+    }
+    return -1;
+}
+
+#endif
