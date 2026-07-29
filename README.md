@@ -9,7 +9,7 @@
   <img alt="Platform" src="https://img.shields.io/badge/platform-macOS%2015%2B-111827?style=for-the-badge">
   <img alt="Architecture" src="https://img.shields.io/badge/architecture-Apple%20Silicon-0f766e?style=for-the-badge">
   <img alt="GPU API" src="https://img.shields.io/badge/GPU-Metal%203-2563eb?style=for-the-badge">
-  <img alt="Version" src="https://img.shields.io/badge/version-v15-b45309?style=for-the-badge">
+  <img alt="Version" src="https://img.shields.io/badge/version-v16-b45309?style=for-the-badge">
   <a href="#support-the-project"><img alt="Sponsor" src="https://img.shields.io/badge/Sponsor-Support%20development-EA4AAA?style=for-the-badge&amp;logo=githubsponsors&amp;logoColor=white"></a>
 </p>
 
@@ -21,7 +21,7 @@ Author: Mikhail Khoroshavin, also known as **XopMC**
 
 ### Changelog
 
-#### v16 development
+#### v16
 
 Wave 0 establishes the shared infrastructure used by the new GPU modes:
 
@@ -418,6 +418,22 @@ Wave 24 adds exact Chia key recovery:
   `SpeedThreadFunc` reports completed `KDF/s`, primitive work, targets,
   readback and actual working set.
 
+Wave 25 closes the v16 release candidate and full regression:
+
+- the production binary is arm64-only, declares macOS 15.0, embeds its
+  `metallib`, and is packaged reproducibly with bilingual release notes,
+  companion tools and separate SHA-256 files;
+- detailed help is symmetric in both argument orders, and the release
+  regression covers BSGS, Kangaroo `compact170`/`wide256`, wallet modes,
+  BLS12-381, Ill Bloom PRNG, default auto-grid and P2WSH;
+- BIP38 now uses an isolated grouped Metal kernel. This restores exact non-EC
+  and EC-multiply recovery after the larger shared wallet kernel gained
+  Substrate/Cardano paths, without changing the other wallet pipelines;
+- independent BIP38 groups now share one memory-bounded launch and occupy the
+  available scrypt lanes concurrently. The exact two-target non-EC regression
+  improved from 9.948/9.941 s (A1/A2) to 5.132 s median on M4 Max
+  (+93.835%/+93.703% throughput, 0.123% CV).
+
 A cross-wave PRNG compatibility update tracks the current CUDA catalog:
 
 - `-prng` now includes Ill Bloom generators `332..489` and modes `247..762`,
@@ -570,7 +586,7 @@ under GPLv3. See `COPYING.GPLv3.txt` and `THIRD_PARTY_NOTICES.md`.
 
 ### Requirements
 
-#### Ready-to-run v15 release
+#### Ready-to-run v16 release
 
 - Apple Silicon Mac (`arm64`);
 - macOS 15.0 or newer;
@@ -589,23 +605,23 @@ The release contains one executable. The Metal library is embedded in its Mach-O
 
 ### Download, verify, and run
 
-Download these two files from the [v15 release](https://github.com/XopMC/METAL_CRYPTO_TOOLKIT/releases/tag/v15):
+Download these two files from the [v16 release](https://github.com/XopMC/METAL_CRYPTO_TOOLKIT/releases/tag/v16):
 
-- `METAL_CRYPTO_TOOLKIT-v15-macos-arm64.tar.gz`
-- `METAL_CRYPTO_TOOLKIT-v15-macos-arm64.tar.gz.sha256`
+- `METAL_CRYPTO_TOOLKIT-v16-macos-arm64.tar.gz`
+- `METAL_CRYPTO_TOOLKIT-v16-macos-arm64.tar.gz.sha256`
 
 The same release also contains the optional address-conversion package:
 
-- `METAL_CRYPTO_TOOLKIT-tools-v15-macos-arm64.tar.gz`
-- `METAL_CRYPTO_TOOLKIT-tools-v15-macos-arm64.tar.gz.sha256`
+- `METAL_CRYPTO_TOOLKIT-tools-v16-macos-arm64.tar.gz`
+- `METAL_CRYPTO_TOOLKIT-tools-v16-macos-arm64.tar.gz.sha256`
 
 It is needed only when printable cryptocurrency addresses must be converted into the homogeneous hexadecimal lists accepted by filter builders. It does not contain or replace the main Toolkit executable.
 
 Then run:
 
 ```bash
-shasum -a 256 -c METAL_CRYPTO_TOOLKIT-v15-macos-arm64.tar.gz.sha256
-tar -xzf METAL_CRYPTO_TOOLKIT-v15-macos-arm64.tar.gz
+shasum -a 256 -c METAL_CRYPTO_TOOLKIT-v16-macos-arm64.tar.gz.sha256
+tar -xzf METAL_CRYPTO_TOOLKIT-v16-macos-arm64.tar.gz
 chmod +x METAL_CRYPTO_TOOLKIT
 ./METAL_CRYPTO_TOOLKIT -help
 ```
@@ -613,8 +629,8 @@ chmod +x METAL_CRYPTO_TOOLKIT
 To install the optional converter package:
 
 ```bash
-shasum -a 256 -c METAL_CRYPTO_TOOLKIT-tools-v15-macos-arm64.tar.gz.sha256
-tar -xzf METAL_CRYPTO_TOOLKIT-tools-v15-macos-arm64.tar.gz
+shasum -a 256 -c METAL_CRYPTO_TOOLKIT-tools-v16-macos-arm64.tar.gz.sha256
+tar -xzf METAL_CRYPTO_TOOLKIT-tools-v16-macos-arm64.tar.gz
 chmod +x tools/*
 tools/cardano_address_to_hex -h
 ```
@@ -3912,7 +3928,7 @@ xattr -d com.apple.quarantine METAL_CRYPTO_TOOLKIT
 
 ### Изменения
 
-#### Разработка v16
+#### v16
 
 Волна 0 добавляет общую инфраструктуру для новых GPU-режимов:
 
@@ -4315,6 +4331,23 @@ Fused pipeline Волны 18 прошёл симметричный gate на 4 1
   primitive work, targets, readback и working set печатает только общий
   `SpeedThreadFunc`.
 
+Волна 25 завершает release candidate v16 и полную регрессию:
+
+- production-бинарник содержит только arm64, требует macOS 15.0, включает
+  встроенный `metallib` и воспроизводимо упаковывается с двуязычными release
+  notes, набором утилит и отдельными SHA-256;
+- подробный help симметричен в обоих порядках аргументов, а release-регрессия
+  покрывает BSGS, Kangaroo `compact170`/`wide256`, wallet-режимы, BLS12-381,
+  Ill Bloom PRNG, default auto-grid и P2WSH;
+- BIP38 переведён на изолированное grouped Metal-ядро. Оно восстанавливает
+  точные non-EC и EC-multiply результаты после добавления
+  Substrate/Cardano-контуров в общее wallet-ядро, не меняя остальные
+  wallet-pipeline;
+- независимые BIP38-группы теперь выполняются одним ограниченным памятью
+  запуском и параллельно занимают доступные scrypt-lanes. Exact-регрессия
+  non-EC с двумя целями на M4 Max ускорилась с медиан 9,948/9,941 с (A1/A2)
+  до 5,132 с (+93,835%/+93,703% throughput, CV 0,123%).
+
 Межволновое обновление PRNG синхронизирует каталог с текущей CUDA-версией:
 
 - `-prng` получил Ill Bloom генераторы `332..489` и режимы `247..762`, включая
@@ -4472,7 +4505,7 @@ GNU GPLv3. Поэтому сборки, включающие этот режим
 
 ### Системные требования
 
-#### Готовый выпуск v15
+#### Готовый выпуск v16
 
 - Mac на Apple Silicon (`arm64`);
 - macOS 15.0 или новее;
@@ -4491,23 +4524,23 @@ GNU GPLv3. Поэтому сборки, включающие этот режим
 
 ### Загрузка, проверка и первый запуск
 
-На странице [выпуска v15](https://github.com/XopMC/METAL_CRYPTO_TOOLKIT/releases/tag/v15) загрузите:
+На странице [выпуска v16](https://github.com/XopMC/METAL_CRYPTO_TOOLKIT/releases/tag/v16) загрузите:
 
-- `METAL_CRYPTO_TOOLKIT-v15-macos-arm64.tar.gz`;
-- `METAL_CRYPTO_TOOLKIT-v15-macos-arm64.tar.gz.sha256`.
+- `METAL_CRYPTO_TOOLKIT-v16-macos-arm64.tar.gz`;
+- `METAL_CRYPTO_TOOLKIT-v16-macos-arm64.tar.gz.sha256`.
 
 Там же находится необязательный набор программ для преобразования адресов:
 
-- `METAL_CRYPTO_TOOLKIT-tools-v15-macos-arm64.tar.gz`;
-- `METAL_CRYPTO_TOOLKIT-tools-v15-macos-arm64.tar.gz.sha256`.
+- `METAL_CRYPTO_TOOLKIT-tools-v16-macos-arm64.tar.gz`;
+- `METAL_CRYPTO_TOOLKIT-tools-v16-macos-arm64.tar.gz.sha256`.
 
 Он нужен только тогда, когда обычные адреса криптовалют требуется превратить в однородные списки hex для последующего создания фильтров. Основной исполняемый файл Toolkit в этот архив не входит.
 
 Положите оба файла в одну папку и выполните:
 
 ```bash
-shasum -a 256 -c METAL_CRYPTO_TOOLKIT-v15-macos-arm64.tar.gz.sha256
-tar -xzf METAL_CRYPTO_TOOLKIT-v15-macos-arm64.tar.gz
+shasum -a 256 -c METAL_CRYPTO_TOOLKIT-v16-macos-arm64.tar.gz.sha256
+tar -xzf METAL_CRYPTO_TOOLKIT-v16-macos-arm64.tar.gz
 chmod +x METAL_CRYPTO_TOOLKIT
 ./METAL_CRYPTO_TOOLKIT -help
 ```

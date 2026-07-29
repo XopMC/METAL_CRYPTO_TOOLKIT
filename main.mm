@@ -8252,7 +8252,7 @@ enum class HelpTopic {
 "[!]        -xtz-type LIST              XTZ curves: 1=secp256k1, 2=ed25519.\n"
 
 static const char* kLegacyDetailedHelp = R"HELP(
-[!] ================== METAL_CRYPTO_TOOLKIT v14 FULL HELP ==================
+[!] ================== METAL_CRYPTO_TOOLKIT v16 FULL HELP ==================
 
 [!] [!] QUICK START [!]
 [!] -h / -help                      Show this help and exit.
@@ -12297,7 +12297,7 @@ int main(int argc, char** argv)
         std::ios_base::sync_with_stdio(false);
         std::cin.tie(nullptr);
     }
-    printf("[!] METAL_CRYPTO_TOOLKIT v15.0.0 by @XopMC for Crypto Community\n");
+    printf("[!] METAL_CRYPTO_TOOLKIT v16.0.0 by @XopMC for Crypto Community\n");
 
     if (argc == 1) {
         printHelpShort();
@@ -52185,9 +52185,11 @@ metalError_t processMetalBrowserVault()
         }
     }
     std::vector<WalletGenericTargetChunk> chunks;
+    const uint64_t group_chunk_work_limit = bip38_mode
+        ? std::numeric_limits<uint64_t>::max()
+        : walletdat_max_kdf_iter_work_per_launch;
     wallet_build_generic_chunks_from_work(
-        work_by_group, chunks, walletdat_max_kdf_iter_work_per_launch,
-        &scratch_by_group);
+        work_by_group, chunks, group_chunk_work_limit, &scratch_by_group);
     std::vector<uint32_t> chunk_target_counts;
     wallet_count_chunk_targets_from_groups(groups, chunks, chunk_target_counts);
     size_t singleton_groups = 0u;
