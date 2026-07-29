@@ -3593,6 +3593,37 @@ The hexadecimal fields decode to 64-byte salts, a 16-byte IV, and a 96-byte mast
 
 Result profile: `android-backup-pbkdf2-sha1-aes-cbc`.
 
+#### `-eth2validator`
+
+`-eth2validator` has two exact GPU contours for Ethereum validator keys:
+
+- EIP-2335 v4 keystore password recovery with PBKDF2-HMAC-SHA256 or scrypt, SHA-256 password verification, AES-128-CTR decryption, and a complete BLS12-381 public-key check;
+- BIP39 mnemonic or raw-seed verification through EIP-2333 and an EIP-2334 path.
+
+Passwords are NFKD-normalized, C0/C1/DEL control codes are removed, and the result is UTF-8 encoded before the KDF. The keystore may follow the mode positionally or through repeatable `-keystore`. Passwords use `-i`, `-pass`, `-mask`, or numeric `-start/-end`.
+
+```bash
+./METAL_CRYPTO_TOOLKIT -eth2validator validator-keystore.json \
+  -i passwords.txt -wallet-mem auto -save
+
+./METAL_CRYPTO_TOOLKIT -eth2validator -keystore validator.json \
+  -mask "secret?d?d" -wallet-mem all
+```
+
+For validator derivation, `-target` accepts one 48-byte compressed BLS public key or a file with one key per line. The default signing path is `m/12381/3600/0/0/0`; pass a different exact path with `-path`. In this contour `-i` is a mnemonic file.
+
+```bash
+./METAL_CRYPTO_TOOLKIT -eth2validator -i mnemonics.txt \
+  -target validator_pubkeys.txt -path m/12381/3600/0/0/0
+
+./METAL_CRYPTO_TOOLKIT -eth2validator -seed seed.hex \
+  -target PUBKEY -path m/12381/3600/0/0
+```
+
+`-wallet-mem auto|all|NN%|SIZE`, `-wallet-scrypt-mem`, `-n`, and `-device` control Metal residency. Apple Silicon unified memory is budgeted from the current free recommended working set; large scrypt parameters can therefore reduce the number of resident candidates to one. Statistics are emitted only by the common `SpeedThreadFunc` as completed `KDF/s`, primitive KDF work, exact BLS verification, target state, working set, and readback time.
+
+Only version 4 files using the enabled EIP-2335 modules are accepted. Mnemonic input is checksum-valid English BIP39. Unknown-word permutations must be supplied as candidates by another mode or file. Every GPU hit is independently checked with SHA-256, AES-CTR, and the BLS public key before output.
+
 ### Inventory and catalogs
 
 #### `-walletscan`
@@ -3617,15 +3648,6 @@ Raw secrets can be printed and saved. Use `-silent` when terminal output is not 
 #### `-prng_help` and `-prng64_help`
 
 These modes print the exact generator and extraction-mode catalogs, then exit. They do not start a search.
-
-## Reserved or inactive modes
-
-The following command name is parsed or documented for future/external
-compatibility, but must not be used as a working recovery mode:
-
-- `-eth2validator`: exact validator-key derivation worker is not enabled.
-
-The program stops or cannot produce a confirmed result for these modes. Do not interpret a run with no result as proof that a password is absent.
 
 ## Argument index
 
@@ -7394,6 +7416,37 @@ $ab$<version>*<cipher>*<iterations>*<user_salt>*<ck_salt>*<user_iv>*<masterkey_b
 
 Профиль результата: `android-backup-pbkdf2-sha1-aes-cbc`.
 
+#### `-eth2validator`
+
+`-eth2validator` содержит два точных GPU-контура для ключей Ethereum-валидаторов:
+
+- восстановление пароля EIP-2335 v4 с PBKDF2-HMAC-SHA256 или scrypt, проверкой пароля через SHA-256, AES-128-CTR и полной проверкой BLS12-381 публичного ключа;
+- проверка BIP39-мнемоники или исходного seed через EIP-2333 и путь EIP-2334.
+
+Перед KDF пароль приводится к NFKD, из него удаляются управляющие коды C0/C1/DEL, затем строка кодируется в UTF-8. Keystore можно передать позиционно после режима или повторяемым `-keystore`. Источник паролей задаётся через `-i`, `-pass`, `-mask` либо числовые `-start/-end`.
+
+```bash
+./METAL_CRYPTO_TOOLKIT -eth2validator validator-keystore.json \
+  -i passwords.txt -wallet-mem auto -save
+
+./METAL_CRYPTO_TOOLKIT -eth2validator -keystore validator.json \
+  -mask "secret?d?d" -wallet-mem all
+```
+
+В контуре деривации `-target` принимает один 48-байтовый сжатый BLS-публичный ключ или файл с ключом в каждой строке. Путь signing key по умолчанию — `m/12381/3600/0/0/0`; другой точный путь задаётся через `-path`. Здесь `-i` означает файл мнемоник.
+
+```bash
+./METAL_CRYPTO_TOOLKIT -eth2validator -i mnemonics.txt \
+  -target validator_pubkeys.txt -path m/12381/3600/0/0/0
+
+./METAL_CRYPTO_TOOLKIT -eth2validator -seed seed.hex \
+  -target PUBKEY -path m/12381/3600/0/0
+```
+
+Резидентностью Metal управляют `-wallet-mem auto|all|NN%|SIZE`, `-wallet-scrypt-mem`, `-n` и `-device`. На Apple Silicon unified memory рассчитывается из свободной части recommended working set; при тяжёлом scrypt число одновременно активных кандидатов может уменьшиться до одного. Статистику печатает только общий `SpeedThreadFunc`: завершённые `KDF/s`, фактические KDF-операции, точные BLS-проверки, состояние целей, working set и readback.
+
+Принимаются только файлы версии 4 с поддерживаемыми модулями EIP-2335. Мнемоники должны быть checksum-valid English BIP39. Перестановки неизвестных слов нужно заранее сформировать другим режимом или файлом. Каждый GPU-hit перед выводом независимо проверяется через SHA-256, AES-CTR и BLS-публичный ключ.
+
 ### Инвентаризация и каталоги
 
 #### `-walletscan`
@@ -7418,15 +7471,6 @@ WALLETSCAN:<source_file>:<type>:LINE:<line_number>:VALUE:<value>
 #### `-prng_help` и `-prng64_help`
 
 Печатают полный список генераторов и способов извлечения байтов, затем завершают работу. Сам поиск не запускается.
-
-## Зарезервированные или выключенные режимы
-
-Следующее имя распознаётся командной строкой или оставлено для совместимого
-формата, но не является рабочим режимом восстановления:
-
-- `-eth2validator`: точная деривация ключей валидатора не включена.
-
-Отсутствие результата в этих режимах не доказывает, что проверяемого пароля нет.
 
 ## Краткий указатель параметров
 

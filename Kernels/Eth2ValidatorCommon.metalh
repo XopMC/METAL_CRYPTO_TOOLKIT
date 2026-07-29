@@ -1,0 +1,76 @@
+#ifndef METAL_CRYPTO_ETH2_VALIDATOR_COMMON_METALH
+#define METAL_CRYPTO_ETH2_VALIDATOR_COMMON_METALH
+
+#include "WorkerKeystoreCommon.metalh"
+#include "Pbkdf2Func.metalh"
+
+using namespace metal;
+
+#define ETH2_KDF_PBKDF2_SHA256 1u
+#define ETH2_KDF_SCRYPT 2u
+#define ETH2_PASSWORD_STRIDE 128u
+#define ETH2_MNEMONIC_STRIDE 256u
+#define ETH2_MAX_SALT 64u
+
+struct Eth2ValidatorTarget {
+    uint kdf_type;
+    uint iterations;
+    uint scrypt_n;
+    uint scrypt_r;
+    uint scrypt_p;
+    uint salt_len;
+    uint target_index;
+    uint reserved;
+    uchar salt[ETH2_MAX_SALT];
+    uchar iv[16];
+    uchar ciphertext[32];
+    uchar checksum[32];
+    uchar public_key[48];
+};
+
+struct Eth2ValidatorHit {
+    ulong candidate_index;
+    uint target_index;
+    uint password_len;
+    uchar password[ETH2_PASSWORD_STRIDE];
+    uchar derived_key[32];
+    uchar secret[32];
+};
+
+static inline bool eth2_equal_32(const thread uchar left[32],
+                                 const device uchar right[32]) {
+    uint difference = 0u;
+    for (uint i = 0u; i < 32u; ++i) {
+        difference |= uint(left[i] ^ right[i]);
+    }
+    return difference == 0u;
+}
+
+static inline void eth2_emit_hit(
+    ulong candidate_index,
+    uint target_index,
+    const thread uchar* password,
+    uint password_len,
+    const thread uchar derived_key[32],
+    const thread uchar secret[32],
+    device Eth2ValidatorHit* hits,
+    device atomic_uint* hit_count,
+    uint hit_capacity) {
+    const uint slot = atomic_fetch_add_explicit(
+        hit_count, 1u, memory_order_relaxed);
+    if (slot >= hit_capacity) return;
+    device Eth2ValidatorHit& hit = hits[slot];
+    hit.candidate_index = candidate_index;
+    hit.target_index = target_index;
+    hit.password_len = password_len;
+    for (uint i = 0u; i < ETH2_PASSWORD_STRIDE; ++i) {
+        hit.password[i] =
+            i < password_len ? password[i] : 0u;
+    }
+    for (uint i = 0u; i < 32u; ++i) {
+        hit.derived_key[i] = derived_key[i];
+        hit.secret[i] = secret[i];
+    }
+}
+
+#endif

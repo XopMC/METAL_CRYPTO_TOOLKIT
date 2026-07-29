@@ -27,6 +27,7 @@
 #include "Slip39/Slip39Mode.h"
 #include "Aezeed/AezeedMode.h"
 #include "Stronghold/StrongholdMode.h"
+#include "Eth2Validator/Eth2ValidatorMode.h"
 #include "Algorand/AlgorandMode.h"
 #include "Monero/MoneroMode.h"
 #include "MoneroWallet/MoneroWalletMode.h"
@@ -10517,7 +10518,7 @@ static void printHelpShort() {
 [!] -slip39                       SLIP39 shard/template recovery.
 [!] -aezeed                       LND aezeed mnemonic recovery.
 [!] -stronghold                   IOTA Stronghold snapshot password recovery.
-[!] -eth2validator                Ethereum validator seed/passphrase recovery.
+[!] -eth2validator                Ethereum validator keystore/seed recovery.
 [!]
 [!] [!] WALLET EXTRACTION / INVENTORY [!] [!]
 [!] -walletscan                   Host-only wallet artifact inventory.
@@ -12040,9 +12041,7 @@ static void printHelpModeSection(HelpTopic topic) {
         stronghold_mode::print_help();
         break;
     case HelpTopic::Eth2Validator:
-        printHelpPendingExactModeSection("-eth2validator", "Ethereum validator seed/passphrase recovery",
-            "ETH2 validator mode requires BIP39 + EIP-2333/BLS validator derivation and validator pubkey/root verification.",
-            "./METAL_CRYPTO_TOOLKIT -eth2validator -i mnemonics.txt -target validator_pubkey -save");
+        eth2validator_mode::print_help();
         break;
     case HelpTopic::BisqWallet:
         printf(R"HELP([!] MAIN MODE: -bisqwallet  (Bisq wallet hash recovery)
@@ -12393,6 +12392,39 @@ int main(int argc, char** argv)
                 std::chrono::system_clock::now());
         std::cout << "\n[!] Processed " << counterTotal
                   << " Stronghold KDF candidates. Found: "
+                  << Founds << ". Program finished at "
+                  << std::ctime(&finished);
+        return result;
+    }
+    if (eth2validator_mode::requested(argc, argv)) {
+        counterTotal = 0;
+        Founds = 0;
+        isRun = true;
+
+        const std::time_t started =
+            std::chrono::system_clock::to_time_t(
+                std::chrono::system_clock::now());
+        std::cout << "[!] Program started at: " << std::ctime(&started);
+
+        std::thread speed_thread(SpeedThreadFunc);
+        const eth2validator_mode::RuntimeHooks hooks{
+            [](std::uint64_t completed) {
+                counterTotal += completed;
+            },
+            []() {
+                ++Founds;
+            }
+        };
+        const int result =
+            eth2validator_mode::run(argc, argv, hooks);
+        isRun = false;
+        if (speed_thread.joinable()) speed_thread.join();
+
+        const std::time_t finished =
+            std::chrono::system_clock::to_time_t(
+                std::chrono::system_clock::now());
+        std::cout << "\n[!] Processed " << counterTotal
+                  << " ETH2 validator KDF candidates. Found: "
                   << Founds << ". Program finished at "
                   << std::ctime(&finished);
         return result;

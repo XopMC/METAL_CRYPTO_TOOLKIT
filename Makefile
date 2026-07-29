@@ -29,7 +29,7 @@ CFLAGS   := -std=c17 -O3 -DNDEBUG -Wall -Wextra -Wno-unused-parameter \
             -IMoneroWallet/third_party \
             -Ithird_party/blst/bindings -Ithird_party/blst/src
 DEPFLAGS := -MMD -MP
-LDFLAGS  := -framework Foundation -framework Metal -framework IOKit
+LDFLAGS  := -framework Foundation -framework CoreFoundation -framework Metal -framework IOKit
 EMBED_METALLIB_LDFLAGS := -Wl,-sectcreate,__DATA,__metallib,$(METALLIB)
 
 HOST_SRCS := main.mm MetalRuntime.mm SaveFunc.mm MetalBackend.mm
@@ -51,6 +51,7 @@ CPP_SRCS := \
 	Slip39/Slip39Mode.cpp \
 	Aezeed/AezeedMode.cpp \
 	Stronghold/StrongholdMode.cpp \
+	Eth2Validator/Eth2ValidatorMode.cpp \
 	bls12_381/Bls12381.cpp \
 	Algorand/AlgorandMode.cpp \
 	Monero/MoneroMode.cpp \
@@ -101,6 +102,7 @@ LOCALIZED_HOST_HEADERS := Makefile KernelRuntime.h MacFileSystem.h Poetry.h Poet
 	Slip39/Slip39Mode.h Slip39/Slip39Wordlist.generated.h \
 	Aezeed/AezeedMode.h \
 	Stronghold/StrongholdMode.h \
+	Eth2Validator/Eth2ValidatorMode.h \
 	bls12_381/Bls12381.h \
 	Algorand/AlgorandMode.h \
 	Monero/MoneroMode.h Monero/MoneroWordlists.generated.h \
