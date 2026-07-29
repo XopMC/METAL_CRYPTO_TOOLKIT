@@ -76,3 +76,34 @@ LND aezeed implementation at commit
 
 The fixed-size AEZ-v5 implementation follows the public AEZ reference at commit
 `e49e68abd344eba4a888cee91bc7370df2d14e27` (CC0 public-domain dedication).
+
+## IOTA Stronghold, Tauri Stronghold, and Argon2
+
+The `-stronghold` snapshot parser and compatibility tests follow the public
+IOTA Stronghold implementation:
+
+- Copyright (c) 2020-2026 IOTA Stiftung
+- Upstream: https://github.com/iotaledger/stronghold.rs
+- Source revision: `ab6ff0de98095001ed2eb75111ee034a584678b8`
+- License: Apache License 2.0
+
+The named Tauri Argon2 profile follows the public Tauri Stronghold plugin
+example:
+
+- Copyright (c) 2019-2026 Tauri Programme within The Commons Conservancy
+- Upstream: https://github.com/tauri-apps/plugins-workspace
+- Source revision: `304292d740a666d3903ab58329860fc0fdde2818`
+- License: MIT OR Apache License 2.0
+
+The cooperative Metal Argon2 block layout and address-block reuse were adapted
+from Hashcat's MIT-licensed Argon2 OpenCL implementation:
+
+- Copyright (c) Netherlands Forensic Institute
+- Upstream: https://github.com/hashcat/hashcat
+- Source revision: `994014c7faebe1b55f31f7f1b5a7d7c6fb151d8a`
+- License: MIT
+
+The host X25519 construction follows the public-domain TweetNaCl design. The
+Stronghold host verifier, XChaCha20-Poly1305 implementation, exact LZ4 decoder,
+memory scheduler, CLI integration, and Metal kernels are maintained as native
+project code.

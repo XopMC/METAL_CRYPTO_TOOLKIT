@@ -48,6 +48,7 @@ CPP_SRCS := \
 	WarpWallet/WarpWalletMode.cpp \
 	Slip39/Slip39Mode.cpp \
 	Aezeed/AezeedMode.cpp \
+	Stronghold/StrongholdMode.cpp \
 	Algorand/AlgorandMode.cpp \
 	Monero/MoneroMode.cpp \
 	MoneroWallet/MoneroWalletMode.cpp \
@@ -93,6 +94,7 @@ LOCALIZED_HOST_HEADERS := Makefile KernelRuntime.h MacFileSystem.h Poetry.h Poet
 	WarpWallet/WarpWalletMode.h \
 	Slip39/Slip39Mode.h Slip39/Slip39Wordlist.generated.h \
 	Aezeed/AezeedMode.h \
+	Stronghold/StrongholdMode.h \
 	Algorand/AlgorandMode.h \
 	Monero/MoneroMode.h Monero/MoneroWordlists.generated.h \
 	MoneroWallet/MoneroWalletMode.h \

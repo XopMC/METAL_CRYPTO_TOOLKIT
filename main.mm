@@ -26,6 +26,7 @@
 #include "WarpWallet/WarpWalletMode.h"
 #include "Slip39/Slip39Mode.h"
 #include "Aezeed/AezeedMode.h"
+#include "Stronghold/StrongholdMode.h"
 #include "Algorand/AlgorandMode.h"
 #include "Monero/MoneroMode.h"
 #include "MoneroWallet/MoneroWalletMode.h"
@@ -8195,6 +8196,7 @@ enum class HelpTopic {
     AndroidWallet,
     Slip39,
     Aezeed,
+    Stronghold,
     Eth2Validator,
     BisqWallet,
     DogechainWallet,
@@ -10340,6 +10342,7 @@ static HelpTopic detect_help_topic(int argc, char** argv) {
         if (is_help_topic_arg(arg, "-androidwallet")) return HelpTopic::AndroidWallet;
         if (is_help_topic_arg(arg, "-slip39")) return HelpTopic::Slip39;
         if (is_help_topic_arg(arg, "-aezeed")) return HelpTopic::Aezeed;
+        if (is_help_topic_arg(arg, "-stronghold")) return HelpTopic::Stronghold;
         if (is_help_topic_arg(arg, "-eth2validator")) return HelpTopic::Eth2Validator;
         if (is_help_topic_arg(arg, "-bisqwallet")) return HelpTopic::BisqWallet;
         if (is_help_topic_arg(arg, "-dogechainwallet")) return HelpTopic::DogechainWallet;
@@ -10405,6 +10408,7 @@ static const char* help_topic_command(HelpTopic topic) {
     case HelpTopic::AndroidWallet: return "-androidwallet";
     case HelpTopic::Slip39: return "-slip39";
     case HelpTopic::Aezeed: return "-aezeed";
+    case HelpTopic::Stronghold: return "-stronghold";
     case HelpTopic::Eth2Validator: return "-eth2validator";
     case HelpTopic::BisqWallet: return "-bisqwallet";
     case HelpTopic::DogechainWallet: return "-dogechainwallet";
@@ -10512,6 +10516,7 @@ static void printHelpShort() {
 [!] [!] SEED / SHARE RECOVERY MODES [!] [!]
 [!] -slip39                       SLIP39 shard/template recovery.
 [!] -aezeed                       LND aezeed mnemonic recovery.
+[!] -stronghold                   IOTA Stronghold snapshot password recovery.
 [!] -eth2validator                Ethereum validator seed/passphrase recovery.
 [!]
 [!] [!] WALLET EXTRACTION / INVENTORY [!] [!]
@@ -12031,6 +12036,9 @@ static void printHelpModeSection(HelpTopic topic) {
     case HelpTopic::Aezeed:
         aezeed_mode::print_help();
         break;
+    case HelpTopic::Stronghold:
+        stronghold_mode::print_help();
+        break;
     case HelpTopic::Eth2Validator:
         printHelpPendingExactModeSection("-eth2validator", "Ethereum validator seed/passphrase recovery",
             "ETH2 validator mode requires BIP39 + EIP-2333/BLS validator derivation and validator pubkey/root verification.",
@@ -12352,6 +12360,39 @@ int main(int argc, char** argv)
                 std::chrono::system_clock::now());
         std::cout << "\n[!] Processed " << counterTotal
                   << " aezeed KDF candidates. Found: "
+                  << Founds << ". Program finished at "
+                  << std::ctime(&finished);
+        return result;
+    }
+    if (stronghold_mode::requested(argc, argv)) {
+        counterTotal = 0;
+        Founds = 0;
+        isRun = true;
+
+        const std::time_t started =
+            std::chrono::system_clock::to_time_t(
+                std::chrono::system_clock::now());
+        std::cout << "[!] Program started at: " << std::ctime(&started);
+
+        std::thread speed_thread(SpeedThreadFunc);
+        const stronghold_mode::RuntimeHooks hooks{
+            [](std::uint64_t completed) {
+                counterTotal += completed;
+            },
+            []() {
+                ++Founds;
+            }
+        };
+        const int result =
+            stronghold_mode::run(argc, argv, hooks);
+        isRun = false;
+        if (speed_thread.joinable()) speed_thread.join();
+
+        const std::time_t finished =
+            std::chrono::system_clock::to_time_t(
+                std::chrono::system_clock::now());
+        std::cout << "\n[!] Processed " << counterTotal
+                  << " Stronghold KDF candidates. Found: "
                   << Founds << ". Program finished at "
                   << std::ctime(&finished);
         return result;

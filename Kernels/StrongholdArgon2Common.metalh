@@ -1,0 +1,530 @@
+#ifndef METAL_CRYPTO_STRONGHOLD_ARGON2_COMMON_METALH
+#define METAL_CRYPTO_STRONGHOLD_ARGON2_COMMON_METALH
+
+#include "GPUHash.metalh"
+
+constant uint STRONGHOLD_ARGON2_THREADS_PER_LANE = 32u;
+constant uint STRONGHOLD_ARGON2_SYNC_POINTS = 4u;
+constant uint STRONGHOLD_ARGON2_TYPE_ID = 2u;
+constant uint STRONGHOLD_ARGON2_VERSION_13 = 0x13u;
+constant uint STRONGHOLD_PASSWORD_STRIDE = 128u;
+constant uint STRONGHOLD_SALT_STRIDE = 64u;
+
+struct StrongholdArgon2Options {
+    uint type;
+    uint version;
+    uint iterations;
+    uint parallelism;
+    uint memory_usage_in_kib;
+    uint segment_length;
+    uint lane_length;
+    uint memory_block_count;
+    uint digest_len;
+    uint password_stride;
+    uint salt_len;
+    uint candidate_count;
+};
+
+struct StrongholdArgon2Position {
+    uint pass;
+    uint slice;
+    uint lane;
+};
+
+static inline ulong stronghold_rotr64(ulong value, uint shift) {
+    return (value >> shift) | (value << (64u - shift));
+}
+
+static inline ulong stronghold_load64(
+    const thread uchar* data) {
+    ulong value = 0ul;
+#pragma unroll
+    for (uint index = 0u; index < 8u; ++index) {
+        value |= ulong(data[index]) << (index * 8u);
+    }
+    return value;
+}
+
+static inline void stronghold_store64(
+    thread uchar* data, ulong value) {
+#pragma unroll
+    for (uint index = 0u; index < 8u; ++index) {
+        data[index] = uchar(value >> (index * 8u));
+    }
+}
+
+static inline void stronghold_store32(
+    thread uchar* data, uint value) {
+    data[0] = uchar(value);
+    data[1] = uchar(value >> 8u);
+    data[2] = uchar(value >> 16u);
+    data[3] = uchar(value >> 24u);
+}
+
+static inline void stronghold_blake2b(
+    const thread uchar* input,
+    uint input_length,
+    uint output_length,
+    thread uchar output[64]) {
+    ulong state[8];
+    blake2b_init(state, uchar(output_length));
+    uchar block[128];
+    ulong total_low = 0ul;
+    ulong total_high = 0ul;
+    uint offset = 0u;
+    while (input_length - offset > 128u) {
+#pragma unroll
+        for (uint index = 0u; index < 128u; ++index) {
+            block[index] = input[offset + index];
+        }
+        const ulong previous = total_low;
+        total_low += 128ul;
+        if (total_low < previous) ++total_high;
+        blake2b_compress(
+            state, block, total_low, total_high, false);
+        offset += 128u;
+    }
+    const uint remaining = input_length - offset;
+#pragma unroll
+    for (uint index = 0u; index < 128u; ++index) {
+        block[index] =
+            index < remaining ? input[offset + index] : 0u;
+    }
+    const ulong previous = total_low;
+    total_low += ulong(remaining);
+    if (total_low < previous) ++total_high;
+    blake2b_compress(
+        state, block, total_low, total_high, true);
+#pragma unroll
+    for (uint index = 0u; index < 64u; ++index) {
+        output[index] = index < output_length
+            ? uchar(state[index >> 3u] >>
+                ((index & 7u) * 8u))
+            : 0u;
+    }
+}
+
+static inline void stronghold_blake2b_long_1024(
+    const thread uchar input[72],
+    uint input_length,
+    device ulong* output) {
+    uchar prefixed[76];
+    stronghold_store32(prefixed, 1024u);
+#pragma unroll
+    for (uint index = 0u; index < 72u; ++index) {
+        prefixed[index + 4u] =
+            index < input_length ? input[index] : 0u;
+    }
+    uchar digest[64];
+    stronghold_blake2b(
+        prefixed, input_length + 4u, 64u, digest);
+    uint output_offset = 0u;
+    for (uint round = 0u; round < 30u; ++round) {
+#pragma unroll
+        for (uint index = 0u; index < 32u; index += 8u) {
+            output[(output_offset + index) >> 3u] =
+                stronghold_load64(digest + index);
+        }
+        output_offset += 32u;
+        uchar next[64];
+        stronghold_blake2b(digest, 64u, 64u, next);
+#pragma unroll
+        for (uint index = 0u; index < 64u; ++index) {
+            digest[index] = next[index];
+        }
+    }
+#pragma unroll
+    for (uint index = 0u; index < 64u; index += 8u) {
+        output[(output_offset + index) >> 3u] =
+            stronghold_load64(digest + index);
+    }
+}
+
+static inline void stronghold_argon2_initial_hash(
+    const device uchar* password,
+    uint password_length,
+    const device uchar* salt,
+    const constant StrongholdArgon2Options& options,
+    thread uchar output[64]) {
+    uchar input[24u + 4u + STRONGHOLD_PASSWORD_STRIDE +
+                4u + STRONGHOLD_SALT_STRIDE + 8u];
+    uint offset = 0u;
+    stronghold_store32(input + offset, options.parallelism);
+    offset += 4u;
+    stronghold_store32(input + offset, options.digest_len);
+    offset += 4u;
+    stronghold_store32(
+        input + offset, options.memory_usage_in_kib);
+    offset += 4u;
+    stronghold_store32(input + offset, options.iterations);
+    offset += 4u;
+    stronghold_store32(input + offset, options.version);
+    offset += 4u;
+    stronghold_store32(input + offset, options.type);
+    offset += 4u;
+    stronghold_store32(input + offset, password_length);
+    offset += 4u;
+    for (uint index = 0u; index < password_length; ++index) {
+        input[offset++] = password[index];
+    }
+    stronghold_store32(input + offset, options.salt_len);
+    offset += 4u;
+    for (uint index = 0u; index < options.salt_len; ++index) {
+        input[offset++] = salt[index];
+    }
+    stronghold_store32(input + offset, 0u);
+    offset += 4u;
+    stronghold_store32(input + offset, 0u);
+    offset += 4u;
+    stronghold_blake2b(input, offset, 64u, output);
+}
+
+static inline void stronghold_argon2_initialize(
+    const device uchar* password,
+    uint password_length,
+    const device uchar* salt,
+    const constant StrongholdArgon2Options& options,
+    device ulong* blocks) {
+    uchar initial_hash[64];
+    stronghold_argon2_initial_hash(
+        password, password_length, salt, options,
+        initial_hash);
+    uchar block_input[72];
+#pragma unroll
+    for (uint index = 0u; index < 64u; ++index) {
+        block_input[index] = initial_hash[index];
+    }
+    for (uint lane = 0u; lane < options.parallelism; ++lane) {
+        stronghold_store32(block_input + 68u, lane);
+        for (uint block_number = 0u;
+             block_number < 2u; ++block_number) {
+            stronghold_store32(
+                block_input + 64u, block_number);
+            device ulong* destination =
+                blocks +
+                ((block_number * options.parallelism + lane) *
+                 128u);
+            stronghold_blake2b_long_1024(
+                block_input, 72u, destination);
+        }
+    }
+}
+
+static inline ulong stronghold_argon2_mul32(
+    ulong left, ulong right) {
+    return ulong(uint(left)) * ulong(uint(right));
+}
+
+static inline void stronghold_argon2_g(
+    thread ulong& a,
+    thread ulong& b,
+    thread ulong& c,
+    thread ulong& d) {
+    a = a + b + 2ul * stronghold_argon2_mul32(a, b);
+    d = stronghold_rotr64(d ^ a, 32u);
+    c = c + d + 2ul * stronghold_argon2_mul32(c, d);
+    b = stronghold_rotr64(b ^ c, 24u);
+    a = a + b + 2ul * stronghold_argon2_mul32(a, b);
+    d = stronghold_rotr64(d ^ a, 16u);
+    c = c + d + 2ul * stronghold_argon2_mul32(c, d);
+    b = stronghold_rotr64(b ^ c, 63u);
+}
+
+static inline ulong stronghold_simd_shuffle64(
+    ulong value, uint source) {
+    const uint low = simd_shuffle(uint(value), source & 31u);
+    const uint high =
+        simd_shuffle(uint(value >> 32u), source & 31u);
+    return (ulong(high) << 32u) | ulong(low);
+}
+
+static inline void stronghold_swap(
+    thread ulong& left, thread ulong& right) {
+    const ulong temporary = left;
+    left = right;
+    right = temporary;
+}
+
+static inline void stronghold_argon2_transpose(
+    thread ulong values[4], uint lane_thread) {
+    if ((lane_thread & 0x08u) != 0u) {
+        stronghold_swap(values[0], values[2]);
+        stronghold_swap(values[1], values[3]);
+    }
+    if ((lane_thread & 0x04u) != 0u) {
+        stronghold_swap(values[0], values[1]);
+        stronghold_swap(values[2], values[3]);
+    }
+}
+
+static inline uint stronghold_argon2_shift(
+    uint index, uint lane_thread) {
+    const uint delta =
+        ((index & 0x02u) << 3u) + (index & 0x01u);
+    return (lane_thread & 0x0eu) |
+        (((lane_thread & 0x11u) + delta + 0x0eu) &
+         0x11u);
+}
+
+static inline void stronghold_argon2_hash_block(
+    thread ulong values[4], uint lane_thread) {
+    for (uint index = 1u; index < 4u; ++index) {
+        values[index] = stronghold_simd_shuffle64(
+            values[index],
+            lane_thread ^ (index << 2u));
+    }
+    stronghold_argon2_transpose(values, lane_thread);
+    for (uint index = 1u; index < 4u; ++index) {
+        values[index] = stronghold_simd_shuffle64(
+            values[index],
+            lane_thread ^ (index << 2u));
+    }
+    stronghold_argon2_g(
+        values[0], values[1], values[2], values[3]);
+    for (uint index = 1u; index < 4u; ++index) {
+        values[index] = stronghold_simd_shuffle64(
+            values[index],
+            (lane_thread & 0x1cu) |
+            ((lane_thread + index) & 0x03u));
+    }
+    stronghold_argon2_g(
+        values[0], values[1], values[2], values[3]);
+    for (uint index = 1u; index < 4u; ++index) {
+        values[index] = stronghold_simd_shuffle64(
+            values[index],
+            ((lane_thread & 0x1cu) |
+             ((lane_thread - index) & 0x03u)) ^
+            (index << 2u));
+    }
+    stronghold_argon2_transpose(values, lane_thread);
+    for (uint index = 1u; index < 4u; ++index) {
+        values[index] = stronghold_simd_shuffle64(
+            values[index],
+            lane_thread ^ (index << 2u));
+    }
+    stronghold_argon2_g(
+        values[0], values[1], values[2], values[3]);
+    for (uint index = 1u; index < 4u; ++index) {
+        values[index] = stronghold_simd_shuffle64(
+            values[index],
+            stronghold_argon2_shift(index, lane_thread));
+    }
+    stronghold_argon2_g(
+        values[0], values[1], values[2], values[3]);
+    for (uint index = 1u; index < 4u; ++index) {
+        values[index] = stronghold_simd_shuffle64(
+            values[index],
+            stronghold_argon2_shift(
+                4u - index, lane_thread));
+    }
+}
+
+static inline uint stronghold_argon2_reference(
+    const constant StrongholdArgon2Options& options,
+    const thread StrongholdArgon2Position& position,
+    uint index,
+    ulong pseudo_random) {
+    uint reference_lane = 0u;
+    if (position.pass == 0u && position.slice == 0u) {
+        reference_lane = position.lane;
+    } else {
+        reference_lane =
+            uint(pseudo_random >> 32u) % options.parallelism;
+    }
+    uint reference_area =
+        (position.pass == 0u)
+        ? position.slice
+        : (STRONGHOLD_ARGON2_SYNC_POINTS - 1u);
+    reference_area *= options.segment_length;
+    if (reference_lane == position.lane || index == 0u) {
+        reference_area += index - 1u;
+    }
+    const uint j1 = uint(pseudo_random);
+    const ulong square = ulong(j1) * ulong(j1);
+    const uint square_high = uint(square >> 32u);
+    const ulong product =
+        ulong(reference_area) * ulong(square_high);
+    uint reference_index =
+        reference_area - 1u - uint(product >> 32u);
+    if (position.pass > 0u) {
+        reference_index +=
+            (position.slice + 1u) *
+            options.segment_length;
+        if (reference_index >= options.lane_length) {
+            reference_index -= options.lane_length;
+        }
+    }
+    return options.parallelism * reference_index +
+        reference_lane;
+}
+
+static inline void stronghold_argon2_next_addresses(
+    const constant StrongholdArgon2Options& options,
+    const thread StrongholdArgon2Position& position,
+    uint block_group,
+    uint lane_thread,
+    thread uint references[4]) {
+    ulong values[4] = {0ul, 0ul, 0ul, 0ul};
+    ulong temporary[4] = {0ul, 0ul, 0ul, 0ul};
+#pragma unroll
+    for (uint local = 0u; local < 4u; ++local) {
+        const uint absolute =
+            lane_thread + local * 32u;
+        ulong value = 0ul;
+        switch (absolute) {
+        case 0u: value = position.pass; break;
+        case 1u: value = position.lane; break;
+        case 2u: value = position.slice; break;
+        case 3u: value = options.memory_block_count; break;
+        case 4u: value = options.iterations; break;
+        case 5u: value = options.type; break;
+        case 6u: value = block_group + 1u; break;
+        default: break;
+        }
+        values[local] = value;
+        temporary[local] = value;
+    }
+    stronghold_argon2_hash_block(values, lane_thread);
+#pragma unroll
+    for (uint local = 0u; local < 4u; ++local) {
+        values[local] ^= temporary[local];
+        temporary[local] = values[local];
+    }
+    stronghold_argon2_hash_block(values, lane_thread);
+#pragma unroll
+    for (uint local = 0u; local < 4u; ++local) {
+        values[local] ^= temporary[local];
+        const uint index =
+            block_group * 128u +
+            lane_thread + local * 32u;
+        references[local] =
+            stronghold_argon2_reference(
+                options, position, index, values[local]);
+    }
+}
+
+static inline void stronghold_argon2_fill_segment(
+    device ulong* blocks,
+    const constant StrongholdArgon2Options& options,
+    uint pass,
+    uint slice,
+    uint argon_lane,
+    uint lane_thread) {
+    StrongholdArgon2Position position{
+        pass, slice, argon_lane
+    };
+    const uint skip =
+        pass == 0u && slice == 0u ? 2u : 0u;
+    const uint first =
+        slice * options.segment_length + skip;
+    const uint previous =
+        first == 0u ? options.lane_length - 1u
+                    : first - 1u;
+    ulong values[4];
+    const device ulong* previous_block =
+        blocks +
+        ((previous * options.parallelism + argon_lane) *
+         128u);
+#pragma unroll
+    for (uint component = 0u; component < 4u; ++component) {
+        values[component] =
+            previous_block[
+                component * 32u + lane_thread];
+    }
+    const bool independent =
+        options.type == 1u ||
+        (options.type == STRONGHOLD_ARGON2_TYPE_ID &&
+         pass == 0u && slice <= 1u);
+    uint address_group = 0xffffffffu;
+    uint addresses[4] = {0u, 0u, 0u, 0u};
+    for (uint index = skip;
+         index < options.segment_length; ++index) {
+        uint reference = 0u;
+        if (independent) {
+            const uint block_group = index >> 7u;
+            if (block_group != address_group) {
+                stronghold_argon2_next_addresses(
+                    options, position, block_group,
+                    lane_thread, addresses);
+                address_group = block_group;
+            }
+            const uint component =
+                (index >> 5u) & 3u;
+            const uint owner = index & 31u;
+            reference = simd_shuffle(
+                addresses[component], owner);
+        } else {
+            reference = stronghold_argon2_reference(
+                options, position, index, values[0]);
+            reference = uint(stronghold_simd_shuffle64(
+                ulong(reference), 0u));
+        }
+        const uint block_in_lane =
+            slice * options.segment_length + index;
+        device ulong* current_block =
+            blocks +
+            ((block_in_lane * options.parallelism +
+              argon_lane) * 128u);
+        const device ulong* reference_block =
+            blocks + reference * 128u;
+        ulong original[4] = {0ul, 0ul, 0ul, 0ul};
+        if (pass > 0u &&
+            options.version != 0x10u) {
+#pragma unroll
+            for (uint component = 0u;
+                 component < 4u; ++component) {
+                original[component] =
+                    current_block[
+                        component * 32u + lane_thread];
+            }
+        }
+#pragma unroll
+        for (uint component = 0u;
+             component < 4u; ++component) {
+            values[component] ^=
+                reference_block[
+                    component * 32u + lane_thread];
+            original[component] ^= values[component];
+        }
+        stronghold_argon2_hash_block(
+            values, lane_thread);
+#pragma unroll
+        for (uint component = 0u;
+             component < 4u; ++component) {
+            values[component] ^= original[component];
+            current_block[
+                component * 32u + lane_thread] =
+                values[component];
+        }
+    }
+}
+
+static inline void stronghold_argon2_finalize(
+    const device ulong* blocks,
+    const constant StrongholdArgon2Options& options,
+    thread uchar output[32]) {
+    uchar final_input[1028];
+    stronghold_store32(final_input, options.digest_len);
+    const uint last = options.lane_length - 1u;
+    for (uint word = 0u; word < 128u; ++word) {
+        ulong value = 0ul;
+        for (uint lane = 0u;
+             lane < options.parallelism; ++lane) {
+            value ^= blocks[
+                ((last * options.parallelism + lane) *
+                 128u) + word];
+        }
+        stronghold_store64(
+            final_input + 4u + word * 8u, value);
+    }
+    uchar digest[64];
+    stronghold_blake2b(
+        final_input, 1028u, options.digest_len,
+        digest);
+#pragma unroll
+    for (uint index = 0u; index < 32u; ++index) {
+        output[index] = digest[index];
+    }
+}
+
+#endif

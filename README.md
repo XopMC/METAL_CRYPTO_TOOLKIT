@@ -364,6 +364,23 @@ Wave 20 adds exact LND aezeed recovery:
   `SpeedThreadFunc` reports completed `KDF/s`, real verification, readback,
   and allocated working set.
 
+Wave 21 adds version-aware IOTA/Tauri Stronghold snapshot recovery:
+
+- `-stronghold` strictly accepts the public `PARTI` snapshot header and version
+  `02 00`; unknown versions and malformed files are rejected before Metal;
+- the named `blake2b`, Stronghold/rust-argon2 default `argon2id`, and published
+  Tauri example `tauri-argon2id` profiles are explicit because a snapshot does
+  not encode its application KDF or external salt;
+- Metal implements Blake2b-256 and exact Argon2id v19, including multi-lane
+  filling; one generated address block is reused across its 128 references;
+- every candidate key is independently checked through host X25519,
+  XChaCha20-Poly1305 authentication, exact Stronghold LZ4 decompression, and an
+  optional `SHA256(plaintext)` target before output;
+- salt files are always treated as raw bytes, while an inline salt is hex;
+  `-wallet-mem` bounds sharded unified-memory scratch and only the common
+  `SpeedThreadFunc` reports completed `KDF/s`, verification, readback, and the
+  actual working set.
+
 A cross-wave PRNG compatibility update tracks the current CUDA catalog:
 
 - `-prng` now includes Ill Bloom generators `332..489` and modes `247..762`,
@@ -3455,6 +3472,55 @@ recognized. Passwords are printable ASCII below 128 bytes. Supporting the
 format does not weaken scrypt or make a high-entropy unknown password
 practical to exhaust.
 
+#### `-stronghold`
+
+Use this mode for password recovery from supported IOTA Stronghold v2 and
+Tauri Stronghold snapshots. Supply one or more files after `-stronghold`, or
+use `-f` to scan a directory. The parser accepts only the exact `PARTI` header
+with version bytes `02 00`.
+
+```bash
+./METAL_CRYPTO_TOOLKIT -stronghold vault.stronghold \
+  -profile blake2b -pass passwords.txt -save
+
+./METAL_CRYPTO_TOOLKIT -stronghold vault.stronghold \
+  -profile argon2id -stronghold-salt stronghold.salt \
+  -i passwords.txt -wallet-mem auto
+
+./METAL_CRYPTO_TOOLKIT -stronghold vault.stronghold \
+  -profile tauri-argon2id \
+  -stronghold-salt 00112233445566778899aabbccddeeff \
+  -mask "secret?d?d" -target plaintext.sha256 \
+  -wallet-mem all -device 0
+```
+
+The required profile is one of:
+
+- `blake2b`: Blake2b-256 of the password;
+- `argon2id`: rust-argon2 default, Argon2id v19 with `m=19456 KiB`, `t=2`,
+  `p=1`, and a 32-byte result;
+- `tauri-argon2id`: the published Tauri example, Argon2id v19 with
+  `m=10000 KiB`, `t=10`, `p=4`, and a 32-byte result.
+
+Argon2 profiles require `-stronghold-salt`. An existing file is read as raw
+bytes exactly as stored by the application; a non-file value is decoded as
+hex. `-pass` accepts a literal or existing text file, `-i` streams a
+dictionary, `-mask` supports `?d/?l/?u/?a/??`, and `-start/-end` generate
+decimal-string candidates with a checked U256 counter.
+
+By default, an authenticated XChaCha20-Poly1305 decrypt followed by successful
+exact Stronghold LZ4 decompression is the recovery proof. `-target` can add one
+or more expected `SHA256(decompressed snapshot plaintext)` digests. Each Metal
+candidate is fully rechecked on the host with X25519, authentication,
+decompression, and target matching before it is reported.
+
+`-wallet-mem auto|all|NN%|SIZE` controls the Apple unified-memory budget;
+`-wallet-scrypt-mem` remains a compatible stricter KDF-scratch ceiling, and
+`-n` caps resident jobs rather than total search size. A snapshot does not
+store which external KDF or salt its application used, so custom or unknown
+profiles cannot be guessed safely and are rejected. Supporting these exact
+formats does not make a strong unknown password practical to exhaust.
+
 #### `-bisqwallet`
 
 **Active input format:**
@@ -4085,6 +4151,23 @@ Fused pipeline Волны 18 прошёл симметричный gate на 4 1
   примерно по 32 MiB, multi-device batch не пересекаются, а завершённые
   `KDF/s`, verification, readback и реальный working set печатает только
   общий `SpeedThreadFunc`.
+
+Волна 21 добавляет version-aware восстановление snapshot IOTA/Tauri Stronghold:
+
+- `-stronghold` строго принимает публичный заголовок `PARTI` и версию `02 00`;
+  неизвестные версии и повреждённые файлы отклоняются до запуска Metal;
+- профили `blake2b`, стандартный Stronghold/rust-argon2 `argon2id` и пример
+  Tauri `tauri-argon2id` выбираются явно, поскольку snapshot не хранит
+  application KDF и внешний salt;
+- Metal выполняет Blake2b-256 и точный Argon2id v19 с multi-lane заполнением,
+  повторно используя один address block для всех его 128 ссылок;
+- каждый candidate key независимо проверяется на host через X25519,
+  XChaCha20-Poly1305, точную Stronghold LZ4-декомпрессию и необязательную цель
+  `SHA256(plaintext)`;
+- salt-файл всегда читается как raw bytes, inline salt — как hex;
+  `-wallet-mem` ограничивает unified-memory scratch, а завершённые `KDF/s`,
+  verification, readback и реальный working set печатает только общий
+  `SpeedThreadFunc`.
 
 Межволновое обновление PRNG синхронизирует каталог с текущей CUDA-версией:
 
@@ -7190,6 +7273,56 @@ entropy кошелька. Если цели нет, доказательство
 Пароль должен быть printable ASCII короче 128 байтов. Поддержка формата не
 ослабляет scrypt и не делает полный перебор случайного сильного пароля
 практически выполнимым.
+
+#### `-stronghold`
+
+Режим восстанавливает пароль поддерживаемых snapshot IOTA Stronghold v2 и
+Tauri Stronghold. Передайте один или несколько файлов после `-stronghold` либо
+используйте `-f` для сканирования каталога. Parser принимает только точный
+заголовок `PARTI` с байтами версии `02 00`.
+
+```bash
+./METAL_CRYPTO_TOOLKIT -stronghold vault.stronghold \
+  -profile blake2b -pass passwords.txt -save
+
+./METAL_CRYPTO_TOOLKIT -stronghold vault.stronghold \
+  -profile argon2id -stronghold-salt stronghold.salt \
+  -i passwords.txt -wallet-mem auto
+
+./METAL_CRYPTO_TOOLKIT -stronghold vault.stronghold \
+  -profile tauri-argon2id \
+  -stronghold-salt 00112233445566778899aabbccddeeff \
+  -mask "secret?d?d" -target plaintext.sha256 \
+  -wallet-mem all -device 0
+```
+
+Обязательный профиль выбирается из:
+
+- `blake2b`: Blake2b-256 от пароля;
+- `argon2id`: стандарт rust-argon2, Argon2id v19 с `m=19456 KiB`, `t=2`,
+  `p=1` и 32-байтовым результатом;
+- `tauri-argon2id`: опубликованный пример Tauri, Argon2id v19 с
+  `m=10000 KiB`, `t=10`, `p=4` и 32-байтовым результатом.
+
+Argon2-профилям нужен `-stronghold-salt`. Существующий файл читается как
+точные raw bytes, сохранённые приложением; значение, не являющееся файлом,
+декодируется как hex. `-pass` принимает literal либо существующий текстовый
+файл, `-i` потоково читает словарь, `-mask` поддерживает `?d/?l/?u/?a/??`, а
+`-start/-end` генерируют десятичные строки с checked U256-счётчиком.
+
+По умолчанию доказательством восстановления служит аутентифицированное
+XChaCha20-Poly1305 расшифрование с успешной точной Stronghold
+LZ4-декомпрессией. `-target` может дополнительно задать один или несколько
+`SHA256(decompressed snapshot plaintext)`. Каждый Metal-кандидат до вывода
+полностью перепроверяется на host через X25519, authentication, decompression
+и target matching.
+
+`-wallet-mem auto|all|NN%|SIZE` управляет бюджетом unified memory Apple;
+`-wallet-scrypt-mem` остаётся совместимым более строгим пределом KDF scratch,
+а `-n` ограничивает число резидентных jobs, но не весь поиск. Snapshot не
+хранит внешний KDF и salt приложения, поэтому неизвестные/custom-профили
+нельзя надёжно угадывать — они отклоняются. Поддержка точных форматов не
+делает полный перебор сильного неизвестного пароля практически выполнимым.
 
 #### `-bisqwallet`
 
