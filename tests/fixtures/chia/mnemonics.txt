@@ -1,0 +1,2 @@
+# BIP39 vector used by Chia reference key derivation
+abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about

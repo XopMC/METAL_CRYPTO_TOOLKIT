@@ -1,0 +1,3 @@
+# Empty BIP39 passphrase is the default; this file exercises explicit input.
+
+TREZOR

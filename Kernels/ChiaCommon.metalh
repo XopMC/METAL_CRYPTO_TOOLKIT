@@ -1,0 +1,11 @@
+#ifndef METAL_CRYPTO_CHIA_COMMON_METALH
+#define METAL_CRYPTO_CHIA_COMMON_METALH
+
+#include "Pbkdf2Func.metalh"
+
+using namespace metal;
+
+#define CHIA_MNEMONIC_STRIDE 256u
+#define CHIA_SALT_STRIDE 256u
+
+#endif

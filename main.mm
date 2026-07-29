@@ -28,6 +28,7 @@
 #include "Aezeed/AezeedMode.h"
 #include "Stronghold/StrongholdMode.h"
 #include "Eth2Validator/Eth2ValidatorMode.h"
+#include "Chia/ChiaMode.h"
 #include "Algorand/AlgorandMode.h"
 #include "Monero/MoneroMode.h"
 #include "MoneroWallet/MoneroWalletMode.h"
@@ -8199,6 +8200,7 @@ enum class HelpTopic {
     Aezeed,
     Stronghold,
     Eth2Validator,
+    Chia,
     BisqWallet,
     DogechainWallet,
     StellarWallet,
@@ -10345,6 +10347,7 @@ static HelpTopic detect_help_topic(int argc, char** argv) {
         if (is_help_topic_arg(arg, "-aezeed")) return HelpTopic::Aezeed;
         if (is_help_topic_arg(arg, "-stronghold")) return HelpTopic::Stronghold;
         if (is_help_topic_arg(arg, "-eth2validator")) return HelpTopic::Eth2Validator;
+        if (is_help_topic_arg(arg, "-chia")) return HelpTopic::Chia;
         if (is_help_topic_arg(arg, "-bisqwallet")) return HelpTopic::BisqWallet;
         if (is_help_topic_arg(arg, "-dogechainwallet")) return HelpTopic::DogechainWallet;
         if (is_help_topic_arg(arg, "-stellarwallet")) return HelpTopic::StellarWallet;
@@ -10411,6 +10414,7 @@ static const char* help_topic_command(HelpTopic topic) {
     case HelpTopic::Aezeed: return "-aezeed";
     case HelpTopic::Stronghold: return "-stronghold";
     case HelpTopic::Eth2Validator: return "-eth2validator";
+    case HelpTopic::Chia: return "-chia";
     case HelpTopic::BisqWallet: return "-bisqwallet";
     case HelpTopic::DogechainWallet: return "-dogechainwallet";
     case HelpTopic::StellarWallet: return "-stellarwallet";
@@ -10519,6 +10523,7 @@ static void printHelpShort() {
 [!] -aezeed                       LND aezeed mnemonic recovery.
 [!] -stronghold                   IOTA Stronghold snapshot password recovery.
 [!] -eth2validator                Ethereum validator keystore/seed recovery.
+[!] -chia                         Chia mnemonic/seed/passphrase recovery.
 [!]
 [!] [!] WALLET EXTRACTION / INVENTORY [!] [!]
 [!] -walletscan                   Host-only wallet artifact inventory.
@@ -12043,6 +12048,9 @@ static void printHelpModeSection(HelpTopic topic) {
     case HelpTopic::Eth2Validator:
         eth2validator_mode::print_help();
         break;
+    case HelpTopic::Chia:
+        chia_mode::print_help();
+        break;
     case HelpTopic::BisqWallet:
         printf(R"HELP([!] MAIN MODE: -bisqwallet  (Bisq wallet hash recovery)
 [!]
@@ -12425,6 +12433,40 @@ int main(int argc, char** argv)
                 std::chrono::system_clock::now());
         std::cout << "\n[!] Processed " << counterTotal
                   << " ETH2 validator KDF candidates. Found: "
+                  << Founds << ". Program finished at "
+                  << std::ctime(&finished);
+        return result;
+    }
+    if (chia_mode::requested(argc, argv)) {
+        counterTotal = 0;
+        Founds = 0;
+        isRun = true;
+
+        const std::time_t started =
+            std::chrono::system_clock::to_time_t(
+                std::chrono::system_clock::now());
+        std::cout << "[!] Program started at: "
+                  << std::ctime(&started);
+
+        std::thread speed_thread(SpeedThreadFunc);
+        const chia_mode::RuntimeHooks hooks{
+            [](std::uint64_t completed) {
+                counterTotal += completed;
+            },
+            []() {
+                ++Founds;
+            }
+        };
+        const int result =
+            chia_mode::run(argc, argv, hooks);
+        isRun = false;
+        if (speed_thread.joinable()) speed_thread.join();
+
+        const std::time_t finished =
+            std::chrono::system_clock::to_time_t(
+                std::chrono::system_clock::now());
+        std::cout << "\n[!] Processed " << counterTotal
+                  << " Chia KDF candidates. Found: "
                   << Founds << ". Program finished at "
                   << std::ctime(&finished);
         return result;

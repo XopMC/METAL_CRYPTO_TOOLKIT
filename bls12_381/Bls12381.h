@@ -33,10 +33,29 @@ bool eip2333_child(
     SecretKey& child,
     std::string& error);
 
+bool chia_legacy_master(
+    const std::uint8_t* seed,
+    std::size_t seed_size,
+    SecretKey& secret,
+    std::string& error);
+
+bool chia_legacy_child(
+    const SecretKey& parent,
+    std::uint32_t child_index,
+    SecretKey& child,
+    std::string& error);
+
 bool scalar_add_mod(
     const SecretKey& lhs,
     const SecretKey& rhs,
     SecretKey& result);
+
+bool scalar_add_bytes_mod(
+    const SecretKey& lhs,
+    const std::uint8_t* rhs,
+    std::size_t rhs_size,
+    SecretKey& result,
+    std::string& error);
 
 bool scalar_multiply_mod(
     const SecretKey& lhs,
@@ -47,6 +66,9 @@ bool public_key_compressed(
     const SecretKey& secret,
     PublicKey& public_key,
     std::string& error);
+
+bool valid_public_key_compressed(
+    const PublicKey& public_key);
 
 bool public_key_uncompressed(
     const SecretKey& secret,

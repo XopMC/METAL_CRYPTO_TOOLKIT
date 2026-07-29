@@ -381,6 +381,43 @@ Wave 21 adds version-aware IOTA/Tauri Stronghold snapshot recovery:
   `SpeedThreadFunc` reports completed `KDF/s`, verification, readback, and the
   actual working set.
 
+Wave 22 adds the shared BLS12-381 backend:
+
+- portable scalar arithmetic, EIP-2333 key generation, compressed G1 public
+  keys and strict subgroup validation are shared by validator and Chia modes;
+- the arm64 assembly backend is selected automatically when available, while
+  the portable C implementation remains the correctness reference;
+- official vectors cover EIP-2333/EIP-2334, compressed-key parsing, infinity
+  rejection and CPU backend parity. This is an infrastructure wave and does
+  not add a standalone CLI route.
+
+Wave 23 adds exact Ethereum validator recovery:
+
+- `-eth2validator` recovers EIP-2335 v4 passwords for PBKDF2 and scrypt
+  keystores, including AES-128-CTR decryption and complete BLS public-key
+  verification;
+- its derivation contour checks checksum-valid English BIP39 mnemonics or raw
+  seeds through EIP-2333 and exact EIP-2334 paths;
+- target files are deduplicated without losing source identity, candidate
+  domains are streamed inside `-wallet-mem`, and only the common
+  `SpeedThreadFunc` reports completed `KDF/s`, verification and readback.
+
+Wave 24 adds exact Chia key recovery:
+
+- `-chia` checks English BIP39 mnemonic/passphrase candidates or raw seeds
+  against compressed BLS keys, 32-byte puzzle hashes and checksum-valid
+  `xch`/`txch` addresses;
+- farmer, pool, wallet, observer, local, backup, singleton and pool-auth path
+  profiles use Chia's historical BLS KeyGen v3 and exact hardened/unhardened
+  child derivation;
+- standard-wallet puzzle hashes reproduce
+  `p2_delegated_puzzle_or_hidden_puzzle`, including the signed synthetic-key
+  offset and canonical default hidden puzzle;
+- PBKDF2-HMAC-SHA512 runs in bounded Metal batches, exact host BLS verification
+  is distributed across available CPU cores, and only the common
+  `SpeedThreadFunc` reports completed `KDF/s`, primitive work, targets,
+  readback and actual working set.
+
 A cross-wave PRNG compatibility update tracks the current CUDA catalog:
 
 - `-prng` now includes Ill Bloom generators `332..489` and modes `247..762`,
@@ -3624,6 +3661,58 @@ For validator derivation, `-target` accepts one 48-byte compressed BLS public ke
 
 Only version 4 files using the enabled EIP-2335 modules are accepted. Mnemonic input is checksum-valid English BIP39. Unknown-word permutations must be supplied as candidates by another mode or file. Every GPU hit is independently checked with SHA-256, AES-CTR, and the BLS public key before output.
 
+#### `-chia`
+
+`-chia` searches Chia keys from checksum-valid English BIP39
+mnemonic/passphrase candidates or raw 32–64-byte seeds. Repeatable `-target`
+accepts a compressed 48-byte BLS public key, a 32-byte standard-wallet puzzle
+hash, a checksum-valid `xch`/`txch` address, or a file containing one target per
+line. Duplicate targets are derived once while all input origins are preserved.
+
+The built-in path profiles are `farmer`, `pool`, `wallet`,
+`wallet-observer` (default), `local`, `backup`, `singleton`, and
+`pool-auth:N`. A custom `-path-template` starts with `m/`, uses the suffix `n`
+for hardened components, and may contain one `{index}` placeholder. The
+placeholder interval is `[START,END)` from `-start/-end`.
+
+```bash
+./METAL_CRYPTO_TOOLKIT -chia -i mnemonics.txt \
+  -target farmer_pubkey.txt -path-template farmer -save
+
+./METAL_CRYPTO_TOOLKIT -chia -i mnemonics.txt -pass passes.txt \
+  -target xch_addresses.txt -path-template wallet-observer \
+  -start 0 -end 100 -wallet-mem auto
+
+./METAL_CRYPTO_TOOLKIT -chia -seed seed.hex \
+  -target puzzle_hashes.txt -path-template wallet -start 0 -end 50
+
+./METAL_CRYPTO_TOOLKIT -chia -i mnemonics.txt -target targets.txt \
+  -path-template "m/12381n/8444n/2n/{index}n" \
+  -wallet-mem all -device 0
+```
+
+`-wallet-mem auto|all|NN%|SIZE` limits the Apple Silicon unified-memory
+working set. `auto` uses at most half of the currently free recommended
+working set and can reduce the resident batch after an allocation failure;
+`all` leaves 512 MiB for runtime. `-n` selects a resident batch from 1 to
+16384, and large logical inputs are streamed. Multi-device lists use
+`-device`; each completed ordinal is owned by one device.
+
+PBKDF2-HMAC-SHA512 seed generation runs on Metal. Chia BLS master/child
+derivation, compressed-key validation and standard puzzle verification are
+then performed exactly across the available host CPU cores. The common
+`SpeedThreadFunc` is the only statistics writer and reports completed `KDF/s`,
+PBKDF2 primitive rounds, exact BLS checks, logical/resident/solved targets,
+readback time and allocated working set. Target count is not multiplied into
+the rate.
+
+Chia's historical KeyGen v3 is intentionally separate from the final
+EIP-2333 KeyGen used by `-eth2validator`. Standard puzzle verification covers
+the canonical `p2_delegated_puzzle_or_hidden_puzzle` only; arbitrary Chialisp
+puzzles, xpub-only recovery and unknown-word permutation generation are not
+part of this mode. Large path-index intervals remain computationally
+expensive.
+
 ### Inventory and catalogs
 
 #### `-walletscan`
@@ -4189,6 +4278,41 @@ Fused pipeline Волны 18 прошёл симметричный gate на 4 1
 - salt-файл всегда читается как raw bytes, inline salt — как hex;
   `-wallet-mem` ограничивает unified-memory scratch, а завершённые `KDF/s`,
   verification, readback и реальный working set печатает только общий
+  `SpeedThreadFunc`.
+
+Волна 22 добавляет общий backend BLS12-381:
+
+- portable scalar arithmetic, EIP-2333 key generation, сжатые G1 public keys и
+  строгая проверка subgroup используются совместно validator- и Chia-режимами;
+- arm64 assembly backend выбирается автоматически при наличии, а portable C
+  остаётся эталоном корректности;
+- официальные векторы покрывают EIP-2333/EIP-2334, разбор сжатых ключей,
+  отклонение infinity и совпадение CPU-backend. Это инфраструктурная волна без
+  отдельного CLI-режима.
+
+Волна 23 добавляет точное восстановление Ethereum validator:
+
+- `-eth2validator` восстанавливает пароли EIP-2335 v4 для PBKDF2- и
+  scrypt-keystore с AES-128-CTR и полной проверкой BLS public key;
+- derivation-контур проверяет checksum-valid English BIP39 mnemonic либо raw
+  seed через EIP-2333 и точные пути EIP-2334;
+- target-файлы дедуплицируются без потери источников, domains обрабатываются
+  окнами внутри `-wallet-mem`, а завершённые `KDF/s`, verification и readback
+  печатает только общий `SpeedThreadFunc`.
+
+Волна 24 добавляет точное восстановление ключей Chia:
+
+- `-chia` проверяет English BIP39 mnemonic/passphrase либо raw seed по сжатым
+  BLS-ключам, 32-байтовым puzzle hash и checksum-valid адресам `xch`/`txch`;
+- профили farmer, pool, wallet, observer, local, backup, singleton и pool-auth
+  используют исторический Chia BLS KeyGen v3 и точные hardened/unhardened
+  дочерние derivation;
+- standard-wallet puzzle hash воспроизводит
+  `p2_delegated_puzzle_or_hidden_puzzle`, включая signed synthetic-key offset
+  и канонический default hidden puzzle;
+- PBKDF2-HMAC-SHA512 выполняется ограниченными Metal-batch, точная host BLS
+  verification распределяется по доступным CPU-ядрам, а завершённые `KDF/s`,
+  primitive work, targets, readback и working set печатает только общий
   `SpeedThreadFunc`.
 
 Межволновое обновление PRNG синхронизирует каталог с текущей CUDA-версией:
@@ -7446,6 +7570,57 @@ $ab$<version>*<cipher>*<iterations>*<user_salt>*<ck_salt>*<user_iv>*<masterkey_b
 Резидентностью Metal управляют `-wallet-mem auto|all|NN%|SIZE`, `-wallet-scrypt-mem`, `-n` и `-device`. На Apple Silicon unified memory рассчитывается из свободной части recommended working set; при тяжёлом scrypt число одновременно активных кандидатов может уменьшиться до одного. Статистику печатает только общий `SpeedThreadFunc`: завершённые `KDF/s`, фактические KDF-операции, точные BLS-проверки, состояние целей, working set и readback.
 
 Принимаются только файлы версии 4 с поддерживаемыми модулями EIP-2335. Мнемоники должны быть checksum-valid English BIP39. Перестановки неизвестных слов нужно заранее сформировать другим режимом или файлом. Каждый GPU-hit перед выводом независимо проверяется через SHA-256, AES-CTR и BLS-публичный ключ.
+
+#### `-chia`
+
+`-chia` ищет Chia-ключи по checksum-valid English BIP39
+mnemonic/passphrase-кандидатам или raw seed длиной 32–64 байта. Повторяемый
+`-target` принимает 48-байтовый сжатый BLS public key, 32-байтовый
+standard-wallet puzzle hash, checksum-valid адрес `xch`/`txch` либо файл с
+одной целью в строке. Дубликаты вычисляются один раз, но все исходные ссылки
+сохраняются.
+
+Встроенные профили путей: `farmer`, `pool`, `wallet`,
+`wallet-observer` (по умолчанию), `local`, `backup`, `singleton` и
+`pool-auth:N`. Пользовательский `-path-template` начинается с `m/`, суффикс
+`n` обозначает hardened-компонент и допускается один placeholder `{index}`.
+Его интервал `[START,END)` задаётся через `-start/-end`.
+
+```bash
+./METAL_CRYPTO_TOOLKIT -chia -i mnemonics.txt \
+  -target farmer_pubkey.txt -path-template farmer -save
+
+./METAL_CRYPTO_TOOLKIT -chia -i mnemonics.txt -pass passes.txt \
+  -target xch_addresses.txt -path-template wallet-observer \
+  -start 0 -end 100 -wallet-mem auto
+
+./METAL_CRYPTO_TOOLKIT -chia -seed seed.hex \
+  -target puzzle_hashes.txt -path-template wallet -start 0 -end 50
+
+./METAL_CRYPTO_TOOLKIT -chia -i mnemonics.txt -target targets.txt \
+  -path-template "m/12381n/8444n/2n/{index}n" \
+  -wallet-mem all -device 0
+```
+
+`-wallet-mem auto|all|NN%|SIZE` ограничивает working set unified memory Apple
+Silicon. `auto` использует не более половины текущей свободной recommended
+working set и может уменьшить resident batch после ошибки allocation; `all`
+оставляет 512 MiB для runtime. `-n` выбирает resident batch от 1 до 16384,
+большие логические входы обрабатываются окнами. Список Metal-устройств задаёт
+`-device`; каждый завершённый ordinal принадлежит ровно одному устройству.
+
+PBKDF2-HMAC-SHA512 seed generation выполняется на Metal. Chia BLS
+master/child derivation, проверка сжатого ключа и standard puzzle затем точно
+распределяются по доступным CPU-ядрам host. Единственным потоком статистики
+остаётся общий `SpeedThreadFunc`: он показывает завершённые `KDF/s`, PBKDF2
+primitive rounds, точные BLS checks, logical/resident/solved targets, readback
+и фактически выделенный working set. Количество целей не умножает скорость.
+
+Исторический Chia KeyGen v3 намеренно отделён от финального EIP-2333 KeyGen,
+который использует `-eth2validator`. Проверка standard puzzle покрывает только
+канонический `p2_delegated_puzzle_or_hidden_puzzle`; произвольные Chialisp
+puzzles, xpub-only recovery и генерация перестановок неизвестных слов в этот
+режим не входят. Большие интервалы индексов остаются вычислительно дорогими.
 
 ### Инвентаризация и каталоги
 

@@ -52,6 +52,7 @@ CPP_SRCS := \
 	Aezeed/AezeedMode.cpp \
 	Stronghold/StrongholdMode.cpp \
 	Eth2Validator/Eth2ValidatorMode.cpp \
+	Chia/ChiaMode.cpp \
 	bls12_381/Bls12381.cpp \
 	Algorand/AlgorandMode.cpp \
 	Monero/MoneroMode.cpp \
@@ -103,6 +104,7 @@ LOCALIZED_HOST_HEADERS := Makefile KernelRuntime.h MacFileSystem.h Poetry.h Poet
 	Aezeed/AezeedMode.h \
 	Stronghold/StrongholdMode.h \
 	Eth2Validator/Eth2ValidatorMode.h \
+	Chia/ChiaMode.h \
 	bls12_381/Bls12381.h \
 	Algorand/AlgorandMode.h \
 	Monero/MoneroMode.h Monero/MoneroWordlists.generated.h \
