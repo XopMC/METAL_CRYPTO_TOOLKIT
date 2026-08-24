@@ -23,6 +23,14 @@ Author: Mikhail Khoroshavin, also known as **XopMC**
 
 #### v16
 
+M1 compatibility hot-fix:
+
+- the embedded Metal library now targets macOS 14 and AIR 2.6 while the host
+  executable continues to require macOS 15.0 or newer;
+- this addresses `MTLCompilerService` terminating with
+  `XPC_ERROR_CONNECTION_INTERRUPTED` during first-time pipeline compilation on
+  M1/Apple7 GPUs. CLI behavior and kernel logic are unchanged.
+
 Wave 0 establishes the shared infrastructure used by the new GPU modes:
 
 - `ModeProgress` feeds the existing `SpeedThreadFunc`, which remains the only
@@ -3920,6 +3928,14 @@ xattr -d com.apple.quarantine METAL_CRYPTO_TOOLKIT
 ### Изменения
 
 #### v16
+
+Хот-фикс совместимости с M1:
+
+- встроенная Metal-библиотека теперь собирается для macOS 14 и AIR 2.6, а
+  host-executable по-прежнему требует macOS 15.0 или новее;
+- это устраняет завершение `MTLCompilerService` с ошибкой
+  `XPC_ERROR_CONNECTION_INTERRUPTED` при первой компиляции pipeline на
+  GPU M1/Apple7. Поведение CLI и логика ядер не изменены.
 
 Волна 0 добавляет общую инфраструктуру для новых GPU-режимов:
 

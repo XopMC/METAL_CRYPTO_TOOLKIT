@@ -5,6 +5,14 @@ shared checked scheduler and memory/progress infrastructure, completes several
 existing wallet formats, introduces new GPU search and recovery modes, and
 retains the optimized BSGS and Kangaroo engines from v15.
 
+## M1 compatibility hot-fix
+
+- The embedded Metal library now targets macOS 14 and AIR 2.6 while the host
+  executable continues to require macOS 15.0 or newer.
+- This addresses `MTLCompilerService` terminating with
+  `XPC_ERROR_CONNECTION_INTERRUPTED` during first-time pipeline compilation on
+  M1/Apple7 GPUs. CLI behavior and kernel logic are unchanged.
+
 ## Highlights
 
 - New GPU modes: `-keyrepair`, `-nonce`, `-vanity`, `-create2`, `-hdpath`,

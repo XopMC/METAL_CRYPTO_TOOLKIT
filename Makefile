@@ -7,6 +7,10 @@
 MACOSX_DEPLOYMENT_TARGET ?= 15.0
 export MACOSX_DEPLOYMENT_TARGET
 
+# Keep the host executable on macOS 15 while emitting Metal IR that the
+# Apple7/M1 runtime compiler can consume reliably.
+METAL_DEPLOYMENT_TARGET ?= 14.0
+
 BUILD_DIR := build
 BIN_DIR   := bin
 TARGET    := $(BIN_DIR)/METAL_CRYPTO_TOOLKIT
@@ -201,12 +205,14 @@ $(BUILD_DIR)/SecpPrecompute.o $(BUILD_DIR)/host_secp/HostSecp256k1.o: $(LOCALIZE
 
 $(BUILD_DIR)/%.air: %.metal | $(BUILD_DIR)
 	@mkdir -p $(dir $@)
-	$(METAL) -std=metal3.1 -DMETAL_VANITY_GROUP_SIZE=$(VANITY_GROUP_SIZE) \
+	$(METAL) -std=metal3.1 -mmacosx-version-min=$(METAL_DEPLOYMENT_TARGET) \
+		-DMETAL_VANITY_GROUP_SIZE=$(VANITY_GROUP_SIZE) \
 		-I. -MMD -MP -MF $(@:.air=.d) -MT $@ -c $< -o $@
 
 $(ILLBLOOM_TEST_AIR): tests/illbloom_prng_vectors.metal $(METAL_HEADERS) | $(BUILD_DIR)
 	@mkdir -p $(dir $@)
-	$(METAL) -std=metal3.1 -DMETAL_VANITY_GROUP_SIZE=$(VANITY_GROUP_SIZE) \
+	$(METAL) -std=metal3.1 -mmacosx-version-min=$(METAL_DEPLOYMENT_TARGET) \
+		-DMETAL_VANITY_GROUP_SIZE=$(VANITY_GROUP_SIZE) \
 		-I. -MMD -MP -MF $(@:.air=.d) -MT $@ -c $< -o $@
 
 $(ILLBLOOM_TEST_METALLIB): $(ILLBLOOM_TEST_AIR)

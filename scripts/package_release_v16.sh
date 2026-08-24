@@ -9,6 +9,7 @@ MAIN_NAME=METAL_CRYPTO_TOOLKIT
 MAIN_ARCHIVE="$MAIN_NAME-$VERSION-macos-arm64.tar.gz"
 TOOLS_ARCHIVE="$MAIN_NAME-tools-$VERSION-macos-arm64.tar.gz"
 MAIN_BINARY="$ROOT_DIR/bin/$MAIN_NAME"
+METAL_LIBRARY="$ROOT_DIR/build/default.metallib"
 
 fail() {
     printf '%s\n' "[!] $*" >&2
@@ -21,9 +22,26 @@ command -v otool >/dev/null 2>&1 ||
     fail "otool is required to validate the Mach-O release binary"
 command -v shasum >/dev/null 2>&1 ||
     fail "shasum is required to generate release checksums"
+xcrun --find metal-lipo >/dev/null 2>&1 ||
+    fail "metal-lipo is required to validate the Metal IR architecture"
+xcrun --find metal-objdump >/dev/null 2>&1 ||
+    fail "metal-objdump is required to validate the Metal deployment target"
 
 [ -x "$MAIN_BINARY" ] ||
     fail "build the toolkit first: make clean && make -j\$(sysctl -n hw.ncpu)"
+[ -f "$METAL_LIBRARY" ] ||
+    fail "Metal library is missing: $METAL_LIBRARY"
+
+METAL_ARCHITECTURES=$(xcrun metal-lipo "$METAL_LIBRARY" -archs |
+    tr -d '[:space:]')
+[ "$METAL_ARCHITECTURES" = "air64_v26" ] ||
+    fail "release metallib must contain AIR 2.6 only; found: ${METAL_ARCHITECTURES:-missing}"
+
+METAL_PLATFORM=$(xcrun metal-objdump --metallib --private-headers "$METAL_LIBRARY" |
+    LC_ALL=C tr -d '\000' |
+    awk '$1 == "PlatformMajor:" { print $2; exit }')
+[ "$METAL_PLATFORM" = "14" ] ||
+    fail "release metallib must target macOS 14; found: ${METAL_PLATFORM:-missing}"
 
 ARCHITECTURES=$(lipo -archs "$MAIN_BINARY")
 [ "$ARCHITECTURES" = "arm64" ] ||
