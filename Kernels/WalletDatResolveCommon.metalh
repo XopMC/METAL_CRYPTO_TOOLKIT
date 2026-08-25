@@ -132,7 +132,7 @@ static inline ulong wallet_atomic_add_count(device atomic_uint* wallet_count, ui
     if (low + value < low) {
         atomic_fetch_add_explicit(wallet_count + 1, 1u, memory_order_relaxed);
     }
-    const uint high = atomic_load_explicit(wallet_count + 1, memory_order_relaxed);
+    const uint high = atomic_fetch_add_explicit(wallet_count + 1, 0u, memory_order_relaxed);
     return (ulong(high) << 32) | ulong(low);
 }
 

@@ -12297,7 +12297,7 @@ int main(int argc, char** argv)
         std::ios_base::sync_with_stdio(false);
         std::cin.tie(nullptr);
     }
-    printf("[!] METAL_CRYPTO_TOOLKIT v16.0.0 by @XopMC for Crypto Community\n");
+    printf("[!] METAL_CRYPTO_TOOLKIT v16.0.1 by @XopMC for Crypto Community\n");
 
     if (argc == 1) {
         printHelpShort();

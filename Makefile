@@ -17,11 +17,16 @@ TARGET    := $(BIN_DIR)/METAL_CRYPTO_TOOLKIT
 ROOT_TARGET := METAL_CRYPTO_TOOLKIT
 METAL_AIR := $(BUILD_DIR)/default.air
 METALLIB  := $(BUILD_DIR)/default.metallib
+METAL_BINARY_ARCHIVE := $(BUILD_DIR)/default.binary.metallib
+METAL_BINARY_ARCHIVE_CONFIG := $(BUILD_DIR)/metal_binary_archive.mtlp-json
+METAL_BINARY_ARCHIVE_PROFILE_HEADER := $(BUILD_DIR)/MetalBinaryArchiveProfiles.generated.h
+METAL_BINARY_ARCHIVE_BUILDER := scripts/build_metal_binary_archive.py
 
 CXX      := xcrun clang++
 CC       := xcrun clang
 METAL    := xcrun metal
 METALLIB_TOOL ?= xcrun metallib
+PYTHON3 ?= python3
 VANITY_GROUP_SIZE ?= 1024
 
 CXXFLAGS := -std=c++17 -O3 -DNDEBUG -Wall -Wextra -Wno-unused-parameter \
@@ -34,7 +39,9 @@ CFLAGS   := -std=c17 -O3 -DNDEBUG -Wall -Wextra -Wno-unused-parameter \
             -Ithird_party/blst/bindings -Ithird_party/blst/src
 DEPFLAGS := -MMD -MP
 LDFLAGS  := -framework Foundation -framework CoreFoundation -framework Metal -framework IOKit
-EMBED_METALLIB_LDFLAGS := -Wl,-sectcreate,__DATA,__metallib,$(METALLIB)
+EMBED_METAL_LDFLAGS := \
+	-Wl,-sectcreate,__DATA,__metallib,$(METALLIB) \
+	-Wl,-sectcreate,__DATA,__metalarc,$(METAL_BINARY_ARCHIVE)
 
 HOST_SRCS := main.mm MetalRuntime.mm SaveFunc.mm MetalBackend.mm
 HOST_OBJS := $(HOST_SRCS:%.mm=$(BUILD_DIR)/%.o)
@@ -158,8 +165,8 @@ bls12-381-bench: $(BLS_TEST_ASM_BIN) $(BLS_TEST_PORTABLE_BIN)
 	$(BLS_TEST_ASM_BIN) --bench 10000
 	$(BLS_TEST_PORTABLE_BIN) --bench 10000
 
-$(TARGET): $(HOST_OBJS) $(CPP_OBJS) $(C_OBJS) $(BLS_ASM_OBJ) $(METALLIB) | $(BIN_DIR)
-	$(CXX) $(CXXFLAGS) $(HOST_OBJS) $(CPP_OBJS) $(C_OBJS) $(BLS_ASM_OBJ) -o $@ $(LDFLAGS) $(EMBED_METALLIB_LDFLAGS)
+$(TARGET): $(HOST_OBJS) $(CPP_OBJS) $(C_OBJS) $(BLS_ASM_OBJ) $(METALLIB) $(METAL_BINARY_ARCHIVE) | $(BIN_DIR)
+	$(CXX) $(CXXFLAGS) $(HOST_OBJS) $(CPP_OBJS) $(C_OBJS) $(BLS_ASM_OBJ) -o $@ $(LDFLAGS) $(EMBED_METAL_LDFLAGS)
 
 $(ROOT_TARGET): $(TARGET)
 	cp $(TARGET) $@
@@ -202,6 +209,7 @@ $(BLS_TEST_PORTABLE_BIN): tests/bls12_381_vectors.cpp bls12_381/Bls12381.cpp \
 
 $(BUILD_DIR)/main.o $(BUILD_DIR)/SaveFunc.o: $(LOCALIZED_HOST_HEADERS) $(LOCALIZED_SECP_HEADERS)
 $(BUILD_DIR)/SecpPrecompute.o $(BUILD_DIR)/host_secp/HostSecp256k1.o: $(LOCALIZED_SECP_HEADERS)
+$(BUILD_DIR)/MetalRuntime.o: $(METAL_BINARY_ARCHIVE_PROFILE_HEADER)
 
 $(BUILD_DIR)/%.air: %.metal | $(BUILD_DIR)
 	@mkdir -p $(dir $@)
@@ -227,6 +235,16 @@ $(METALLIB): $(METAL_AIRS)
 	@$(MAKE) --no-print-directory metal-toolchain-check
 	$(METALLIB_TOOL) $(METAL_AIRS) -o $@
 
+$(METAL_BINARY_ARCHIVE_PROFILE_HEADER): $(METAL_BINARY_ARCHIVE_BUILDER) | $(BUILD_DIR)
+	$(PYTHON3) $(METAL_BINARY_ARCHIVE_BUILDER) header --output $@
+
+$(METAL_BINARY_ARCHIVE): $(METALLIB) $(METAL_BINARY_ARCHIVE_BUILDER) | $(BUILD_DIR)
+	@$(MAKE) --no-print-directory metal-toolchain-check
+	$(PYTHON3) $(METAL_BINARY_ARCHIVE_BUILDER) build \
+		--metallib $(METALLIB) \
+		--config-output $(METAL_BINARY_ARCHIVE_CONFIG) \
+		--output $@
+
 metal-toolchain-check:
 	@$(METAL) -v >/dev/null 2>&1 || \
 		(printf "%s\n" "[!] Metal compiler is installed but the Metal Toolchain component is missing." >&2; \
@@ -234,6 +252,14 @@ metal-toolchain-check:
 		 exit 1)
 	@xcrun --find metallib >/dev/null 2>&1 || \
 		(printf "%s\n" "[!] metallib tool is missing from the active Xcode toolchain." >&2; \
+		 printf "%s\n" "[!] Install the Metal Toolchain component with: xcodebuild -downloadComponent MetalToolchain" >&2; \
+		 exit 1)
+	@xcrun --find metal-tt >/dev/null 2>&1 || \
+		(printf "%s\n" "[!] metal-tt is missing from the active Metal toolchain." >&2; \
+		 printf "%s\n" "[!] Install the Metal Toolchain component with: xcodebuild -downloadComponent MetalToolchain" >&2; \
+		 exit 1)
+	@xcrun --find metal-lipo >/dev/null 2>&1 || \
+		(printf "%s\n" "[!] metal-lipo is missing from the active Metal toolchain." >&2; \
 		 printf "%s\n" "[!] Install the Metal Toolchain component with: xcodebuild -downloadComponent MetalToolchain" >&2; \
 		 exit 1)
 

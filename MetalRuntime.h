@@ -76,6 +76,8 @@ private:
 
 class Runtime {
 public:
+    ~Runtime();
+
     static int availableDeviceCount();
 
     Status initialize(int deviceIndex, const std::string& metallibPath);
@@ -168,6 +170,8 @@ private:
     id<MTLCommandQueue> queue_ = nil;
     std::shared_ptr<Stream> defaultStream_;
     id<MTLLibrary> library_ = nil;
+    id<MTLBinaryArchive> binaryArchive_ = nil;
+    std::string binaryArchiveTemporaryPath_;
     DeviceInfo info_;
     mutable std::mutex functionCacheMutex_;
     mutable std::mutex pipelineCacheMutex_;

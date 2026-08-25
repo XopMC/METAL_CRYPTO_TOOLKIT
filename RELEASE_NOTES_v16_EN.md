@@ -1,11 +1,26 @@
-# METAL_CRYPTO_TOOLKIT v16
+# METAL_CRYPTO_TOOLKIT v16.0.1
 
 v16 is the largest functional update to the Metal toolkit so far. It adds a
 shared checked scheduler and memory/progress infrastructure, completes several
 existing wallet formats, introduces new GPU search and recovery modes, and
 retains the optimized BSGS and Kangaroo engines from v15.
 
-## M1 compatibility hot-fix
+## v16.0.1 Tahoe/M1 pipeline hot-fix
+
+- Three affected pipeline specializations are precompiled into a Tahoe 26
+  Metal binary archive: compressed-BIP32 `workerHmac_seq`, BIP38 non-EC
+  `workerBip38Grouped`, and BIP38 EC-multiply `workerBip38Grouped`.
+- The executable embeds native payloads for all 11 Apple Silicon GPU slices
+  supported by the translator, including the M1/Apple7 `applegpu_g13*`
+  variants. Exact matches use `MTLComputePipelineDescriptor.binaryArchives`
+  and avoid the failing first-run pipeline JIT path.
+- The existing AIR 2.6/macOS 14 metallib remains the fallback for every other
+  pipeline and for archive misses on a different Metal runtime.
+- Steady-state kernel work and dispatch are unchanged. The archive adds about
+  48 MB to the executable; all three strict archive hits passed on M4 Max.
+  Direct M1 confirmation remains pending from the issue reporter.
+
+## v16 AIR compatibility change
 
 - The embedded Metal library now targets macOS 14 and AIR 2.6 while the host
   executable continues to require macOS 15.0 or newer.
@@ -94,9 +109,12 @@ SHA-256 output.
 
 ## Release files
 
-- `METAL_CRYPTO_TOOLKIT-v16-macos-arm64.tar.gz`
-- `METAL_CRYPTO_TOOLKIT-v16-macos-arm64.tar.gz.sha256`
+- `METAL_CRYPTO_TOOLKIT-v16.0.1-macos-arm64.tar.gz`
+- `METAL_CRYPTO_TOOLKIT-v16.0.1-macos-arm64.tar.gz.sha256`
 - `METAL_CRYPTO_TOOLKIT-tools-v16-macos-arm64.tar.gz`
 - `METAL_CRYPTO_TOOLKIT-tools-v16-macos-arm64.tar.gz.sha256`
+
+The tools archives are unchanged from v16 and are not republished in the
+v16.0.1 release.
 
 Verify each archive with `shasum -a 256 -c FILE.sha256` before extraction.

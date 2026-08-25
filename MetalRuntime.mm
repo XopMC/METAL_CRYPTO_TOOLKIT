@@ -1,7 +1,9 @@
 #include "MetalRuntime.h"
+#include "build/MetalBinaryArchiveProfiles.generated.h"
 
 #include <algorithm>
 #include <cerrno>
+#include <climits>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -13,6 +15,7 @@
 #include <mach-o/getsect.h>
 #include <mach-o/ldsyms.h>
 #include <IOKit/IOKitLib.h>
+#include <unistd.h>
 
 namespace metal_crypto {
 
@@ -64,9 +67,29 @@ static std::string nsErrorMessage(NSError* error) {
     return description ? std::string([description UTF8String]) : std::string("unknown Metal error");
 }
 
+static bool environmentFlagEnabled(const char* name) {
+    const char* value = std::getenv(name);
+    return value != nullptr && std::strcmp(value, "1") == 0;
+}
+
+static const MetalBinaryArchiveProfile* binaryArchiveProfileFor(
+    const std::string& functionName,
+    const std::string& pipelineKey) {
+    for (const MetalBinaryArchiveProfile& profile : kMetalBinaryArchiveProfiles) {
+        if (functionName == profile.functionName && pipelineKey == profile.pipelineKey) {
+            return &profile;
+        }
+    }
+    return nullptr;
+}
+
+static const uint8_t* embeddedSection(const char* sectionName, unsigned long* size) {
+    return getsectiondata(&_mh_execute_header, "__DATA", sectionName, size);
+}
+
 static id<MTLLibrary> newLibraryFromEmbeddedMetallib(id<MTLDevice> device, NSError** error) {
     unsigned long size = 0;
-    uint8_t* bytes = getsectiondata(&_mh_execute_header, "__DATA", "__metallib", &size);
+    const uint8_t* bytes = embeddedSection("__metallib", &size);
     if (bytes == nullptr || size == 0) {
         return nil;
     }
@@ -76,6 +99,71 @@ static id<MTLLibrary> newLibraryFromEmbeddedMetallib(id<MTLDevice> device, NSErr
         return nil;
     }
     return [device newLibraryWithData:data error:error];
+}
+
+static Status materializeEmbeddedBinaryArchive(std::string& outputPath) {
+    unsigned long size = 0;
+    const uint8_t* bytes = embeddedSection("__metalarc", &size);
+    if (bytes == nullptr || size == 0) {
+        return Status::failure("embedded __DATA,__metalarc section is missing");
+    }
+
+    NSString* temporaryDirectory = NSTemporaryDirectory();
+    if (temporaryDirectory == nil) {
+        return Status::failure("temporary directory is unavailable");
+    }
+    std::string pathTemplate([temporaryDirectory fileSystemRepresentation]);
+    if (pathTemplate.empty()) {
+        return Status::failure("temporary directory path is empty");
+    }
+    if (pathTemplate.back() != '/') {
+        pathTemplate.push_back('/');
+    }
+    pathTemplate += "metal-crypto-archive.XXXXXX.metallib";
+    std::vector<char> mutablePath(pathTemplate.begin(), pathTemplate.end());
+    mutablePath.push_back('\0');
+
+    constexpr int kSuffixLength = 9;
+    const int descriptor = mkstemps(mutablePath.data(), kSuffixLength);
+    if (descriptor < 0) {
+        return Status::failure("temporary Metal archive creation failed: " +
+                               std::string(std::strerror(errno)));
+    }
+
+    const std::string candidatePath(mutablePath.data());
+    std::size_t offset = 0;
+    while (offset < static_cast<std::size_t>(size)) {
+        const std::size_t remaining = static_cast<std::size_t>(size) - offset;
+        const std::size_t chunk = std::min<std::size_t>(
+            remaining, static_cast<std::size_t>(SSIZE_MAX));
+        const ssize_t written = ::write(descriptor, bytes + offset, chunk);
+        if (written < 0 && errno == EINTR) {
+            continue;
+        }
+        if (written <= 0) {
+            const std::string message = written < 0
+                ? std::string(std::strerror(errno))
+                : std::string("zero-byte write");
+            ::close(descriptor);
+            ::unlink(candidatePath.c_str());
+            return Status::failure("embedded Metal archive write failed: " + message);
+        }
+        offset += static_cast<std::size_t>(written);
+    }
+    if (::close(descriptor) != 0) {
+        const std::string message(std::strerror(errno));
+        ::unlink(candidatePath.c_str());
+        return Status::failure("embedded Metal archive close failed: " + message);
+    }
+    outputPath = candidatePath;
+    return Status::success();
+}
+
+Runtime::~Runtime() {
+    binaryArchive_ = nil;
+    if (!binaryArchiveTemporaryPath_.empty()) {
+        ::unlink(binaryArchiveTemporaryPath_.c_str());
+    }
 }
 
 static uint32_t gpuCoreCountFromRegistry(id<MTLDevice> device) {
@@ -411,6 +499,11 @@ Status Runtime::initialize(int deviceIndex, const std::string& metallibPath) {
         functions_.clear();
         pipelines_.clear();
     }
+    binaryArchive_ = nil;
+    if (!binaryArchiveTemporaryPath_.empty()) {
+        ::unlink(binaryArchiveTemporaryPath_.c_str());
+        binaryArchiveTemporaryPath_.clear();
+    }
 
     NSArray<id<MTLDevice>>* devices = MTLCopyAllDevices();
     if ([devices count] == 0) {
@@ -473,6 +566,43 @@ Status Runtime::initialize(int deviceIndex, const std::string& metallibPath) {
             }
             return Status::failure("Metal library load failed: " + errorMessage);
         }
+    }
+
+    const bool requireBinaryArchive = environmentFlagEnabled("METAL_REQUIRE_BINARY_ARCHIVE");
+    if (environmentFlagEnabled("METAL_DISABLE_BINARY_ARCHIVE")) {
+        if (requireBinaryArchive) {
+            return Status::failure(
+                "Metal binary archive is required but disabled by METAL_DISABLE_BINARY_ARCHIVE=1");
+        }
+        return Status::success();
+    }
+
+    Status archiveFileStatus = materializeEmbeddedBinaryArchive(binaryArchiveTemporaryPath_);
+    std::string archiveError;
+    if (archiveFileStatus.ok) {
+        MTLBinaryArchiveDescriptor* descriptor = [MTLBinaryArchiveDescriptor new];
+        NSString* path = [NSString stringWithUTF8String:binaryArchiveTemporaryPath_.c_str()];
+        descriptor.url = [NSURL fileURLWithPath:path];
+        NSError* error = nil;
+        binaryArchive_ = [device_ newBinaryArchiveWithDescriptor:descriptor error:&error];
+        if (binaryArchive_ == nil) {
+            archiveError = nsErrorMessage(error);
+            ::unlink(binaryArchiveTemporaryPath_.c_str());
+            binaryArchiveTemporaryPath_.clear();
+        }
+    } else {
+        archiveError = archiveFileStatus.message;
+    }
+    if (binaryArchive_ == nil) {
+        if (archiveError.empty()) {
+            archiveError = "unknown Metal binary archive load error";
+        }
+        if (requireBinaryArchive) {
+            return Status::failure("Metal binary archive load failed: " + archiveError);
+        }
+        std::fprintf(stderr,
+                     "[!] Metal binary archive unavailable; using AIR fallback: %s [!]\n",
+                     archiveError.c_str());
     }
     return Status::success();
 }
@@ -738,15 +868,49 @@ Status Runtime::functionForName(const std::string& functionName,
     }
     NSString* name = [NSString stringWithUTF8String:functionName.c_str()];
     id<MTLFunction> function = nil;
+    MTLFunctionConstantValues* values = nil;
     if (constants) {
-        MTLFunctionConstantValues* values = [MTLFunctionConstantValues new];
+        values = [MTLFunctionConstantValues new];
         constants(values);
+    }
+
+    const MetalBinaryArchiveProfile* archiveProfile =
+        binaryArchiveProfileFor(functionName, pipelineKey);
+    std::string archiveError;
+    if (archiveProfile != nullptr && binaryArchive_ != nil) {
+        MTLFunctionDescriptor* descriptor = [MTLFunctionDescriptor functionDescriptor];
+        descriptor.name = name;
+        descriptor.specializedName =
+            [NSString stringWithUTF8String:archiveProfile->specializedName];
+        descriptor.constantValues = values;
+        descriptor.binaryArchives = @[ binaryArchive_ ];
+        NSError* functionError = nil;
+        function = [library_ newFunctionWithDescriptor:descriptor error:&functionError];
+        archiveError = nsErrorMessage(functionError);
+    } else if (archiveProfile != nullptr) {
+        archiveError = "embedded Metal binary archive is not loaded";
+    }
+
+    if (function == nil && archiveProfile != nullptr &&
+        environmentFlagEnabled("METAL_REQUIRE_BINARY_ARCHIVE")) {
+        if (archiveError.empty()) {
+            archiveError = "specialized function creation failed";
+        }
+        return Status::failure("Metal archive-backed function creation failed for " +
+                               functionName + ": " + archiveError);
+    }
+
+    if (function == nil && constants) {
         NSError* functionError = nil;
         function = [library_ newFunctionWithName:name constantValues:values error:&functionError];
         if (function == nil) {
-            return Status::failure("Metal function specialization failed for " + functionName + ": " + nsErrorMessage(functionError));
+            std::string message = nsErrorMessage(functionError);
+            if (!archiveError.empty()) {
+                message += "; binary archive lookup failed: " + archiveError;
+            }
+            return Status::failure("Metal function specialization failed for " + functionName + ": " + message);
         }
-    } else {
+    } else if (function == nil) {
         function = [library_ newFunctionWithName:name];
     }
     if (function == nil) {
@@ -776,10 +940,48 @@ Status Runtime::pipelineForFunction(const std::string& functionName,
     if (!functionStatus.ok) {
         return functionStatus;
     }
+    const MetalBinaryArchiveProfile* archiveProfile =
+        binaryArchiveProfileFor(functionName, pipelineKey);
+    id<MTLComputePipelineState> pipeline = nil;
+    std::string archiveError;
+    if (archiveProfile != nullptr && binaryArchive_ != nil) {
+        MTLComputePipelineDescriptor* descriptor = [MTLComputePipelineDescriptor new];
+        descriptor.computeFunction = function;
+        descriptor.binaryArchives = @[ binaryArchive_ ];
+        NSError* error = nil;
+        pipeline = [device_ newComputePipelineStateWithDescriptor:descriptor
+                                                          options:MTLPipelineOptionFailOnBinaryArchiveMiss
+                                                       reflection:nil
+                                                            error:&error];
+        archiveError = nsErrorMessage(error);
+        if (pipeline != nil) {
+            std::fprintf(stderr,
+                         "[!] Metal binary archive hit: %s (%s) [!]\n",
+                         functionName.c_str(), archiveProfile->specializedName);
+        }
+    } else if (archiveProfile != nullptr) {
+        archiveError = "embedded Metal binary archive is not loaded";
+    }
+
+    if (pipeline == nil && archiveProfile != nullptr &&
+        environmentFlagEnabled("METAL_REQUIRE_BINARY_ARCHIVE")) {
+        if (archiveError.empty()) {
+            archiveError = "profile was not found in the binary archive";
+        }
+        return Status::failure("Metal binary archive pipeline miss for " + functionName +
+                               ": " + archiveError);
+    }
+
     NSError* error = nil;
-    id<MTLComputePipelineState> pipeline = [device_ newComputePipelineStateWithFunction:function error:&error];
     if (pipeline == nil) {
-        return Status::failure("Metal pipeline creation failed for " + functionName + ": " + nsErrorMessage(error));
+        pipeline = [device_ newComputePipelineStateWithFunction:function error:&error];
+    }
+    if (pipeline == nil) {
+        std::string message = nsErrorMessage(error);
+        if (!archiveError.empty()) {
+            message += "; binary archive lookup failed: " + archiveError;
+        }
+        return Status::failure("Metal pipeline creation failed for " + functionName + ": " + message);
     }
     pipelines_.emplace(cacheKey, pipeline);
     *out = pipeline;

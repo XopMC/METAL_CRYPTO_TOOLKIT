@@ -1,6 +1,10 @@
 import importlib.util
+import json
 import pathlib
+import subprocess
+import tempfile
 import unittest
+from unittest import mock
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -20,6 +24,7 @@ class MetalBinaryArchiveManifestTests(unittest.TestCase):
         cls.builder = load_builder()
 
     def test_exact_apple_silicon_slices(self):
+        self.assertEqual(self.builder.TRANSLATOR_TARGET, "air64-apple-macos26.0")
         self.assertEqual(
             self.builder.APPLE_GPU_SLICES,
             (
@@ -83,10 +88,135 @@ class MetalBinaryArchiveManifestTests(unittest.TestCase):
         self.assertEqual(len(specialized), 3)
         self.assertEqual(len(pipelines), 3)
         header = self.builder.render_runtime_header()
-        for profile in self.builder.PROFILES:
+        for profile, specialization, pipeline in zip(
+            self.builder.PROFILES, specialized, pipelines
+        ):
+            self.assertEqual(
+                specialization["label"],
+                f"{profile.specialized_name}_library",
+            )
+            self.assertEqual(specialization["function"], profile.function)
+            self.assertEqual(
+                specialization["specialized_name"], profile.specialized_name
+            )
+            self.assertEqual(
+                pipeline["compute_function"],
+                f"alias:{profile.specialized_name}_library#{profile.specialized_name}",
+            )
             self.assertIn(profile.function, header)
             self.assertIn(profile.pipeline_key, header)
             self.assertIn(profile.specialized_name, header)
+
+    def test_archive_verification_accepts_metal_lipo_slice_order(self):
+        with tempfile.TemporaryDirectory(prefix="metal-archive-verify-test.") as directory:
+            archive = pathlib.Path(directory) / "archive.metallib"
+            archive.touch()
+            reordered = tuple(reversed(self.builder.APPLE_GPU_SLICES))
+            with mock.patch.object(self.builder, "archive_slices", return_value=reordered):
+                self.builder.verify_archive(archive)
+
+    def test_archive_verification_rejects_missing_or_duplicate_slices(self):
+        with tempfile.TemporaryDirectory(prefix="metal-archive-verify-test.") as directory:
+            archive = pathlib.Path(directory) / "archive.metallib"
+            archive.touch()
+            malformed = self.builder.APPLE_GPU_SLICES[:-1] + (self.builder.APPLE_GPU_SLICES[0],)
+            with mock.patch.object(self.builder, "archive_slices", return_value=malformed):
+                with self.assertRaisesRegex(RuntimeError, "slices differ"):
+                    self.builder.verify_archive(archive)
+
+
+class Apple7TranslatorRegressionTests(unittest.TestCase):
+    def test_result_counter_translates_for_applegpu_g13g(self):
+        self.assert_translates_for_applegpu_g13g(
+            "metal_binary_archive_atomic_counter.metal",
+            "metal_archive_atomic_counter",
+        )
+
+    def test_wallet_counter_translates_for_applegpu_g13g(self):
+        self.assert_translates_for_applegpu_g13g(
+            "metal_binary_archive_wallet_counter.metal",
+            "metal_archive_wallet_counter",
+        )
+
+    def assert_translates_for_applegpu_g13g(self, source_name, function_name):
+        source = ROOT / "tests" / source_name
+        with tempfile.TemporaryDirectory(prefix="metal-archive-atomic-test.") as directory:
+            temporary = pathlib.Path(directory)
+            air = temporary / "atomic.air"
+            metallib = temporary / "atomic.metallib"
+            config = temporary / "atomic.mtlp-json"
+            archive = temporary / "atomic.binary.metallib"
+            compilation = subprocess.run(
+                [
+                    "xcrun",
+                    "metal",
+                    "-std=metal3.1",
+                    "-mmacosx-version-min=14.0",
+                    f"-I{ROOT}",
+                    "-c",
+                    str(source),
+                    "-o",
+                    str(air),
+                ],
+                text=True,
+                capture_output=True,
+            )
+            self.assertEqual(
+                compilation.returncode,
+                0,
+                msg=f"Metal source compilation failed:\n{compilation.stderr}",
+            )
+            library_link = subprocess.run(
+                ["xcrun", "metallib", str(air), "-o", str(metallib)],
+                text=True,
+                capture_output=True,
+            )
+            self.assertEqual(
+                library_link.returncode,
+                0,
+                msg=f"Metal library link failed:\n{library_link.stderr}",
+            )
+            config.write_text(
+                json.dumps(
+                    {
+                        "libraries": {
+                            "paths": [
+                                {"label": "Counter", "path": str(metallib)}
+                            ]
+                        },
+                        "pipelines": {
+                            "compute_pipelines": [
+                                {
+                                    "compute_function": f"alias:Counter#{function_name}"
+                                }
+                            ]
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            translation = subprocess.run(
+                [
+                    "xcrun",
+                    "metal-tt",
+                    str(metallib),
+                    str(config),
+                    "-target",
+                    load_builder().TRANSLATOR_TARGET,
+                    "-arch",
+                    "applegpu_g13g",
+                    "-o",
+                    str(archive),
+                ],
+                text=True,
+                capture_output=True,
+            )
+            self.assertEqual(
+                translation.returncode,
+                0,
+                msg=f"applegpu_g13g translation failed:\n{translation.stderr}",
+            )
+            self.assertEqual(load_builder().archive_slices(archive), ("applegpu_g13g",))
 
 
 if __name__ == "__main__":

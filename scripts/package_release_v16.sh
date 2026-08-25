@@ -4,12 +4,14 @@ set -eu
 
 ROOT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 OUTPUT_DIR=${1:-"$ROOT_DIR/dist"}
-VERSION=v16
+VERSION=v16.0.1
 MAIN_NAME=METAL_CRYPTO_TOOLKIT
 MAIN_ARCHIVE="$MAIN_NAME-$VERSION-macos-arm64.tar.gz"
-TOOLS_ARCHIVE="$MAIN_NAME-tools-$VERSION-macos-arm64.tar.gz"
 MAIN_BINARY="$ROOT_DIR/bin/$MAIN_NAME"
 METAL_LIBRARY="$ROOT_DIR/build/default.metallib"
+METAL_BINARY_ARCHIVE="$ROOT_DIR/build/default.binary.metallib"
+METAL_BINARY_ARCHIVE_BUILDER="$ROOT_DIR/scripts/build_metal_binary_archive.py"
+PYTHON3=${PYTHON3:-python3}
 
 fail() {
     printf '%s\n' "[!] $*" >&2
@@ -31,6 +33,12 @@ xcrun --find metal-objdump >/dev/null 2>&1 ||
     fail "build the toolkit first: make clean && make -j\$(sysctl -n hw.ncpu)"
 [ -f "$METAL_LIBRARY" ] ||
     fail "Metal library is missing: $METAL_LIBRARY"
+[ -f "$METAL_BINARY_ARCHIVE" ] ||
+    fail "Metal binary archive is missing: $METAL_BINARY_ARCHIVE"
+
+"$PYTHON3" "$METAL_BINARY_ARCHIVE_BUILDER" verify \
+    --archive "$METAL_BINARY_ARCHIVE" ||
+    fail "Metal binary archive verification failed"
 
 METAL_ARCHITECTURES=$(xcrun metal-lipo "$METAL_LIBRARY" -archs |
     tr -d '[:space:]')
@@ -57,52 +65,27 @@ otool -l "$MAIN_BINARY" |
          END { exit(found ? 0 : 1) }' ||
     fail "embedded __DATA,__metallib section is missing"
 
+otool -l "$MAIN_BINARY" |
+    awk '$1 == "sectname" && $2 == "__metalarc" { found = 1 }
+         END { exit(found ? 0 : 1) }' ||
+    fail "embedded __DATA,__metalarc section is missing"
+
 "$MAIN_BINARY" -help |
-    grep -q "METAL_CRYPTO_TOOLKIT v16.0.0" ||
-    fail "release binary does not report v16.0.0"
-
-TOOLS="
-cardano_address_to_hex
-algorand_address_to_hex
-multicoin_base58_bech32_address_to_hex
-base64_data_to_hex
-cosmos_bnb_address_to_hex
-polkadot_kusama_address_to_hex
-filecoin_address_to_hex
-solana_address_to_hex
-stellar_address_to_hex
-stacks_address_to_hex
-ton_address_to_hex
-tron_address_to_hex
-xrp_address_to_hex
-tezos_address_to_hex
-profanity_basepoint_generator
-"
-
-for TOOL_NAME in $TOOLS; do
-    TOOL_BINARY="$ROOT_DIR/tools/$TOOL_NAME/bin/$TOOL_NAME"
-    [ -x "$TOOL_BINARY" ] ||
-        fail "missing tool binary: $TOOL_BINARY; run make tools"
-    TOOL_ARCHITECTURES=$(lipo -archs "$TOOL_BINARY")
-    [ "$TOOL_ARCHITECTURES" = "arm64" ] ||
-        fail "$TOOL_NAME must contain arm64 only; found: $TOOL_ARCHITECTURES"
-done
+    grep -q "METAL_CRYPTO_TOOLKIT v16.0.1" ||
+    fail "release binary does not report v16.0.1"
 
 mkdir -p "$OUTPUT_DIR"
 for ARTIFACT in \
     "$OUTPUT_DIR/$MAIN_ARCHIVE" \
-    "$OUTPUT_DIR/$MAIN_ARCHIVE.sha256" \
-    "$OUTPUT_DIR/$TOOLS_ARCHIVE" \
-    "$OUTPUT_DIR/$TOOLS_ARCHIVE.sha256"; do
+    "$OUTPUT_DIR/$MAIN_ARCHIVE.sha256"; do
     [ ! -e "$ARTIFACT" ] ||
         fail "refusing to overwrite existing artifact: $ARTIFACT"
 done
 
-STAGING_DIR=$(mktemp -d "${TMPDIR:-/tmp}/metal-crypto-v16-package.XXXXXX")
+STAGING_DIR=$(mktemp -d "${TMPDIR:-/tmp}/metal-crypto-v16.0.1-package.XXXXXX")
 trap 'rm -rf "$STAGING_DIR"' EXIT HUP INT TERM
 MAIN_STAGE="$STAGING_DIR/main"
-TOOLS_STAGE="$STAGING_DIR/tools"
-mkdir -p "$MAIN_STAGE" "$TOOLS_STAGE"
+mkdir -p "$MAIN_STAGE"
 
 cp "$MAIN_BINARY" "$MAIN_STAGE/$MAIN_NAME"
 cp "$ROOT_DIR/README.md" \
@@ -113,30 +96,14 @@ cp "$ROOT_DIR/README.md" \
    "$ROOT_DIR/RELEASE_NOTES_v16_RU.md" \
    "$MAIN_STAGE/"
 
-for TOOL_NAME in $TOOLS; do
-    cp "$ROOT_DIR/tools/$TOOL_NAME/bin/$TOOL_NAME" \
-       "$TOOLS_STAGE/$TOOL_NAME"
-done
-cp "$ROOT_DIR/README.md" \
-   "$ROOT_DIR/LICENSE" \
-   "$ROOT_DIR/COPYING.GPLv3.txt" \
-   "$ROOT_DIR/THIRD_PARTY_NOTICES.md" \
-   "$ROOT_DIR/RELEASE_NOTES_v16_EN.md" \
-   "$ROOT_DIR/RELEASE_NOTES_v16_RU.md" \
-   "$TOOLS_STAGE/"
-
 COPYFILE_DISABLE=1 tar -czf "$OUTPUT_DIR/$MAIN_ARCHIVE" \
     -C "$MAIN_STAGE" .
-COPYFILE_DISABLE=1 tar -czf "$OUTPUT_DIR/$TOOLS_ARCHIVE" \
-    -C "$TOOLS_STAGE" .
 
 (
     cd "$OUTPUT_DIR"
     shasum -a 256 "$MAIN_ARCHIVE" >"$MAIN_ARCHIVE.sha256"
-    shasum -a 256 "$TOOLS_ARCHIVE" >"$TOOLS_ARCHIVE.sha256"
 )
 
 printf '%s\n' \
-    "[!] v16 release artifacts created in $OUTPUT_DIR" \
-    "[!] $MAIN_ARCHIVE" \
-    "[!] $TOOLS_ARCHIVE"
+    "[!] v16.0.1 release artifacts created in $OUTPUT_DIR" \
+    "[!] $MAIN_ARCHIVE"

@@ -1,11 +1,26 @@
-# METAL_CRYPTO_TOOLKIT v16
+# METAL_CRYPTO_TOOLKIT v16.0.1
 
 v16 — крупнейшее функциональное обновление Metal-тулкита. В нём появились
 общие проверяемые планировщик, память и статистика, завершены несколько
 форматов кошельков, добавлены новые GPU-режимы поиска и восстановления, а
 оптимизированные BSGS и Kangaroo из v15 полностью сохранены.
 
-## Хот-фикс совместимости с M1
+## Хот-фикс v16.0.1 для Tahoe/M1 pipeline
+
+- Три проблемные специализации pipeline заранее скомпилированы в Metal binary
+  archive Tahoe 26: compressed-BIP32 `workerHmac_seq`, BIP38 non-EC
+  `workerBip38Grouped` и BIP38 EC-multiply `workerBip38Grouped`.
+- В бинарник встроены нативные payload для всех 11 Apple Silicon GPU slices,
+  поддерживаемых translator, включая варианты M1/Apple7 `applegpu_g13*`.
+  Точные совпадения используют `MTLComputePipelineDescriptor.binaryArchives`
+  и не входят в аварийный путь JIT-компиляции первого pipeline.
+- Существующий metallib AIR 2.6/macOS 14 остаётся fallback для всех остальных
+  pipeline и для archive miss на другой версии Metal runtime.
+- Steady-state работа ядер и dispatch не изменены. Архив добавляет около 48 МБ
+  к бинарнику; все три strict archive-hit прошли на M4 Max. Прямое
+  подтверждение на M1 ожидается от автора issue.
+
+## Изменение AIR-совместимости в v16
 
 - Встроенная Metal-библиотека теперь собирается для macOS 14 и AIR 2.6, а
   host-executable по-прежнему требует macOS 15.0 или новее.
@@ -95,10 +110,12 @@ time составили 9,948247 с, 5,132319 с и 9,941461 с; population CV �
 
 ## Файлы выпуска
 
-- `METAL_CRYPTO_TOOLKIT-v16-macos-arm64.tar.gz`
-- `METAL_CRYPTO_TOOLKIT-v16-macos-arm64.tar.gz.sha256`
+- `METAL_CRYPTO_TOOLKIT-v16.0.1-macos-arm64.tar.gz`
+- `METAL_CRYPTO_TOOLKIT-v16.0.1-macos-arm64.tar.gz.sha256`
 - `METAL_CRYPTO_TOOLKIT-tools-v16-macos-arm64.tar.gz`
 - `METAL_CRYPTO_TOOLKIT-tools-v16-macos-arm64.tar.gz.sha256`
+
+Tools-архивы не изменились с v16 и повторно в выпуск v16.0.1 не загружаются.
 
 До распаковки проверьте каждый архив командой
 `shasum -a 256 -c FILE.sha256`.

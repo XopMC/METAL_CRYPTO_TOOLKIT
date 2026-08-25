@@ -26,7 +26,7 @@ APPLE_GPU_SLICES = (
     "applegpu_g16s",
 )
 
-TRANSLATOR_TARGET = "air64-apple-macos15.0"
+TRANSLATOR_TARGET = "air64-apple-macos26.0"
 
 
 class FunctionConstant(NamedTuple):
@@ -146,7 +146,9 @@ def translation_config() -> dict:
             }
         )
     return {
-        "libraries": {"specialized_functions": specialized_functions},
+        "libraries": {
+            "specialized_functions": specialized_functions,
+        },
         "pipelines": {"compute_pipelines": compute_pipelines},
     }
 
@@ -206,7 +208,7 @@ def verify_archive(archive: pathlib.Path) -> None:
     if not archive.is_file():
         raise FileNotFoundError(f"Metal binary archive is missing: {archive}")
     actual = archive_slices(archive)
-    if actual != APPLE_GPU_SLICES:
+    if len(actual) != len(APPLE_GPU_SLICES) or set(actual) != set(APPLE_GPU_SLICES):
         raise RuntimeError(
             "Metal binary archive slices differ: "
             f"expected={' '.join(APPLE_GPU_SLICES)}; actual={' '.join(actual) or 'missing'}"
