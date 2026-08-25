@@ -34291,6 +34291,7 @@ static metalError_t wallet_launch_browservault_generated(
     std::vector<uint8_t>& solved_files,
     bool& all_solved)
 {
+    constexpr uint32_t bip38_scrypt_threads = 32u;
     const char* grouped_kernel =
         BIP38_MODE ? "workerBip38Grouped" : "workerBrowserVaultGrouped";
     uint32_t active_target_count = 0u;
@@ -34326,9 +34327,15 @@ static metalError_t wallet_launch_browservault_generated(
                         count - processed, chunk_concurrency, group_sub_limit));
             }
             if (sub_count == 0ull) continue;
+            const uint32_t launch_threads = BIP38_MODE && chunk_uses_scrypt
+                ? bip38_scrypt_threads
+                : BLOCK_THREADS;
+            const uint64_t launch_lanes = BIP38_MODE && chunk_uses_scrypt
+                ? sub_count
+                : chunk_concurrency;
             const uint32_t launch_blocks = chunk_uses_scrypt
                 ? static_cast<uint32_t>(std::max<uint64_t>(1ull,
-                    std::min<uint64_t>((chunk_concurrency + BLOCK_THREADS - 1ull) / BLOCK_THREADS,
+                    std::min<uint64_t>((launch_lanes + launch_threads - 1ull) / launch_threads,
                         static_cast<uint64_t>(BLOCK_NUMBER))))
                 : BLOCK_NUMBER;
             for (uint32_t group_offset = 0u;
@@ -34343,10 +34350,10 @@ static metalError_t wallet_launch_browservault_generated(
                 bool overflowed = false;
                 do {
                     if (state.simple_aes_gcm_singletons) {
-                        metal_launch("workerBrowserVault", launch_blocks, BLOCK_THREADS, nullptr, nullptr, state.targets + chunk.offset + group_offset, state.ciphertext_pool, group_sub_count, state.solved_flags, state.solved_count, candidate_kind, nullptr, nullptr, 0u, state.mask_spec, state.range_spec, start + processed, sub_count);
+                        metal_launch("workerBrowserVault", launch_blocks, launch_threads, nullptr, nullptr, state.targets + chunk.offset + group_offset, state.ciphertext_pool, group_sub_count, state.solved_flags, state.solved_count, candidate_kind, nullptr, nullptr, 0u, state.mask_spec, state.range_spec, start + processed, sub_count);
                     }
                     else {
-			            metal_launch(grouped_kernel, launch_blocks, BLOCK_THREADS, nullptr, nullptr, _dev_precomp, pitch, state.targets, state.groups + chunk.offset + group_offset, state.ciphertext_pool, group_sub_count, state.solved_flags, state.solved_count, candidate_kind, nullptr, nullptr, 0u, state.mask_spec, state.range_spec, state.scrypt_scratch, chunk_stride, start + processed, sub_count);
+			            metal_launch(grouped_kernel, launch_blocks, launch_threads, nullptr, nullptr, _dev_precomp, pitch, state.targets, state.groups + chunk.offset + group_offset, state.ciphertext_pool, group_sub_count, state.solved_flags, state.solved_count, candidate_kind, nullptr, nullptr, 0u, state.mask_spec, state.range_spec, state.scrypt_scratch, chunk_stride, start + processed, sub_count);
                     }
                     st = metalGetLastError(); if (st != metalSuccess) return st;
                     st = metalDeviceSynchronize(); if (st != metalSuccess) return st;
@@ -34395,6 +34402,7 @@ static metalError_t wallet_launch_browservault_dict_batch(
     std::vector<uint8_t>& solved_files,
     bool& all_solved)
 {
+    constexpr uint32_t bip38_scrypt_threads = 32u;
     const char* grouped_kernel =
         BIP38_MODE ? "workerBip38Grouped" : "workerBrowserVaultGrouped";
     metalError_t st = copy_to_device_grow(reinterpret_cast<void**>(&state.pass_data), batch.data.data(), batch.data.empty() ? 1u : batch.data.size());
@@ -34438,9 +34446,15 @@ static metalError_t wallet_launch_browservault_dict_batch(
                         group_sub_limit));
             }
             if (sub_count == 0ull) continue;
+            const uint32_t launch_threads = BIP38_MODE && chunk_uses_scrypt
+                ? bip38_scrypt_threads
+                : BLOCK_THREADS;
+            const uint64_t launch_lanes = BIP38_MODE && chunk_uses_scrypt
+                ? sub_count
+                : chunk_concurrency;
             const uint32_t launch_blocks = chunk_uses_scrypt
                 ? static_cast<uint32_t>(std::max<uint64_t>(1ull,
-                    std::min<uint64_t>((chunk_concurrency + BLOCK_THREADS - 1ull) / BLOCK_THREADS,
+                    std::min<uint64_t>((launch_lanes + launch_threads - 1ull) / launch_threads,
                         static_cast<uint64_t>(BLOCK_NUMBER))))
                 : BLOCK_NUMBER;
             for (uint32_t group_offset = 0u;
@@ -34455,10 +34469,10 @@ static metalError_t wallet_launch_browservault_dict_batch(
                 bool overflowed = false;
                 do {
                     if (state.simple_aes_gcm_singletons) {
-                        metal_launch("workerBrowserVault", launch_blocks, BLOCK_THREADS, nullptr, nullptr, state.targets + chunk.offset + group_offset, state.ciphertext_pool, group_sub_count, state.solved_flags, state.solved_count, WALLET_CANDIDATE_DICTIONARY, state.pass_data, state.pass_lens, batch.count, nullptr, nullptr, processed, sub_count);
+                        metal_launch("workerBrowserVault", launch_blocks, launch_threads, nullptr, nullptr, state.targets + chunk.offset + group_offset, state.ciphertext_pool, group_sub_count, state.solved_flags, state.solved_count, WALLET_CANDIDATE_DICTIONARY, state.pass_data, state.pass_lens, batch.count, nullptr, nullptr, processed, sub_count);
                     }
                     else {
-			            metal_launch(grouped_kernel, launch_blocks, BLOCK_THREADS, nullptr, nullptr, _dev_precomp, pitch, state.targets, state.groups + chunk.offset + group_offset, state.ciphertext_pool, group_sub_count, state.solved_flags, state.solved_count, WALLET_CANDIDATE_DICTIONARY, state.pass_data, state.pass_lens, batch.count, nullptr, nullptr, state.scrypt_scratch, chunk_stride, processed, sub_count);
+			            metal_launch(grouped_kernel, launch_blocks, launch_threads, nullptr, nullptr, _dev_precomp, pitch, state.targets, state.groups + chunk.offset + group_offset, state.ciphertext_pool, group_sub_count, state.solved_flags, state.solved_count, WALLET_CANDIDATE_DICTIONARY, state.pass_data, state.pass_lens, batch.count, nullptr, nullptr, state.scrypt_scratch, chunk_stride, processed, sub_count);
                     }
                     st = metalGetLastError(); if (st != metalSuccess) return st;
                     st = metalDeviceSynchronize(); if (st != metalSuccess) return st;
