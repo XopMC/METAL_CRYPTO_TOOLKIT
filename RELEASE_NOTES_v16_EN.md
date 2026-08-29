@@ -1,9 +1,29 @@
-# METAL_CRYPTO_TOOLKIT v16.0.1
+# METAL_CRYPTO_TOOLKIT v16.0.2
 
 v16 is the largest functional update to the Metal toolkit so far. It adds a
 shared checked scheduler and memory/progress infrastructure, completes several
 existing wallet formats, introduces new GPU search and recovery modes, and
 retains the optimized BSGS and Kangaroo engines from v15.
+
+## v16.0.2 M1/Sequoia worker hot-fix
+
+- The Apple7 translator/runtime compiler failed while lowering the generic
+  mnemonic-file `worker`: it attempted to legalize a 32-bit atomic result-count
+  load directly as 64-bit and ended with `Compiler encountered an internal
+  error` / `metalErrorUnknown`.
+- The result counter still uses two atomic 32-bit words, but now packs them with
+  an exact bit-cast. This preserves the full 64-bit value and avoids the failing
+  compiler transformation.
+- The compressed-BIP32 `worker` specialization is now precompiled together with
+  the existing HMAC and two BIP38 profiles for all 11 Apple Silicon GPU slices.
+  Separate embedded archives target macOS 15 and macOS 26, and the runtime
+  selects the matching one so Sequoia compatibility does not regress Tahoe.
+- Search logic and steady-state throughput are unchanged. The counter code runs
+  only when a result is stored; the native archive avoids first-run pipeline
+  JIT. The failing Apple7 translation and the fixed 11-slice archive were
+  reproduced locally, and runtime tests passed on M4 Max. Direct M1 validation
+  remains pending from the issue reporter because no M1 host is available
+  locally.
 
 ## v16.0.1 Tahoe/M1 pipeline hot-fix
 
@@ -109,12 +129,12 @@ SHA-256 output.
 
 ## Release files
 
-- `METAL_CRYPTO_TOOLKIT-v16.0.1-macos-arm64.tar.gz`
-- `METAL_CRYPTO_TOOLKIT-v16.0.1-macos-arm64.tar.gz.sha256`
+- `METAL_CRYPTO_TOOLKIT-v16.0.2-macos-arm64.tar.gz`
+- `METAL_CRYPTO_TOOLKIT-v16.0.2-macos-arm64.tar.gz.sha256`
 - `METAL_CRYPTO_TOOLKIT-tools-v16-macos-arm64.tar.gz`
 - `METAL_CRYPTO_TOOLKIT-tools-v16-macos-arm64.tar.gz.sha256`
 
 The tools archives are unchanged from v16 and are not republished in the
-v16.0.1 release.
+v16.0.2 release.
 
 Verify each archive with `shasum -a 256 -c FILE.sha256` before extraction.

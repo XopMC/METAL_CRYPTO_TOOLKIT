@@ -29,7 +29,7 @@ static inline ulong found_atomic_add_count(device atomic_uint* counter, uint val
         atomic_fetch_add_explicit(counter + 1, 1u, memory_order_relaxed);
     }
     const uint high = atomic_fetch_add_explicit(counter + 1, 0u, memory_order_relaxed);
-    return (ulong(high) << 32) | ulong(low);
+    return as_type<ulong>(uint2(low, high));
 }
 
 static inline void found_copy_thread_to_device_char(device char* dst, const thread char* src, uint len) {

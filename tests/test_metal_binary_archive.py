@@ -24,7 +24,13 @@ class MetalBinaryArchiveManifestTests(unittest.TestCase):
         cls.builder = load_builder()
 
     def test_exact_apple_silicon_slices(self):
-        self.assertEqual(self.builder.TRANSLATOR_TARGET, "air64-apple-macos26.0")
+        self.assertEqual(
+            self.builder.TRANSLATOR_TARGETS,
+            (
+                "air64-apple-macos15.0",
+                "air64-apple-macos26.0",
+            ),
+        )
         self.assertEqual(
             self.builder.APPLE_GPU_SLICES,
             (
@@ -44,9 +50,12 @@ class MetalBinaryArchiveManifestTests(unittest.TestCase):
 
     def test_exact_specialization_profiles(self):
         profiles = self.builder.PROFILES
-        self.assertEqual(len(profiles), 3)
-        self.assertEqual(len({profile.specialized_name for profile in profiles}), 3)
-        self.assertEqual(len({profile.pipeline_key for profile in profiles}), 3)
+        self.assertEqual(len(profiles), 4)
+        self.assertEqual(len({profile.specialized_name for profile in profiles}), 4)
+        self.assertEqual(
+            len({(profile.function, profile.pipeline_key) for profile in profiles}),
+            4,
+        )
 
         by_name = {profile.specialized_name: profile for profile in profiles}
         hmac = by_name["workerHmac_seq_v16_0_1_compressed_bip32"]
@@ -64,6 +73,10 @@ class MetalBinaryArchiveManifestTests(unittest.TestCase):
             hmac.pipeline_key,
             f"worker-targets:{flags}:ada:1023:ecmult-window:16:17:ada:1023:dot:3:der:1",
         )
+        worker = by_name["worker_v16_0_2_compressed_bip32"]
+        self.assertEqual(worker.function, "worker")
+        self.assertEqual(worker.constants, hmac.constants)
+        self.assertEqual(worker.pipeline_key, hmac.pipeline_key)
 
         expected_bip38 = {
             "workerBip38Grouped_v16_0_1_non_ec": 28,
@@ -85,8 +98,8 @@ class MetalBinaryArchiveManifestTests(unittest.TestCase):
         config = self.builder.translation_config()
         specialized = config["libraries"]["specialized_functions"]
         pipelines = config["pipelines"]["compute_pipelines"]
-        self.assertEqual(len(specialized), 3)
-        self.assertEqual(len(pipelines), 3)
+        self.assertEqual(len(specialized), 4)
+        self.assertEqual(len(pipelines), 4)
         header = self.builder.render_runtime_header()
         for profile, specialization, pipeline in zip(
             self.builder.PROFILES, specialized, pipelines
@@ -126,6 +139,119 @@ class MetalBinaryArchiveManifestTests(unittest.TestCase):
 
 
 class Apple7TranslatorRegressionTests(unittest.TestCase):
+    def test_mnemonic_worker_specialization_translates_for_applegpu_g13g(self):
+        source = ROOT / "Kernels" / "worker.metal"
+        with tempfile.TemporaryDirectory(prefix="metal-archive-worker-test.") as directory:
+            temporary = pathlib.Path(directory)
+            air = temporary / "worker.air"
+            metallib = temporary / "worker.metallib"
+            config = temporary / "worker.mtlp-json"
+            archive = temporary / "worker.binary.metallib"
+            compilation = subprocess.run(
+                [
+                    "xcrun",
+                    "metal",
+                    "-std=metal3.1",
+                    "-mmacosx-version-min=14.0",
+                    f"-I{ROOT}",
+                    "-c",
+                    str(source),
+                    "-o",
+                    str(air),
+                ],
+                text=True,
+                capture_output=True,
+            )
+            self.assertEqual(
+                compilation.returncode,
+                0,
+                msg=f"Metal worker source compilation failed:\n{compilation.stderr}",
+            )
+            library_link = subprocess.run(
+                ["xcrun", "metallib", str(air), "-o", str(metallib)],
+                text=True,
+                capture_output=True,
+            )
+            self.assertEqual(
+                library_link.returncode,
+                0,
+                msg=f"Metal worker library link failed:\n{library_link.stderr}",
+            )
+
+            def constant(index, value_type, value):
+                return {
+                    "id_type": "FunctionConstantIndex",
+                    "id": {"data": index},
+                    "value_type": value_type,
+                    "value": {"data": value},
+                }
+
+            constants = [
+                constant(index, "ConstantBool", index in (0, 14))
+                for index in range(27)
+            ]
+            constants.extend(
+                (
+                    constant(32, "ConstantUInt", 1023),
+                    constant(33, "ConstantUInt", 3),
+                    constant(34, "ConstantUInt", 1),
+                    constant(66, "ConstantBool", False),
+                    constant(67, "ConstantBool", False),
+                    constant(68, "ConstantBool", False),
+                    constant(90, "ConstantUInt", 16),
+                    constant(91, "ConstantUInt", 17),
+                )
+            )
+            specialized_name = "worker_test_compressed_bip32"
+            config.write_text(
+                json.dumps(
+                    {
+                        "libraries": {
+                            "specialized_functions": [
+                                {
+                                    "label": "Worker",
+                                    "function": "worker",
+                                    "specialized_name": specialized_name,
+                                    "constant_values": constants,
+                                }
+                            ]
+                        },
+                        "pipelines": {
+                            "compute_pipelines": [
+                                {
+                                    "compute_function": (
+                                        f"alias:Worker#{specialized_name}"
+                                    )
+                                }
+                            ]
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            translation = subprocess.run(
+                [
+                    "xcrun",
+                    "metal-tt",
+                    str(metallib),
+                    str(config),
+                    "-target",
+                    "air64-apple-macos15.0",
+                    "-arch",
+                    "applegpu_g13g",
+                    "-o",
+                    str(archive),
+                ],
+                text=True,
+                capture_output=True,
+            )
+            self.assertEqual(
+                translation.returncode,
+                0,
+                msg=f"applegpu_g13g worker translation failed:\n{translation.stderr}",
+            )
+            self.assertEqual(load_builder().archive_slices(archive), ("applegpu_g13g",))
+
     def test_result_counter_translates_for_applegpu_g13g(self):
         self.assert_translates_for_applegpu_g13g(
             "metal_binary_archive_atomic_counter.metal",
@@ -202,7 +328,7 @@ class Apple7TranslatorRegressionTests(unittest.TestCase):
                     str(metallib),
                     str(config),
                     "-target",
-                    load_builder().TRANSLATOR_TARGET,
+                    load_builder().TRANSLATOR_TARGETS[0],
                     "-arch",
                     "applegpu_g13g",
                     "-o",

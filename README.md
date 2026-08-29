@@ -9,7 +9,7 @@
   <img alt="Platform" src="https://img.shields.io/badge/platform-macOS%2015%2B-111827?style=for-the-badge">
   <img alt="Architecture" src="https://img.shields.io/badge/architecture-Apple%20Silicon-0f766e?style=for-the-badge">
   <img alt="GPU API" src="https://img.shields.io/badge/GPU-Metal%203-2563eb?style=for-the-badge">
-  <img alt="Version" src="https://img.shields.io/badge/version-v16.0.1-b45309?style=for-the-badge">
+  <img alt="Version" src="https://img.shields.io/badge/version-v16.0.2-b45309?style=for-the-badge">
   <a href="#support-the-project"><img alt="Sponsor" src="https://img.shields.io/badge/Sponsor-Support%20development-EA4AAA?style=for-the-badge&amp;logo=githubsponsors&amp;logoColor=white"></a>
 </p>
 
@@ -20,6 +20,25 @@ Author: Mikhail Khoroshavin, also known as **XopMC**
 ## English
 
 ### Changelog
+
+#### v16.0.2
+
+M1/Sequoia Metal compiler hot-fix:
+
+- the 64-bit result counter now packs its two atomic 32-bit words with a
+  bit-cast, avoiding the Apple7 backend's invalid 32-to-64-bit atomic-load
+  legalization while preserving the exact counter value;
+- the compressed-BIP32 mnemonic-file `worker` specialization is included in
+  the native binary archive for all 11 Apple Silicon GPU slices;
+- two embedded archives now carry the four profiles for both macOS 15 and
+  macOS 26; the runtime selects the matching archive, while the AIR 2.6/macOS
+  14 metallib remains the general fallback;
+- search logic and steady-state throughput are unchanged. The counter path is
+  reached only when storing a match, and the archive removes first-run JIT.
+
+The failing `applegpu_g13g` translation and the fixed 11-slice translation
+were reproduced locally. Runtime checks passed on M4 Max; direct M1 hardware
+is not available locally, so issue #2 remains open for the reporter's retest.
 
 #### v16.0.1
 
@@ -604,12 +623,12 @@ under GPLv3. See `COPYING.GPLv3.txt` and `THIRD_PARTY_NOTICES.md`.
 
 ### Requirements
 
-#### Ready-to-run v16.0.1 release
+#### Ready-to-run v16.0.2 release
 
 - Apple Silicon Mac (`arm64`);
 - macOS 15.0 or newer;
 - a Metal-capable Apple GPU;
-- about 520 MB for the unpacked executable;
+- about 630 MB for the unpacked executable;
 - additional unified memory according to filters, result capacity, and wallet KDF settings.
 
 The release contains one executable. The Metal library is embedded in its Mach-O data section, so an external `.metallib`, Python, Homebrew package, or source tree is not needed at runtime.
@@ -623,10 +642,10 @@ The release contains one executable. The Metal library is embedded in its Mach-O
 
 ### Download, verify, and run
 
-Download these two files from the [v16.0.1 release](https://github.com/XopMC/METAL_CRYPTO_TOOLKIT/releases/tag/v16.0.1):
+Download these two files from the [v16.0.2 release](https://github.com/XopMC/METAL_CRYPTO_TOOLKIT/releases/tag/v16.0.2):
 
-- `METAL_CRYPTO_TOOLKIT-v16.0.1-macos-arm64.tar.gz`
-- `METAL_CRYPTO_TOOLKIT-v16.0.1-macos-arm64.tar.gz.sha256`
+- `METAL_CRYPTO_TOOLKIT-v16.0.2-macos-arm64.tar.gz`
+- `METAL_CRYPTO_TOOLKIT-v16.0.2-macos-arm64.tar.gz.sha256`
 
 The unchanged optional address-conversion package remains on the v16 release:
 
@@ -638,8 +657,8 @@ It is needed only when printable cryptocurrency addresses must be converted into
 Then run:
 
 ```bash
-shasum -a 256 -c METAL_CRYPTO_TOOLKIT-v16.0.1-macos-arm64.tar.gz.sha256
-tar -xzf METAL_CRYPTO_TOOLKIT-v16.0.1-macos-arm64.tar.gz
+shasum -a 256 -c METAL_CRYPTO_TOOLKIT-v16.0.2-macos-arm64.tar.gz.sha256
+tar -xzf METAL_CRYPTO_TOOLKIT-v16.0.2-macos-arm64.tar.gz
 chmod +x METAL_CRYPTO_TOOLKIT
 ./METAL_CRYPTO_TOOLKIT -help
 ```
@@ -3946,6 +3965,25 @@ xattr -d com.apple.quarantine METAL_CRYPTO_TOOLKIT
 
 ### Изменения
 
+#### v16.0.2
+
+Хот-фикс Metal compiler для M1/Sequoia:
+
+- 64-битный счётчик результатов теперь собирает два атомарных 32-битных слова
+  через bit-cast. Значение счётчика сохраняется точно, но backend Apple7 больше
+  не пытается выполнить некорректную legalization atomic load из 32 в 64 бита;
+- специализация `worker` для mnemonic-файла с compressed BIP32 добавлена в
+  нативный binary archive для всех 11 Apple Silicon GPU slices;
+- два встроенных archive содержат эти четыре профиля для macOS 15 и macOS 26;
+  runtime выбирает подходящий archive, а metallib AIR 2.6/macOS 14 остаётся
+  общим fallback;
+- логика поиска и steady-state скорость не меняются. Счётчик выполняется
+  только при сохранении совпадения, а archive убирает JIT первого запуска.
+
+Падающий перевод для `applegpu_g13g` и исправленный перевод всех 11 slices
+воспроизведены локально. Runtime-проверки прошли на M4 Max; локального M1 нет,
+поэтому issue #2 остаётся открытым до повторного теста автора.
+
 #### v16.0.1
 
 Хот-фикс Metal pipeline для Tahoe/M1:
@@ -4542,12 +4580,12 @@ GNU GPLv3. Поэтому сборки, включающие этот режим
 
 ### Системные требования
 
-#### Готовый выпуск v16.0.1
+#### Готовый выпуск v16.0.2
 
 - Mac на Apple Silicon (`arm64`);
 - macOS 15.0 или новее;
 - видеокарта Apple с поддержкой Metal;
-- около 520 МБ для распакованного исполняемого файла;
+- около 630 МБ для распакованного исполняемого файла;
 - дополнительная объединенная память для фильтров, буфера результатов и тяжелых KDF кошельков.
 
 В выпуске находится один исполняемый файл. Библиотека Metal встроена прямо в Mach-O, поэтому для запуска не нужны внешний `.metallib`, Python, пакеты Homebrew или папка с исходниками.
@@ -4561,10 +4599,10 @@ GNU GPLv3. Поэтому сборки, включающие этот режим
 
 ### Загрузка, проверка и первый запуск
 
-На странице [выпуска v16.0.1](https://github.com/XopMC/METAL_CRYPTO_TOOLKIT/releases/tag/v16.0.1) загрузите:
+На странице [выпуска v16.0.2](https://github.com/XopMC/METAL_CRYPTO_TOOLKIT/releases/tag/v16.0.2) загрузите:
 
-- `METAL_CRYPTO_TOOLKIT-v16.0.1-macos-arm64.tar.gz`;
-- `METAL_CRYPTO_TOOLKIT-v16.0.1-macos-arm64.tar.gz.sha256`.
+- `METAL_CRYPTO_TOOLKIT-v16.0.2-macos-arm64.tar.gz`;
+- `METAL_CRYPTO_TOOLKIT-v16.0.2-macos-arm64.tar.gz.sha256`.
 
 Неизменённый необязательный набор конвертеров остаётся в выпуске v16:
 
@@ -4576,8 +4614,8 @@ GNU GPLv3. Поэтому сборки, включающие этот режим
 Положите оба файла в одну папку и выполните:
 
 ```bash
-shasum -a 256 -c METAL_CRYPTO_TOOLKIT-v16.0.1-macos-arm64.tar.gz.sha256
-tar -xzf METAL_CRYPTO_TOOLKIT-v16.0.1-macos-arm64.tar.gz
+shasum -a 256 -c METAL_CRYPTO_TOOLKIT-v16.0.2-macos-arm64.tar.gz.sha256
+tar -xzf METAL_CRYPTO_TOOLKIT-v16.0.2-macos-arm64.tar.gz
 chmod +x METAL_CRYPTO_TOOLKIT
 ./METAL_CRYPTO_TOOLKIT -help
 ```

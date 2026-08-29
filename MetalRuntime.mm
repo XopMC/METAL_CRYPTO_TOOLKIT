@@ -101,11 +101,19 @@ static id<MTLLibrary> newLibraryFromEmbeddedMetallib(id<MTLDevice> device, NSErr
     return [device newLibraryWithData:data error:error];
 }
 
-static Status materializeEmbeddedBinaryArchive(std::string& outputPath) {
+static const char* embeddedBinaryArchiveSectionForRuntime() {
+    const NSOperatingSystemVersion version =
+        [[NSProcessInfo processInfo] operatingSystemVersion];
+    return version.majorVersion >= 26 ? "__metarc26" : "__metarc15";
+}
+
+static Status materializeEmbeddedBinaryArchive(const char* sectionName,
+                                               std::string& outputPath) {
     unsigned long size = 0;
-    const uint8_t* bytes = embeddedSection("__metalarc", &size);
+    const uint8_t* bytes = embeddedSection(sectionName, &size);
     if (bytes == nullptr || size == 0) {
-        return Status::failure("embedded __DATA,__metalarc section is missing");
+        return Status::failure(
+            "embedded __DATA," + std::string(sectionName) + " section is missing");
     }
 
     NSString* temporaryDirectory = NSTemporaryDirectory();
@@ -577,7 +585,9 @@ Status Runtime::initialize(int deviceIndex, const std::string& metallibPath) {
         return Status::success();
     }
 
-    Status archiveFileStatus = materializeEmbeddedBinaryArchive(binaryArchiveTemporaryPath_);
+    const char* binaryArchiveSection = embeddedBinaryArchiveSectionForRuntime();
+    Status archiveFileStatus = materializeEmbeddedBinaryArchive(
+        binaryArchiveSection, binaryArchiveTemporaryPath_);
     std::string archiveError;
     if (archiveFileStatus.ok) {
         MTLBinaryArchiveDescriptor* descriptor = [MTLBinaryArchiveDescriptor new];
@@ -589,6 +599,10 @@ Status Runtime::initialize(int deviceIndex, const std::string& metallibPath) {
             archiveError = nsErrorMessage(error);
             ::unlink(binaryArchiveTemporaryPath_.c_str());
             binaryArchiveTemporaryPath_.clear();
+        } else {
+            std::fprintf(stderr,
+                         "[!] Metal binary archive selected: %s [!]\n",
+                         binaryArchiveSection);
         }
     } else {
         archiveError = archiveFileStatus.message;

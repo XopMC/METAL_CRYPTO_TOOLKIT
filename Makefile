@@ -17,7 +17,9 @@ TARGET    := $(BIN_DIR)/METAL_CRYPTO_TOOLKIT
 ROOT_TARGET := METAL_CRYPTO_TOOLKIT
 METAL_AIR := $(BUILD_DIR)/default.air
 METALLIB  := $(BUILD_DIR)/default.metallib
-METAL_BINARY_ARCHIVE := $(BUILD_DIR)/default.binary.metallib
+METAL_BINARY_ARCHIVE_15 := $(BUILD_DIR)/default.binary.macos15.metallib
+METAL_BINARY_ARCHIVE_26 := $(BUILD_DIR)/default.binary.macos26.metallib
+METAL_BINARY_ARCHIVES := $(METAL_BINARY_ARCHIVE_15) $(METAL_BINARY_ARCHIVE_26)
 METAL_BINARY_ARCHIVE_CONFIG := $(BUILD_DIR)/metal_binary_archive.mtlp-json
 METAL_BINARY_ARCHIVE_PROFILE_HEADER := $(BUILD_DIR)/MetalBinaryArchiveProfiles.generated.h
 METAL_BINARY_ARCHIVE_BUILDER := scripts/build_metal_binary_archive.py
@@ -41,7 +43,8 @@ DEPFLAGS := -MMD -MP
 LDFLAGS  := -framework Foundation -framework CoreFoundation -framework Metal -framework IOKit
 EMBED_METAL_LDFLAGS := \
 	-Wl,-sectcreate,__DATA,__metallib,$(METALLIB) \
-	-Wl,-sectcreate,__DATA,__metalarc,$(METAL_BINARY_ARCHIVE)
+	-Wl,-sectcreate,__DATA,__metarc15,$(METAL_BINARY_ARCHIVE_15) \
+	-Wl,-sectcreate,__DATA,__metarc26,$(METAL_BINARY_ARCHIVE_26)
 
 HOST_SRCS := main.mm MetalRuntime.mm SaveFunc.mm MetalBackend.mm
 HOST_OBJS := $(HOST_SRCS:%.mm=$(BUILD_DIR)/%.o)
@@ -165,7 +168,7 @@ bls12-381-bench: $(BLS_TEST_ASM_BIN) $(BLS_TEST_PORTABLE_BIN)
 	$(BLS_TEST_ASM_BIN) --bench 10000
 	$(BLS_TEST_PORTABLE_BIN) --bench 10000
 
-$(TARGET): $(HOST_OBJS) $(CPP_OBJS) $(C_OBJS) $(BLS_ASM_OBJ) $(METALLIB) $(METAL_BINARY_ARCHIVE) | $(BIN_DIR)
+$(TARGET): $(HOST_OBJS) $(CPP_OBJS) $(C_OBJS) $(BLS_ASM_OBJ) $(METALLIB) $(METAL_BINARY_ARCHIVES) | $(BIN_DIR)
 	$(CXX) $(CXXFLAGS) $(HOST_OBJS) $(CPP_OBJS) $(C_OBJS) $(BLS_ASM_OBJ) -o $@ $(LDFLAGS) $(EMBED_METAL_LDFLAGS)
 
 $(ROOT_TARGET): $(TARGET)
@@ -238,11 +241,22 @@ $(METALLIB): $(METAL_AIRS)
 $(METAL_BINARY_ARCHIVE_PROFILE_HEADER): $(METAL_BINARY_ARCHIVE_BUILDER) | $(BUILD_DIR)
 	$(PYTHON3) $(METAL_BINARY_ARCHIVE_BUILDER) header --output $@
 
-$(METAL_BINARY_ARCHIVE): $(METALLIB) $(METAL_BINARY_ARCHIVE_BUILDER) | $(BUILD_DIR)
+$(METAL_BINARY_ARCHIVE_15): $(METALLIB) $(METAL_BINARY_ARCHIVE_BUILDER) | $(BUILD_DIR)
 	@$(MAKE) --no-print-directory metal-toolchain-check
 	$(PYTHON3) $(METAL_BINARY_ARCHIVE_BUILDER) build \
 		--metallib $(METALLIB) \
 		--config-output $(METAL_BINARY_ARCHIVE_CONFIG) \
+		--target air64-apple-macos15.0 \
+		--output $@
+
+# Serialize the two metal-tt passes: they share the system Metal compiler
+# service, and concurrent archive translation is both slower and less reliable.
+$(METAL_BINARY_ARCHIVE_26): $(METAL_BINARY_ARCHIVE_15) $(METALLIB) $(METAL_BINARY_ARCHIVE_BUILDER) | $(BUILD_DIR)
+	@$(MAKE) --no-print-directory metal-toolchain-check
+	$(PYTHON3) $(METAL_BINARY_ARCHIVE_BUILDER) build \
+		--metallib $(METALLIB) \
+		--config-output $(METAL_BINARY_ARCHIVE_CONFIG) \
+		--target air64-apple-macos26.0 \
 		--output $@
 
 metal-toolchain-check:

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build and verify the v16.0.1 Apple Silicon Metal binary archive."""
+"""Build and verify the v16.0.2 Apple Silicon Metal binary archive."""
 
 from __future__ import annotations
 
@@ -26,7 +26,10 @@ APPLE_GPU_SLICES = (
     "applegpu_g16s",
 )
 
-TRANSLATOR_TARGET = "air64-apple-macos26.0"
+TRANSLATOR_TARGETS = (
+    "air64-apple-macos15.0",
+    "air64-apple-macos26.0",
+)
 
 
 class FunctionConstant(NamedTuple):
@@ -75,6 +78,16 @@ def hmac_profile() -> ArchiveProfile:
     )
 
 
+def worker_profile() -> ArchiveProfile:
+    base = hmac_profile()
+    return ArchiveProfile(
+        function="worker",
+        specialized_name="worker_v16_0_2_compressed_bip32",
+        pipeline_key=base.pipeline_key,
+        constants=base.constants,
+    )
+
+
 def bip38_profile(profile: int, suffix: str) -> ArchiveProfile:
     return ArchiveProfile(
         function="workerBip38Grouped",
@@ -96,6 +109,7 @@ def bip38_profile(profile: int, suffix: str) -> ArchiveProfile:
 
 PROFILES = (
     hmac_profile(),
+    worker_profile(),
     bip38_profile(28, "non_ec"),
     bip38_profile(30, "ec"),
 )
@@ -104,11 +118,11 @@ PROFILES = (
 def validate_manifest() -> None:
     if len(APPLE_GPU_SLICES) != 11 or len(set(APPLE_GPU_SLICES)) != 11:
         raise ValueError("Apple GPU slice manifest must contain 11 unique entries")
-    if len(PROFILES) != 3:
-        raise ValueError("binary archive must contain exactly three profiles")
+    if len(PROFILES) != 4:
+        raise ValueError("binary archive must contain exactly four profiles")
     if len({profile.specialized_name for profile in PROFILES}) != len(PROFILES):
         raise ValueError("binary archive specialized names must be unique")
-    if len({profile.pipeline_key for profile in PROFILES}) != len(PROFILES):
+    if len({(profile.function, profile.pipeline_key) for profile in PROFILES}) != len(PROFILES):
         raise ValueError("binary archive pipeline keys must be unique")
     for profile in PROFILES:
         indices = [constant.index for constant in profile.constants]
@@ -285,7 +299,7 @@ def parse_args() -> argparse.Namespace:
     build_parser.add_argument("--metallib", type=pathlib.Path, required=True)
     build_parser.add_argument("--output", type=pathlib.Path, required=True)
     build_parser.add_argument("--config-output", type=pathlib.Path, required=True)
-    build_parser.add_argument("--target", default=TRANSLATOR_TARGET)
+    build_parser.add_argument("--target", choices=TRANSLATOR_TARGETS, required=True)
 
     verify_parser = subparsers.add_parser("verify")
     verify_parser.add_argument("--archive", type=pathlib.Path, required=True)

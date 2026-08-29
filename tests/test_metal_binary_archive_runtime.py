@@ -60,6 +60,43 @@ class MetalBinaryArchiveRuntimeTests(unittest.TestCase):
             output,
         )
 
+    def test_mnemonic_bip32_worker_hits_embedded_archive_in_strict_mode(self):
+        self.assertTrue(BINARY.is_file(), "build bin/METAL_CRYPTO_TOOLKIT first")
+        with tempfile.TemporaryDirectory(prefix="metal-archive-mnemonic-test.") as directory:
+            derivations = pathlib.Path(directory) / "derivations.txt"
+            derivations.write_text(
+                "".join(f"m/44'/0'/0'/0/{index}\n" for index in range(8192)),
+                encoding="utf-8",
+            )
+            result = self.run_strict(
+                [
+                    "-mnemonic",
+                    "-i",
+                    str(ROOT / "tests" / "fixtures" / "chia" / "mnemonics.txt"),
+                    "-d",
+                    str(derivations),
+                    "-d-type",
+                    "bip32",
+                    "-c",
+                    "c",
+                    "-hash",
+                    "6e3fe756cb32053a9f1096ae82f17b0a5a3ab3ad",
+                    "-save",
+                ],
+                timeout=600,
+            )
+        output = result.stdout + result.stderr
+        self.assertEqual(result.returncode, 0, msg=output)
+        self.assertNotIn("XPC_ERROR_CONNECTION_INTERRUPTED", output)
+        self.assertNotIn("metalErrorUnknown", output)
+        self.assertIn("Loaded 8192 derivations from the file", output)
+        self.assertIn("Metal binary archive selected: __metarc26", output)
+        self.assertIn(
+            "Metal binary archive hit: worker "
+            "(worker_v16_0_2_compressed_bip32)",
+            output,
+        )
+
     def test_bip38_non_ec_profile_hits_embedded_archive_in_strict_mode(self):
         self.assert_bip38_archive_hit(
             ROOT / "tests" / "fixtures" / "bip38" / "non-ec.txt",

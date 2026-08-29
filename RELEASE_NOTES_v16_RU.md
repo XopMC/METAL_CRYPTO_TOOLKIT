@@ -1,9 +1,29 @@
-# METAL_CRYPTO_TOOLKIT v16.0.1
+# METAL_CRYPTO_TOOLKIT v16.0.2
 
 v16 — крупнейшее функциональное обновление Metal-тулкита. В нём появились
 общие проверяемые планировщик, память и статистика, завершены несколько
 форматов кошельков, добавлены новые GPU-режимы поиска и восстановления, а
 оптимизированные BSGS и Kangaroo из v15 полностью сохранены.
+
+## Хот-фикс v16.0.2 для M1/Sequoia worker
+
+- Apple7 translator/runtime compiler падал при lowering общего mnemonic-file
+  `worker`: он пытался legalize 32-битную атомарную загрузку счётчика результата
+  непосредственно как 64-битную и завершался с `Compiler encountered an
+  internal error` / `metalErrorUnknown`.
+- Счётчик по-прежнему состоит из двух атомарных 32-битных слов, но теперь они
+  точно собираются через bit-cast. Полное 64-битное значение сохраняется, а
+  аварийное преобразование компилятора исключается.
+- Специализация `worker` для compressed BIP32 теперь заранее компилируется
+  вместе с существующими HMAC и двумя BIP38-профилями для всех 11 Apple Silicon
+  GPU slices. Отдельные встроенные archive нацелены на macOS 15 и macOS 26, а
+  runtime выбирает подходящий, поэтому совместимость с Sequoia не ухудшает
+  работу на Tahoe.
+- Логика поиска и steady-state скорость не меняются. Код счётчика выполняется
+  только при сохранении результата, а нативный archive исключает JIT первого
+  pipeline. Падающий Apple7-перевод и исправленный archive из 11 slices
+  воспроизведены локально, runtime-тесты прошли на M4 Max. Прямая проверка на M1
+  ожидается от автора issue, поскольку локального M1-хоста нет.
 
 ## Хот-фикс v16.0.1 для Tahoe/M1 pipeline
 
@@ -110,12 +130,12 @@ time составили 9,948247 с, 5,132319 с и 9,941461 с; population CV �
 
 ## Файлы выпуска
 
-- `METAL_CRYPTO_TOOLKIT-v16.0.1-macos-arm64.tar.gz`
-- `METAL_CRYPTO_TOOLKIT-v16.0.1-macos-arm64.tar.gz.sha256`
+- `METAL_CRYPTO_TOOLKIT-v16.0.2-macos-arm64.tar.gz`
+- `METAL_CRYPTO_TOOLKIT-v16.0.2-macos-arm64.tar.gz.sha256`
 - `METAL_CRYPTO_TOOLKIT-tools-v16-macos-arm64.tar.gz`
 - `METAL_CRYPTO_TOOLKIT-tools-v16-macos-arm64.tar.gz.sha256`
 
-Tools-архивы не изменились с v16 и повторно в выпуск v16.0.1 не загружаются.
+Tools-архивы не изменились с v16 и повторно в выпуск v16.0.2 не загружаются.
 
 До распаковки проверьте каждый архив командой
 `shasum -a 256 -c FILE.sha256`.

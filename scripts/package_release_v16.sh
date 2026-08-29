@@ -4,12 +4,13 @@ set -eu
 
 ROOT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 OUTPUT_DIR=${1:-"$ROOT_DIR/dist"}
-VERSION=v16.0.1
+VERSION=v16.0.2
 MAIN_NAME=METAL_CRYPTO_TOOLKIT
 MAIN_ARCHIVE="$MAIN_NAME-$VERSION-macos-arm64.tar.gz"
 MAIN_BINARY="$ROOT_DIR/bin/$MAIN_NAME"
 METAL_LIBRARY="$ROOT_DIR/build/default.metallib"
-METAL_BINARY_ARCHIVE="$ROOT_DIR/build/default.binary.metallib"
+METAL_BINARY_ARCHIVE_15="$ROOT_DIR/build/default.binary.macos15.metallib"
+METAL_BINARY_ARCHIVE_26="$ROOT_DIR/build/default.binary.macos26.metallib"
 METAL_BINARY_ARCHIVE_BUILDER="$ROOT_DIR/scripts/build_metal_binary_archive.py"
 PYTHON3=${PYTHON3:-python3}
 
@@ -33,12 +34,24 @@ xcrun --find metal-objdump >/dev/null 2>&1 ||
     fail "build the toolkit first: make clean && make -j\$(sysctl -n hw.ncpu)"
 [ -f "$METAL_LIBRARY" ] ||
     fail "Metal library is missing: $METAL_LIBRARY"
-[ -f "$METAL_BINARY_ARCHIVE" ] ||
-    fail "Metal binary archive is missing: $METAL_BINARY_ARCHIVE"
+[ -f "$METAL_BINARY_ARCHIVE_15" ] ||
+    fail "macOS 15 Metal binary archive is missing: $METAL_BINARY_ARCHIVE_15"
+[ -f "$METAL_BINARY_ARCHIVE_26" ] ||
+    fail "macOS 26 Metal binary archive is missing: $METAL_BINARY_ARCHIVE_26"
 
 "$PYTHON3" "$METAL_BINARY_ARCHIVE_BUILDER" verify \
-    --archive "$METAL_BINARY_ARCHIVE" ||
-    fail "Metal binary archive verification failed"
+    --archive "$METAL_BINARY_ARCHIVE_15" ||
+    fail "macOS 15 Metal binary archive verification failed"
+"$PYTHON3" "$METAL_BINARY_ARCHIVE_BUILDER" verify \
+    --archive "$METAL_BINARY_ARCHIVE_26" ||
+    fail "macOS 26 Metal binary archive verification failed"
+
+LC_ALL=C strings -a "$METAL_BINARY_ARCHIVE_15" |
+    grep -qF "air64-apple-macosx15.0.0" ||
+    fail "macOS 15 Metal binary archive has the wrong translator target"
+LC_ALL=C strings -a "$METAL_BINARY_ARCHIVE_26" |
+    grep -qF "air64-apple-macosx26.0.0" ||
+    fail "macOS 26 Metal binary archive has the wrong translator target"
 
 METAL_ARCHITECTURES=$(xcrun metal-lipo "$METAL_LIBRARY" -archs |
     tr -d '[:space:]')
@@ -66,13 +79,18 @@ otool -l "$MAIN_BINARY" |
     fail "embedded __DATA,__metallib section is missing"
 
 otool -l "$MAIN_BINARY" |
-    awk '$1 == "sectname" && $2 == "__metalarc" { found = 1 }
+    awk '$1 == "sectname" && $2 == "__metarc15" { found = 1 }
          END { exit(found ? 0 : 1) }' ||
-    fail "embedded __DATA,__metalarc section is missing"
+    fail "embedded __DATA,__metarc15 section is missing"
+
+otool -l "$MAIN_BINARY" |
+    awk '$1 == "sectname" && $2 == "__metarc26" { found = 1 }
+         END { exit(found ? 0 : 1) }' ||
+    fail "embedded __DATA,__metarc26 section is missing"
 
 "$MAIN_BINARY" -help |
-    grep -q "METAL_CRYPTO_TOOLKIT v16.0.1" ||
-    fail "release binary does not report v16.0.1"
+    grep -q "METAL_CRYPTO_TOOLKIT v16.0.2" ||
+    fail "release binary does not report v16.0.2"
 
 mkdir -p "$OUTPUT_DIR"
 for ARTIFACT in \
@@ -82,7 +100,7 @@ for ARTIFACT in \
         fail "refusing to overwrite existing artifact: $ARTIFACT"
 done
 
-STAGING_DIR=$(mktemp -d "${TMPDIR:-/tmp}/metal-crypto-v16.0.1-package.XXXXXX")
+STAGING_DIR=$(mktemp -d "${TMPDIR:-/tmp}/metal-crypto-v16.0.2-package.XXXXXX")
 trap 'rm -rf "$STAGING_DIR"' EXIT HUP INT TERM
 MAIN_STAGE="$STAGING_DIR/main"
 mkdir -p "$MAIN_STAGE"
@@ -105,5 +123,5 @@ COPYFILE_DISABLE=1 tar -czf "$OUTPUT_DIR/$MAIN_ARCHIVE" \
 )
 
 printf '%s\n' \
-    "[!] v16.0.1 release artifacts created in $OUTPUT_DIR" \
+    "[!] v16.0.2 release artifacts created in $OUTPUT_DIR" \
     "[!] $MAIN_ARCHIVE"
