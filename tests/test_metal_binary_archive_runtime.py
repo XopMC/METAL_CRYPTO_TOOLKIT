@@ -1,5 +1,6 @@
 import os
 import pathlib
+import platform
 import subprocess
 import tempfile
 import unittest
@@ -90,7 +91,8 @@ class MetalBinaryArchiveRuntimeTests(unittest.TestCase):
         self.assertNotIn("XPC_ERROR_CONNECTION_INTERRUPTED", output)
         self.assertNotIn("metalErrorUnknown", output)
         self.assertIn("Loaded 8192 derivations from the file", output)
-        self.assertIn("Metal binary archive selected: __metarc26", output)
+        section = "__metarc26" if int(platform.mac_ver()[0].split(".")[0]) >= 26 else "__metarc15"
+        self.assertIn(f"Metal binary archive selected: {section}", output)
         self.assertIn(
             "Metal binary archive hit: worker "
             "(worker_v16_0_2_compressed_bip32)",

@@ -4,7 +4,7 @@ set -eu
 
 ROOT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 OUTPUT_DIR=${1:-"$ROOT_DIR/dist"}
-VERSION=v16.0.2
+VERSION=v16.0.3
 MAIN_NAME=METAL_CRYPTO_TOOLKIT
 MAIN_ARCHIVE="$MAIN_NAME-$VERSION-macos-arm64.tar.gz"
 MAIN_BINARY="$ROOT_DIR/bin/$MAIN_NAME"
@@ -89,8 +89,8 @@ otool -l "$MAIN_BINARY" |
     fail "embedded __DATA,__metarc26 section is missing"
 
 "$MAIN_BINARY" -help |
-    grep -q "METAL_CRYPTO_TOOLKIT v16.0.2" ||
-    fail "release binary does not report v16.0.2"
+    grep -q "METAL_CRYPTO_TOOLKIT v16.0.3" ||
+    fail "release binary does not report v16.0.3"
 
 mkdir -p "$OUTPUT_DIR"
 for ARTIFACT in \
@@ -100,7 +100,7 @@ for ARTIFACT in \
         fail "refusing to overwrite existing artifact: $ARTIFACT"
 done
 
-STAGING_DIR=$(mktemp -d "${TMPDIR:-/tmp}/metal-crypto-v16.0.2-package.XXXXXX")
+STAGING_DIR=$(mktemp -d "${TMPDIR:-/tmp}/metal-crypto-v16.0.3-package.XXXXXX")
 trap 'rm -rf "$STAGING_DIR"' EXIT HUP INT TERM
 MAIN_STAGE="$STAGING_DIR/main"
 mkdir -p "$MAIN_STAGE"
@@ -123,5 +123,5 @@ COPYFILE_DISABLE=1 tar -czf "$OUTPUT_DIR/$MAIN_ARCHIVE" \
 )
 
 printf '%s\n' \
-    "[!] v16.0.2 release artifacts created in $OUTPUT_DIR" \
+    "[!] v16.0.3 release artifacts created in $OUTPUT_DIR" \
     "[!] $MAIN_ARCHIVE"

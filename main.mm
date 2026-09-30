@@ -45,6 +45,7 @@
 #include "Prng32ComboAllowlist.generated.h"
 #include "Prng64ComboAllowlist.generated.h"
 #include "MetalBackend.h"
+#include "MetalLaunchPolicy.h"
 #include "MacFileSystem.h"
 #include <random>
 #include <iomanip>
@@ -12297,7 +12298,7 @@ int main(int argc, char** argv)
         std::ios_base::sync_with_stdio(false);
         std::cin.tie(nullptr);
     }
-    printf("[!] METAL_CRYPTO_TOOLKIT v16.0.2 by @XopMC for Crypto Community\n");
+    printf("[!] METAL_CRYPTO_TOOLKIT v16.0.3 by @XopMC for Crypto Community\n");
 
     if (argc == 1) {
         printHelpShort();
@@ -15653,9 +15654,7 @@ int main(int argc, char** argv)
     if (BRAIN && metalStatus != metalSuccess) {
         return 1;
     }
-    return ((BIP38_MODE || COPAYWALLET_MODE || TERRAWALLET_MODE ||
-             BITSHARESWALLET_MODE || YOROIWALLET_MODE) &&
-            metalStatus != metalSuccess) ? 1 : 0;
+    return metalStatus != metalSuccess ? 1 : 0;
 }
 
 static inline bool crypted_base_priv_mode_selected() {
@@ -21771,6 +21770,24 @@ bool checkDevice() {
             init_log_fprintf(stderr, "[!] Auto-tuned threadgroups profile '%s': %u per GPU core (derivations: %zu)\n", tuneProfile, blocksPerSm, derivCount);
         }
 
+
+        const char* smallBatchOverride = std::getenv("METAL_SMALL_BATCH");
+        const bool smallBatchDevice = metal_crypto::isM1Device(props.name) ||
+            (smallBatchOverride != nullptr && std::strcmp(smallBatchOverride, "1") == 0);
+        const bool smallBatchMode = crypted_default_mnemonic_mode_selected() ||
+            IS_ENTROPY || SEED || HMAC || BIP32 || OLD || ARMORY || ARMORY_ROOT ||
+            (IS_PRIV && isRandom);
+        if (smallBatchDevice && smallBatchMode) {
+            const auto geometry = metal_crypto::smallBatchGeometry(
+                {BLOCK_NUMBER, BLOCK_THREADS},
+                static_cast<unsigned int>(std::max(1, props.multiProcessorCount)),
+                set_block, set_thread);
+            BLOCK_NUMBER = geometry.blocks;
+            BLOCK_THREADS = geometry.threads;
+            init_log_fprintf(stderr,
+                "[!] Metal small-batch compatibility profile: %u threadgroups x %u threads (explicit -b/-t preserved) [!]\n",
+                BLOCK_NUMBER, BLOCK_THREADS);
+        }
 
         workSize = (uint64_t)BLOCK_NUMBER * BLOCK_THREADS * THREAD_STEPS;
         init_log_fprintf(stderr, "[!] %s (%d GPU cores | Threadgroups: %d | Threads: %d)\n", props.name, props.multiProcessorCount, BLOCK_NUMBER, BLOCK_THREADS);
@@ -36912,7 +36929,11 @@ metalError_t processMetalEntropy(std::istream& stream)
         }
         STATUS = nr1Last;
     }
-    metalDeviceSynchronize();
+    metalStatus = metalDeviceSynchronize();
+    if (metalStatus != metalSuccess) {
+        fprintf(stderr, "Final entropy batch failed: %s\n", metalGetErrorString(metalStatus));
+        goto Error;
+    }
 
     if (read_result_flag_host(buffIsResult)) {
         clear_result_flag_host(buffIsResult);
@@ -39331,7 +39352,11 @@ metalError_t processMetal2(std::istream& stream)
 
 
     }
-    metalDeviceSynchronize();
+    metalStatus = metalDeviceSynchronize();
+    if (metalStatus != metalSuccess) {
+        fprintf(stderr, "Final mnemonic batch failed: %s\n", metalGetErrorString(metalStatus));
+        goto Error;
+    }
 
     if (read_result_flag_host(buffIsResult)) {
         clear_result_flag_host(buffIsResult);

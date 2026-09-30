@@ -1,9 +1,27 @@
-# METAL_CRYPTO_TOOLKIT v16.0.2
+# METAL_CRYPTO_TOOLKIT v16.0.3
 
 v16 is the largest functional update to the Metal toolkit so far. It adds a
 shared checked scheduler and memory/progress infrastructure, completes several
 existing wallet formats, introduces new GPU search and recovery modes, and
 retains the optimized BSGS and Kangaroo engines from v15.
+
+## v16.0.3 M1 execution hot-fix
+
+- Issue #3 reports an execution-stage command-buffer error on M1/Sequoia,
+  and the reporter confirmed that reducing `-t` or `-b` helps. Automatic M1
+  batches now use at most 32 threads/group and four groups/core (32 groups
+  total) in mnemonic, entropy, seed, HMAC, BIP32, old Electrum, Armory and
+  random priv. Explicit dimensions remain authoritative.
+- This reduces work/spill pressure per launch. The exact native driver cause
+  cannot be confirmed without M1 hardware; no M1 throughput gain is claimed.
+- All processing failures return a nonzero exit status. Command-buffer errors
+  include the native domain/code, kernel name, and launch dimensions.
+- `METAL_SMALL_BATCH=1` enables the same compatibility path on another GPU.
+- BIP38 keeps the earlier `8a0556d` fix distributing scrypt work across
+  32-thread groups instead of packing 256 jobs into a single group.
+- Tested on M4 Max using public vectors, multiple batches, bloom filtering,
+  continuous priv random progress and strict native archive hits. M1 retest remains
+  pending. The issue #2 reporter has confirmed the previous compiler fix.
 
 ## v16.0.2 M1/Sequoia worker hot-fix
 
@@ -129,12 +147,12 @@ SHA-256 output.
 
 ## Release files
 
-- `METAL_CRYPTO_TOOLKIT-v16.0.2-macos-arm64.tar.gz`
-- `METAL_CRYPTO_TOOLKIT-v16.0.2-macos-arm64.tar.gz.sha256`
+- `METAL_CRYPTO_TOOLKIT-v16.0.3-macos-arm64.tar.gz`
+- `METAL_CRYPTO_TOOLKIT-v16.0.3-macos-arm64.tar.gz.sha256`
 - `METAL_CRYPTO_TOOLKIT-tools-v16-macos-arm64.tar.gz`
 - `METAL_CRYPTO_TOOLKIT-tools-v16-macos-arm64.tar.gz.sha256`
 
 The tools archives are unchanged from v16 and are not republished in the
-v16.0.2 release.
+v16.0.3 release.
 
 Verify each archive with `shasum -a 256 -c FILE.sha256` before extraction.

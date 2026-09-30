@@ -9,7 +9,7 @@
   <img alt="Platform" src="https://img.shields.io/badge/platform-macOS%2015%2B-111827?style=for-the-badge">
   <img alt="Architecture" src="https://img.shields.io/badge/architecture-Apple%20Silicon-0f766e?style=for-the-badge">
   <img alt="GPU API" src="https://img.shields.io/badge/GPU-Metal%203-2563eb?style=for-the-badge">
-  <img alt="Version" src="https://img.shields.io/badge/version-v16.0.2-b45309?style=for-the-badge">
+  <img alt="Version" src="https://img.shields.io/badge/version-v16.0.3-b45309?style=for-the-badge">
   <a href="#support-the-project"><img alt="Sponsor" src="https://img.shields.io/badge/Sponsor-Support%20development-EA4AAA?style=for-the-badge&amp;logo=githubsponsors&amp;logoColor=white"></a>
 </p>
 
@@ -20,6 +20,28 @@ Author: Mikhail Khoroshavin, also known as **XopMC**
 ## English
 
 ### Changelog
+
+#### v16.0.3
+
+M1 execution compatibility hot-fix (issue #3):
+
+- M1/Pro/Max/Ultra now use smaller automatic batches in mnemonic, entropy,
+  seed, HMAC, BIP32, old Electrum, Armory, and random private-key modes:
+  at most 32 threads per group and four groups per GPU core, capped at 32
+  groups total. Explicit `-t` and `-b` still override their respective defaults.
+- This applies the reporter's successful smaller-launch workaround automatically.
+  It reduces per-launch work and spill pressure; it is a compatibility setting,
+  not a measured M1 speed improvement. BIP38 retains its separate 32-thread
+  scrypt scheduling, including the throughput fix from commit `8a0556d`.
+- Processing failures now return a nonzero exit status in every mode. Command
+  buffer errors include the native error domain/code and kernel launch size.
+- `METAL_SMALL_BATCH=1` enables the same profile on another GPU for diagnosis.
+  For example: `METAL_SMALL_BATCH=1 ./METAL_CRYPTO_TOOLKIT -mnemonic -i mnemonics.txt -d derivations.txt -bf filter.blf`.
+
+The reduced-batch path is tested on M4 Max with exact public-vector results,
+multiple input batches and a bloom filter. No M1 device is available locally;
+the reporter's M1 retest is required to confirm issue #3. Issue #2's previous
+compiler fix has already been confirmed by its reporter on M1/Sequoia.
 
 #### v16.0.2
 
@@ -623,7 +645,7 @@ under GPLv3. See `COPYING.GPLv3.txt` and `THIRD_PARTY_NOTICES.md`.
 
 ### Requirements
 
-#### Ready-to-run v16.0.2 release
+#### Ready-to-run v16.0.3 release
 
 - Apple Silicon Mac (`arm64`);
 - macOS 15.0 or newer;
@@ -642,10 +664,10 @@ The release contains one executable. The Metal library is embedded in its Mach-O
 
 ### Download, verify, and run
 
-Download these two files from the [v16.0.2 release](https://github.com/XopMC/METAL_CRYPTO_TOOLKIT/releases/tag/v16.0.2):
+Download these two files from the [v16.0.3 release](https://github.com/XopMC/METAL_CRYPTO_TOOLKIT/releases/tag/v16.0.3):
 
-- `METAL_CRYPTO_TOOLKIT-v16.0.2-macos-arm64.tar.gz`
-- `METAL_CRYPTO_TOOLKIT-v16.0.2-macos-arm64.tar.gz.sha256`
+- `METAL_CRYPTO_TOOLKIT-v16.0.3-macos-arm64.tar.gz`
+- `METAL_CRYPTO_TOOLKIT-v16.0.3-macos-arm64.tar.gz.sha256`
 
 The unchanged optional address-conversion package remains on the v16 release:
 
@@ -657,8 +679,8 @@ It is needed only when printable cryptocurrency addresses must be converted into
 Then run:
 
 ```bash
-shasum -a 256 -c METAL_CRYPTO_TOOLKIT-v16.0.2-macos-arm64.tar.gz.sha256
-tar -xzf METAL_CRYPTO_TOOLKIT-v16.0.2-macos-arm64.tar.gz
+shasum -a 256 -c METAL_CRYPTO_TOOLKIT-v16.0.3-macos-arm64.tar.gz.sha256
+tar -xzf METAL_CRYPTO_TOOLKIT-v16.0.3-macos-arm64.tar.gz
 chmod +x METAL_CRYPTO_TOOLKIT
 ./METAL_CRYPTO_TOOLKIT -help
 ```
@@ -3965,6 +3987,27 @@ xattr -d com.apple.quarantine METAL_CRYPTO_TOOLKIT
 
 ### Изменения
 
+#### v16.0.3
+
+Хот-фикс выполнения Metal на M1 (issue #3):
+
+- Для M1/Pro/Max/Ultra уменьшены автоматические batch в режимах mnemonic,
+  entropy, seed, HMAC, BIP32, old Electrum, Armory и random priv: не более 32
+  потоков в группе и четырёх групп на ядро GPU, максимум 32 группы всего.
+  Явные `-t` и `-b` по-прежнему задают соответствующий размер.
+- Успешный обход клиента с меньшим запуском теперь применяется автоматически.
+  Это настройка совместимости, а не измеренное ускорение M1. BIP38 сохраняет
+  отдельное scrypt-планирование по 32 потока и исправление скорости `8a0556d`.
+- Ошибки обработки возвращают ненулевой exit status во всех режимах. Ошибка
+  command buffer теперь содержит native domain/code, kernel и размер запуска.
+- `METAL_SMALL_BATCH=1` включает тот же профиль на другом GPU для диагностики.
+  Пример: `METAL_SMALL_BATCH=1 ./METAL_CRYPTO_TOOLKIT -mnemonic -i mnemonics.txt -d derivations.txt -bf filter.blf`.
+
+Малые batch проверены на M4 Max по точным результатам публичного вектора,
+нескольким входным batch и bloom-фильтру. Локального M1 нет; подтверждение
+issue #3 ожидается от клиента. Предыдущий compiler fix из issue #2 клиент
+уже подтвердил на M1/Sequoia.
+
 #### v16.0.2
 
 Хот-фикс Metal compiler для M1/Sequoia:
@@ -4580,7 +4623,7 @@ GNU GPLv3. Поэтому сборки, включающие этот режим
 
 ### Системные требования
 
-#### Готовый выпуск v16.0.2
+#### Готовый выпуск v16.0.3
 
 - Mac на Apple Silicon (`arm64`);
 - macOS 15.0 или новее;
@@ -4599,10 +4642,10 @@ GNU GPLv3. Поэтому сборки, включающие этот режим
 
 ### Загрузка, проверка и первый запуск
 
-На странице [выпуска v16.0.2](https://github.com/XopMC/METAL_CRYPTO_TOOLKIT/releases/tag/v16.0.2) загрузите:
+На странице [выпуска v16.0.3](https://github.com/XopMC/METAL_CRYPTO_TOOLKIT/releases/tag/v16.0.3) загрузите:
 
-- `METAL_CRYPTO_TOOLKIT-v16.0.2-macos-arm64.tar.gz`;
-- `METAL_CRYPTO_TOOLKIT-v16.0.2-macos-arm64.tar.gz.sha256`.
+- `METAL_CRYPTO_TOOLKIT-v16.0.3-macos-arm64.tar.gz`;
+- `METAL_CRYPTO_TOOLKIT-v16.0.3-macos-arm64.tar.gz.sha256`.
 
 Неизменённый необязательный набор конвертеров остаётся в выпуске v16:
 
@@ -4614,8 +4657,8 @@ GNU GPLv3. Поэтому сборки, включающие этот режим
 Положите оба файла в одну папку и выполните:
 
 ```bash
-shasum -a 256 -c METAL_CRYPTO_TOOLKIT-v16.0.2-macos-arm64.tar.gz.sha256
-tar -xzf METAL_CRYPTO_TOOLKIT-v16.0.2-macos-arm64.tar.gz
+shasum -a 256 -c METAL_CRYPTO_TOOLKIT-v16.0.3-macos-arm64.tar.gz.sha256
+tar -xzf METAL_CRYPTO_TOOLKIT-v16.0.3-macos-arm64.tar.gz
 chmod +x METAL_CRYPTO_TOOLKIT
 ./METAL_CRYPTO_TOOLKIT -help
 ```

@@ -103,7 +103,7 @@ CPP_OBJS := $(CPP_SRCS:%.cpp=$(BUILD_DIR)/%.o)
 C_OBJS := $(C_SRCS:%.c=$(BUILD_DIR)/%.o)
 DEPS := $(HOST_OBJS:.o=.d) $(CPP_OBJS:.o=.d) $(C_OBJS:.o=.d)
 
-LOCALIZED_HOST_HEADERS := Makefile KernelRuntime.h MacFileSystem.h Poetry.h PoetryHost.h SecpPrecompute.h \
+LOCALIZED_HOST_HEADERS := Makefile KernelRuntime.h MetalLaunchPolicy.h MacFileSystem.h Poetry.h PoetryHost.h SecpPrecompute.h \
 	main_priv_recovery_runtime.h xor_filter_core.h \
 	Kangaroo/KangarooMode.h \
 	Bsgs/BsgsMode.h \
@@ -145,7 +145,7 @@ BLS_TEST_PORTABLE_BIN := $(BUILD_DIR)/tests/bls12_381_vectors_portable
 BLS_TEST_PORTABLE_C := $(BUILD_DIR)/tests/blst_client_portable.o
 
 .PHONY: all host clean metal-toolchain-check tools tools-clean \
-	illbloom-prng-test bls12-381-test bls12-381-bench
+	illbloom-prng-test bls12-381-test bls12-381-bench metal-launch-policy-test
 
 all: $(TARGET) $(ROOT_TARGET) $(BLS_TEST_ASM_BIN) $(BLS_TEST_PORTABLE_BIN)
 
@@ -163,6 +163,13 @@ illbloom-prng-test: $(ILLBLOOM_TEST_BIN) $(ILLBLOOM_TEST_METALLIB)
 bls12-381-test: $(BLS_TEST_ASM_BIN) $(BLS_TEST_PORTABLE_BIN)
 	$(BLS_TEST_ASM_BIN)
 	$(BLS_TEST_PORTABLE_BIN)
+
+metal-launch-policy-test: $(BUILD_DIR)/tests/metal_launch_policy_test
+	$<
+
+$(BUILD_DIR)/tests/metal_launch_policy_test: tests/metal_launch_policy_test.cpp MetalLaunchPolicy.h | $(BUILD_DIR)
+	@mkdir -p $(dir $@)
+	$(CXX) $(CXXFLAGS) $< -o $@
 
 bls12-381-bench: $(BLS_TEST_ASM_BIN) $(BLS_TEST_PORTABLE_BIN)
 	$(BLS_TEST_ASM_BIN) --bench 10000

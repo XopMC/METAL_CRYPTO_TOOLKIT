@@ -717,7 +717,16 @@ Status Runtime::synchronize(Stream* requestedStream) const {
     }
     for (id<MTLCommandBuffer> commandBuffer : stream->commandBuffers_) {
         if ([commandBuffer error] != nil) {
-            const std::string message = nsErrorMessage([commandBuffer error]);
+            NSError* error = [commandBuffer error];
+            std::ostringstream details;
+            details << nsErrorMessage(error)
+                    << " [domain=" << [[error domain] UTF8String]
+                    << ", code=" << static_cast<long long>([error code]);
+            if ([commandBuffer label] != nil) {
+                details << ", launch=" << [[commandBuffer label] UTF8String];
+            }
+            details << "]";
+            const std::string message = details.str();
             stream->commandBuffers_.clear();
             stream->pendingHostCopies_.clear();
             return Status::failure("Metal command buffer failed: " + message);
@@ -1088,6 +1097,10 @@ Status Runtime::launch1D(const std::string& functionName,
     }
 
     id<MTLCommandBuffer> commandBuffer = [stream->queue_ commandBuffer];
+    std::ostringstream launchLabel;
+    launchLabel << functionName << " threads=" << totalThreads
+                << " threadgroup=" << threadsPerThreadgroup;
+    commandBuffer.label = [NSString stringWithUTF8String:launchLabel.str().c_str()];
     id<MTLComputeCommandEncoder> encoder = [commandBuffer computeCommandEncoder];
     [encoder setComputePipelineState:pipeline];
     if (bind) {
